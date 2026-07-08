@@ -1,0 +1,9 @@
+# InfiniEnv benchmark prompt suite (mvp_tasks)
+Create a kitchen where the agent must pick up a can from a table and bring it to the sink.
+Create a small warehouse where the agent must pick up a package and deliver it to the loading dock.
+Create a three-room maze where the agent must find a key, unlock a door, and reach the exit.
+Create a cluttered room where the agent must navigate around furniture to reach a laptop.
+Create a warehouse where the agent must find a key, unlock a door, pick up a package, and deliver it to the exit.
+Generate a maze with obstacles the agent must navigate around to reach the exit.
+Create a kitchen where the agent starts near the door, picks up a can from a table, and drops it in the sink.
+Create a warehouse with a locked door, a key, and a package delivery objective.

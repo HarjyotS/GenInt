@@ -1,0 +1,299 @@
+{
+  "version": "0.1",
+  "seed": 3,
+  "metadata": {
+    "name": "obstacle_course_reach",
+    "prompt": "example obstacle_course",
+    "theme": "obstacle_course"
+  },
+  "grid": {
+    "width": 16,
+    "height": 12,
+    "tile_size": 32
+  },
+  "agent": {
+    "id": "agent",
+    "x": 1,
+    "y": 10,
+    "inventory": []
+  },
+  "objects": [
+    {
+      "id": "exit_1",
+      "type": "exit",
+      "x": 13,
+      "y": 6,
+      "solid": false,
+      "portable": false,
+      "locked": false,
+      "key_id": null
+    },
+    {
+      "id": "box_0",
+      "type": "box",
+      "x": 12,
+      "y": 9,
+      "solid": true,
+      "portable": false,
+      "locked": false,
+      "key_id": null
+    },
+    {
+      "id": "box_1",
+      "type": "box",
+      "x": 12,
+      "y": 3,
+      "solid": true,
+      "portable": false,
+      "locked": false,
+      "key_id": null
+    },
+    {
+      "id": "box_2",
+      "type": "box",
+      "x": 12,
+      "y": 2,
+      "solid": true,
+      "portable": false,
+      "locked": false,
+      "key_id": null
+    },
+    {
+      "id": "box_3",
+      "type": "box",
+      "x": 10,
+      "y": 6,
+      "solid": true,
+      "portable": false,
+      "locked": false,
+      "key_id": null
+    },
+    {
+      "id": "distractor_1",
+      "type": "distractor",
+      "x": 10,
+      "y": 4,
+      "solid": false,
+      "portable": true,
+      "locked": false,
+      "key_id": null
+    }
+  ],
+  "walls": [
+    {
+      "x": 0,
+      "y": 0
+    },
+    {
+      "x": 0,
+      "y": 1
+    },
+    {
+      "x": 0,
+      "y": 2
+    },
+    {
+      "x": 0,
+      "y": 3
+    },
+    {
+      "x": 0,
+      "y": 4
+    },
+    {
+      "x": 0,
+      "y": 5
+    },
+    {
+      "x": 0,
+      "y": 6
+    },
+    {
+      "x": 0,
+      "y": 7
+    },
+    {
+      "x": 0,
+      "y": 8
+    },
+    {
+      "x": 0,
+      "y": 9
+    },
+    {
+      "x": 0,
+      "y": 10
+    },
+    {
+      "x": 0,
+      "y": 11
+    },
+    {
+      "x": 1,
+      "y": 0
+    },
+    {
+      "x": 1,
+      "y": 11
+    },
+    {
+      "x": 2,
+      "y": 0
+    },
+    {
+      "x": 2,
+      "y": 11
+    },
+    {
+      "x": 3,
+      "y": 0
+    },
+    {
+      "x": 3,
+      "y": 11
+    },
+    {
+      "x": 4,
+      "y": 0
+    },
+    {
+      "x": 4,
+      "y": 11
+    },
+    {
+      "x": 5,
+      "y": 0
+    },
+    {
+      "x": 5,
+      "y": 11
+    },
+    {
+      "x": 6,
+      "y": 0
+    },
+    {
+      "x": 6,
+      "y": 11
+    },
+    {
+      "x": 7,
+      "y": 0
+    },
+    {
+      "x": 7,
+      "y": 11
+    },
+    {
+      "x": 8,
+      "y": 0
+    },
+    {
+      "x": 8,
+      "y": 11
+    },
+    {
+      "x": 9,
+      "y": 0
+    },
+    {
+      "x": 9,
+      "y": 11
+    },
+    {
+      "x": 10,
+      "y": 0
+    },
+    {
+      "x": 10,
+      "y": 11
+    },
+    {
+      "x": 11,
+      "y": 0
+    },
+    {
+      "x": 11,
+      "y": 11
+    },
+    {
+      "x": 12,
+      "y": 0
+    },
+    {
+      "x": 12,
+      "y": 11
+    },
+    {
+      "x": 13,
+      "y": 0
+    },
+    {
+      "x": 13,
+      "y": 11
+    },
+    {
+      "x": 14,
+      "y": 0
+    },
+    {
+      "x": 14,
+      "y": 11
+    },
+    {
+      "x": 15,
+      "y": 0
+    },
+    {
+      "x": 15,
+      "y": 1
+    },
+    {
+      "x": 15,
+      "y": 2
+    },
+    {
+      "x": 15,
+      "y": 3
+    },
+    {
+      "x": 15,
+      "y": 4
+    },
+    {
+      "x": 15,
+      "y": 5
+    },
+    {
+      "x": 15,
+      "y": 6
+    },
+    {
+      "x": 15,
+      "y": 7
+    },
+    {
+      "x": 15,
+      "y": 8
+    },
+    {
+      "x": 15,
+      "y": 9
+    },
+    {
+      "x": 15,
+      "y": 10
+    },
+    {
+      "x": 15,
+      "y": 11
+    }
+  ],
+  "goals": [
+    {
+      "id": "reach_exit",
+      "type": "reach",
+      "target_id": "exit_1"
+    }
+  ]
+}

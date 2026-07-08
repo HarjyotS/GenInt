@@ -1,0 +1,10 @@
+# level 1
+Create a warehouse with an open room where the agent picks up a single item and delivers it to a nearby target.
+# level 2
+Create a warehouse where the agent must navigate around a piece of furniture to reach and pick up an item.
+# level 3
+Create a warehouse with two connected rooms where the agent picks up an item in the first room and delivers it to a target in the second room.
+# level 4
+Create a warehouse where the agent must find a key, unlock a locked door, and deliver a package to the exit on the other side.
+# level 5
+Create a large warehouse with a decoy object that looks useful but is not part of the task, and a longer path the agent must take to find a key, unlock a door, and deliver a package to a far exit.
