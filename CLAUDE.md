@@ -97,7 +97,7 @@ GenInt/                            # repo root
 │   └── curriculum_warehouse.txt
 ├── runs/                          # generated run output (gitignored except .gitkeep)
 ├── src/infinienv/
-│   ├── cli.py                     # generate/validate/solve/play/benchmark/mutate/curriculum/export-dataset
+│   ├── cli.py                     # generate/validate/solve/play/benchmark/mutate/curriculum/export-dataset/gui
 │   ├── schema/
 │   │   └── scene_schema.py        # SceneSpec, Mechanics, InteractGoal, etc. (pydantic)
 │   ├── llm/
@@ -147,9 +147,15 @@ GenInt/                            # repo root
 │   │   └── benchmark.py             # run_benchmark() over a prompt file
 │   ├── export/
 │   │   └── dataset.py                # export_dataset(): runs dir -> JSONL with programmatic_reward
-│   └── artifacts/
-│       ├── writer.py                  # resolve_out_dir (path-traversal-safe), JSON/report writers
-│       └── report.py                  # report.md builder
+│   ├── artifacts/
+│   │   ├── writer.py                  # resolve_out_dir (path-traversal-safe), JSON/report writers
+│   │   └── report.py                  # report.md builder
+│   └── gui/
+│       ├── app.py                      # Flask app: SSE-streamed generate jobs, artifact serving,
+│       │                               # runs listing -- a frontend on run_generation, not a
+│       │                               # second implementation. Optional dep (`pip install
+│       │                               # infinienv[gui]`), lazily imported.
+│       └── templates/index.html          # single page, vanilla JS, no build step
 └── tests/                              # one file per module above, plus test_cli.py, test_compiler.py
 ```
 
@@ -541,11 +547,16 @@ python -m infinienv curriculum --theme warehouse --levels 5 --out examples/curri
 python -m infinienv curriculum --theme warehouse --levels 5 --run --provider mock --seed 1 --out runs/curriculum
 
 python -m infinienv export-dataset runs/curriculum --out runs/curriculum/dataset.jsonl
+
+python -m infinienv gui [--host 127.0.0.1] [--port 5050] [--no-browser]  # local web GUI
 ```
 
 Every `generate` writes stage-by-stage progress to stdout (`[n/total] ...`) ending in a clear
 `Result: SUCCESS`/`FAILED (see report.md)`. Design all CLI output for a reviewer skimming a
-terminal, not just for a human who already knows what happened.
+terminal, not just for a human who already knows what happened. `gui` is a thin Flask frontend on
+the exact same `run_generation` pipeline, streaming that same stage-by-stage progress live over
+SSE instead of stdout — see `gui/app.py`. It requires `pip install infinienv[gui]`; nothing else
+in the project depends on `flask`.
 
 Artifacts written per successful `generate` run:
 
@@ -589,8 +600,8 @@ Python 3.11+.
 Prefer: pydantic models for structured specs, type hints everywhere, clear module boundaries
 (section 3's package layout), deterministic seeds, small pure functions, explicit exceptions for
 invalid state (`ActionError`, `PlanError`, `ProviderError`, `GenerationFailedError`), pytest,
-lazy imports for optional/heavy dependencies (every provider module, `assets/generator_openai.py`)
-so `mock`-only usage never needs them installed.
+lazy imports for optional/heavy dependencies (every provider module, `assets/generator_openai.py`,
+`gui/app.py`'s `flask` import) so `mock`-only, no-GUI usage never needs them installed.
 
 Avoid: hidden global state, nondeterministic tests, giant files, broad `except Exception` without
 a clear reason, model-authored code execution (section 2), adding a mechanic/effect op without a
@@ -630,6 +641,10 @@ test_dataset_export.py           - per-goal programmatic_reward, not a flattened
 test_compiler.py                  - --no-fallback raises with the real root cause surfaced, not
                                      just the last (often generic) history entry
 test_cli.py                        - generate/validate/solve write expected artifacts
+test_gui.py                         - Flask test client (no live server needed): index page,
+                                       validation errors, a full generate job consumed as real SSE
+                                       events (stage + done), artifact serving incl. path-traversal
+                                       rejection, runs listing
 ```
 
 Before considering a change done:

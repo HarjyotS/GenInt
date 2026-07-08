@@ -91,7 +91,7 @@ are owned by this repo's Python code (`generation/`, `evaluation/`, `artifacts/`
 
 ## Extended mechanics: model-defined object types and interactions
 
-The base schema (see CLAUDE.md section 7) is a small, fixed, validator-enforced vocabulary --
+The base schema (see CLAUDE.md section 4) is a small, fixed, validator-enforced vocabulary --
 deliberately, so solvability stays guaranteed rather than hoped-for. But not every task fits
 `table`/`can`/`sink`/`deliver`. So a scene can declare its own `mechanics`:
 
@@ -102,7 +102,7 @@ deliberately, so solvability stays guaranteed rather than hoped-for. But not eve
   **effects** -- `remove_held_object`, `drop_held_object_at_target`, `remove_object`,
   `unlock_target`, `set_object_property`, `teleport_agent`. This is a fixed, safe, declarative
   vocabulary interpreted by `engine/interactions.py`, never executed code (see CLAUDE.md section
-  28 for the full design rationale and why this doesn't violate "the LLM is never the source of
+  5 for the full design rationale and why this doesn't violate "the LLM is never the source of
   truth").
 - A goal `{"type": "interact", "interaction_id": ..., "target_id": ...}` is satisfied once that
   interaction has actually been performed -- planned (path to target, pick up a matching object
@@ -146,7 +146,27 @@ python -m infinienv mutate runs/demo/scene.json --count 10 --out runs/mutations
 python -m infinienv curriculum --theme warehouse --levels 5 --out examples/curriculum_warehouse.txt
 python -m infinienv curriculum --theme warehouse --levels 5 --run --provider mock --out runs/curriculum
 python -m infinienv export-dataset runs/curriculum --out runs/curriculum/dataset.jsonl
+python -m infinienv gui                                # local web GUI, see below
 ```
+
+## Web GUI
+
+```bash
+pip install -e ".[gui]"
+python -m infinienv gui   # opens http://127.0.0.1:5050
+```
+
+A single local page: type a prompt, toggle every `generate` setting (provider, seed, `--assets`
+mode, `--no-fallback`, max repair attempts, output directory), hit Generate, and watch it work —
+stage-by-stage progress streams in live (Server-Sent Events) exactly as it happens, the same
+`[n/total] ...` messages the CLI prints, followed by `render.png`/`replay.gif` inline, the metrics
+table, and the full `scene.json`. A "Recent runs" strip on the left browses every past run under
+`runs/` (from the CLI or the GUI) so you can revisit an old result without regenerating it.
+
+This is a thin frontend on the exact same `evaluation.runner.run_generation` pipeline the CLI
+calls — no separate implementation to keep in sync. `flask` is an optional dependency
+(`pip install infinienv[gui]`); nothing else in the project needs it, and `python -m infinienv
+gui` gives a clear install hint if it's missing.
 
 ## Asset pipeline
 
@@ -238,7 +258,7 @@ following were deliberately *not* done, to avoid rewriting a working system for 
 - **No pygame-ce renderer** — pygame needs an SDL display context that's a real risk headless;
   Pillow already produces `render.png`/`replay.gif` reliably, and now optionally with real
   sprites via the asset pipeline above.
-- **2D-first by design.** See CLAUDE.md section 25 for the planned 3D field additions and
+- **2D-first by design.** See CLAUDE.md section 17 for the planned 3D field additions and
   exporter targets (Godot, Isaac Lab, MuJoCo, ...).
 - **`anthropic` provider is implemented but untested against a live key** in this session (no
   `ANTHROPIC_API_KEY` was available) — it follows the same protocol and JSON-parsing path as

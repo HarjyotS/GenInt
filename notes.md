@@ -379,3 +379,58 @@ adopting it would trade a hard guarantee for a soft one while being told the opp
 Explained the conflict and asked rather than either building it or refusing outright; user chose
 to defer sandbox agents and continue extending capability through the existing effect-op
 vocabulary instead (echoed in the new CLAUDE.md section 0).
+
+## CLAUDE.md rewrite: build spec -> operating rules for the current system
+
+Asked to refactor the entire file for "significant growth and feature expansion." Previous shape
+was an MVP build spec (P0/P1/P2 priorities, a "suggested structure" that no longer matched the
+real tree, an appendix section 28 bolted on for extended mechanics) written before any code
+existed. Rewrote end-to-end into a description of the system as it actually is: accurate current
+file tree, the full `SceneSpec` schema (base vocab + mechanics as equally first-class, not
+base-vs-extension), all four providers with their real tool lists, the complete CLI surface, both
+caches, and a permanent non-negotiable-invariants section up top (validator wins, no
+model-authored code execution even sandboxed) that's meant to survive every future round of
+growth without needing another rewrite. Verified every concrete claim (schema value lists via
+`OBJECT_TYPE_VALUES`/`ACTION_TYPES`/`GOAL_TYPES`/`EFFECT_OP_VALUES`, every CLI flag via `--help`
+on each subcommand, the `.env` key-precedence logic, the actual file tree via `find`) against the
+running code rather than reconstructing from memory or from what I intended to build — caught and
+fixed one real inaccuracy this way (`OP_KEY` unconditionally overwrites `OPENAI_API_KEY` when
+set, not just as a fallback -- the first draft had the fallback framing backwards).
+
+## Local web GUI: Flask, SSE for live progress, thin frontend on run_generation
+
+Asked for "a simple gui with all the settings I can toggle" for prompts, then interrupted a
+`pip install flask` mid-flight specifically to add "i also want it to print the current step" --
+i.e. live per-stage progress, not a spinner-then-final-result. Redesigned around that requirement
+before writing any code: `POST /api/generate` starts the real `run_generation` call in a
+background thread (a `queue.Queue` per job collects `on_stage` callback messages), returns a
+`job_id` immediately, and `GET /api/stream/<job_id>` is a Server-Sent-Events endpoint that yields
+each stage message as it's queued (plus periodic `: keep-alive` comment lines so the connection
+survives a slow real API call without the browser timing it out) and a final `done`/`error`
+event. This needed no new dependency beyond Flask itself -- SSE is just a streaming HTTP response
+with a specific content-type and event framing, not a separate protocol/library.
+
+Deliberately a *frontend*, not a second implementation: the Flask routes call the exact same
+`evaluation.runner.run_generation` the CLI calls, with the exact same `on_stage` callback
+mechanism already built for the CLI's `[n/total] ...` output -- the GUI just consumes it over SSE
+instead of printing to stdout. Every `generate` setting is a real form control (provider, seed,
+`--assets` mode, `--no-fallback`, max repair attempts, output directory), not a subset. Added a
+"recent runs" panel (`GET /api/runs`, scans `runs/` for any dir with `scene.json`) as a
+complementary feature so the GUI is useful for browsing prior work too, not just kicking off new
+jobs -- confirmed live it correctly picked up every run from earlier in this session, not just
+GUI-created ones, since it's reading the real `runs/` tree.
+
+`flask` is a new optional dependency (`pip install infinienv[gui]`), lazily imported inside
+`gui/app.py` and only actually needed by `infinienv gui` -- consistent with how every other
+optional dependency in this project is handled (`openai-agents`, `openai`, `anthropic`). Path
+traversal on the artifact-serving route is guarded the same way `artifacts/writer.py` guards
+output directories (`os.path.commonpath` check against cwd).
+
+Verified two ways: `tests/test_gui.py` (6 cases) uses Flask's test client with the `mock`
+provider -- including a full real SSE stream consumed and parsed event-by-event (not just
+checking the route returns 200), and a path-traversal rejection test. Then a genuine live smoke
+test: started the actual server as a background process, hit it with real `curl`/SSE against both
+`mock` (fast) and `openai_agents` (real API call -- confirmed the `: keep-alive` lines actually
+appear during the real network wait, and the run validated on the first try, rendered correctly,
+and appeared in `/api/runs` afterward). Cleaned up the test run directories and killed the test
+server before finishing.

@@ -209,6 +209,13 @@ def cmd_export_dataset(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_gui(args: argparse.Namespace) -> int:
+    from infinienv.gui.app import launch
+
+    launch(host=args.host, port=args.port, open_browser=not args.no_browser)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="infinienv", description="InfiniEnv: infinite environment generation via an agent harness.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -289,6 +296,12 @@ def build_parser() -> argparse.ArgumentParser:
     ed.add_argument("runs_dir", help="Directory containing run subdirectories (each with scene.json + metrics.json).")
     ed.add_argument("--out", required=True)
     ed.set_defaults(func=cmd_export_dataset)
+
+    gu = sub.add_parser("gui", help="Launch the local web GUI (requires `pip install infinienv[gui]`).")
+    gu.add_argument("--host", default="127.0.0.1")
+    gu.add_argument("--port", type=int, default=5050)
+    gu.add_argument("--no-browser", action="store_true", help="Don't auto-open a browser tab.")
+    gu.set_defaults(func=cmd_gui)
 
     return parser
 
