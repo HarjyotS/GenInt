@@ -14,14 +14,32 @@ from infinienv.llm.base import ProviderError
 
 SPRITE_PROMPT_TEMPLATE = (
     "Top-down 2D game sprite of: {desc}. Style: clean pixel art, readable at 32x32, "
-    "centered object, no text, no labels, plain light background, isolated object, "
-    "suitable for a tile-based game."
+    "centered object, no text, no labels, isolated object on a transparent background, "
+    "suitable for a tile-based game. The object should fill nearly the entire frame "
+    "edge-to-edge with minimal empty margin -- no small icon floating in a large blank "
+    "canvas; it needs to read clearly when scaled down and tiled edge-to-edge with other "
+    "sprites."
+)
+
+# Some types aren't "an object sitting on a tile" -- they ARE the tile's surface
+# material (wall, floor). Those need a seamless, full-bleed texture, not a
+# cropped/isolated object on a transparent background, or they render with visible
+# padding around a "chunk" floating in the cell instead of a continuous surface.
+TEXTURE_TILE_TYPES: set[str] = {"wall", "floor"}
+
+TEXTURE_PROMPT_TEMPLATE = (
+    "Top-down 2D game texture tile of: {desc}. Style: seamless tileable texture, "
+    "pixel art, no text, no labels. The texture must cover the ENTIRE square canvas "
+    "edge-to-edge with zero border, zero margin, and zero transparency -- an opaque "
+    "surface filling 100% of the frame, not an isolated object floating in empty "
+    "space. It will be tiled edge-to-edge with identical copies to form a continuous "
+    "surface, so any border or vignette would show as a visible seam."
 )
 
 OBJECT_DESCRIPTIONS: dict[str, str] = {
     "agent": "a small friendly robot character",
-    "wall": "a stone brick wall tile",
-    "floor": "a plain wood floor tile",
+    "wall": "a stone brick wall",
+    "floor": "plain wood flooring planks",
     "table": "a wooden table",
     "can": "a metal soda can",
     "box": "a wooden crate",
@@ -35,6 +53,33 @@ OBJECT_DESCRIPTIONS: dict[str, str] = {
 }
 
 
+def _crop_to_content(img, *, pad_ratio: float = 0.03):
+    """Crop tightly to the non-transparent pixels, then pad to a square.
+
+    Even with a transparent background, the model tends to draw the object with
+    margin inside the 1024x1024 canvas; without this, sprites look small and
+    sparse once resized down to tile size instead of filling the cell.
+    """
+    from PIL import Image
+
+    rgba = img.convert("RGBA")
+    alpha = rgba.split()[3]
+    bbox = alpha.getbbox()
+    if bbox is None:
+        return rgba
+    w, h = rgba.size
+    pad = int(max(w, h) * pad_ratio)
+    x0, y0, x1, y1 = bbox
+    x0, y0 = max(0, x0 - pad), max(0, y0 - pad)
+    x1, y1 = min(w, x1 + pad), min(h, y1 + pad)
+    cropped = rgba.crop((x0, y0, x1, y1))
+    cw, ch = cropped.size
+    side = max(cw, ch)
+    square = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+    square.paste(cropped, ((side - cw) // 2, (side - ch) // 2), cropped)
+    return square
+
+
 def generate_sprite(object_type: str, cache_dir: str, *, model: str | None = None) -> str:
     """Generate (or reuse a cached) sprite for `object_type`. Returns the PNG path."""
     if not os.environ.get("OPENAI_API_KEY"):
@@ -44,16 +89,25 @@ def generate_sprite(object_type: str, cache_dir: str, *, model: str | None = Non
     except ImportError as exc:
         raise ProviderError("The 'openai' package is not installed.") from exc
 
-    # NOTE: PATHWAY.md names "gpt-image-2"; the currently-released OpenAI image model
-    # is "gpt-image-1", so that's the default here. Overridable via INFINIENV_IMAGE_MODEL
-    # in case a newer model name becomes available.
+    # gpt-image-1 (not gpt-image-2): per OpenAI's own docs, gpt-image-2 explicitly does
+    # NOT support background="transparent" ("Requests with background: transparent
+    # aren't supported for this model"); gpt-image-1/1.5/1-mini do. Overridable via
+    # INFINIENV_IMAGE_MODEL, but transparency will silently stop working on gpt-image-2.
     model = model or os.environ.get("INFINIENV_IMAGE_MODEL", "gpt-image-1")
     desc = OBJECT_DESCRIPTIONS.get(object_type, object_type.replace("_", " "))
-    prompt = SPRITE_PROMPT_TEMPLATE.format(desc=desc)
+    is_texture = object_type in TEXTURE_TILE_TYPES
+    prompt = (TEXTURE_PROMPT_TEMPLATE if is_texture else SPRITE_PROMPT_TEMPLATE).format(desc=desc)
 
     client = OpenAI()
     try:
-        response = client.images.generate(model=model, prompt=prompt, size="1024x1024", n=1)
+        response = client.images.generate(
+            model=model,
+            prompt=prompt,
+            size="1024x1024",
+            background="opaque" if is_texture else "transparent",
+            output_format="png",
+            n=1,
+        )
     except Exception as exc:
         raise ProviderError(f"image generation failed for {object_type!r}: {exc}") from exc
 
@@ -67,8 +121,13 @@ def generate_sprite(object_type: str, cache_dir: str, *, model: str | None = Non
     with open(path, "wb") as f:
         f.write(raw)
 
-    from PIL import Image  # normalize to a small consistent tile size
+    from PIL import Image
 
-    img = Image.open(path).convert("RGBA").resize((64, 64))
+    img = Image.open(path)
+    # Texture tiles are meant to fill the whole canvas already (opaque, full-bleed
+    # prompt) -- cropping to content would be a no-op at best and risks clipping a
+    # legitimately busy edge-to-edge pattern at worst, so skip it for those.
+    img = img if is_texture else _crop_to_content(img)
+    img = img.convert("RGBA").resize((64, 64))
     img.save(path)
     return path

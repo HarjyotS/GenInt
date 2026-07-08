@@ -1,1097 +1,288 @@
 # CLAUDE.md
 
-This file gives Claude Code the project-specific context and operating rules for building **InfiniEnv**.
+This file gives Claude Code the project-specific context and operating rules for **InfiniEnv**.
 
-InfiniEnv is a runnable 2D-first agent harness for the General Intuition **Infinite Environment Generation via an Agent Harness** technical challenge. The harness accepts natural-language commands, compiles them into structured scene specifications, validates and repairs them deterministically, builds playable environments, solves them with an agent, and emits reviewer-friendly artifacts.
+InfiniEnv is a 2D agent harness, built for the General Intuition **Infinite Environment
+Generation via an Agent Harness** technical challenge, that has grown past that original brief.
+It compiles natural-language commands into structured scene specifications, validates and
+repairs them deterministically, builds playable environments, solves them with a deterministic
+agent, and emits reviewer-friendly artifacts — including, now, real generated sprites, LLM- and
+model-defined game mechanics beyond a fixed vocabulary, mutation/curriculum/dataset-export
+tooling, and a persistent cache so both assets and mechanics get reused instead of reinvented.
 
-The core philosophy is:
+The core philosophy, unchanged since the very first line of code and never up for renegotiation:
 
 > Use AI for semantic generation. Use deterministic code for truth.
 
-The submission must optimize for three evaluation criteria:
-
-1. **Creativity**: demonstrate a nontrivial approach to infinite environment generation, not just a one-off text-to-game demo.
-2. **Clarity**: make the repo immediately understandable to a reviewer with limited time.
-3. **Working output**: provide a harness that can be run from the command line with clear instructions and visible artifacts.
+Everything below assumes that. The system may keep growing well past what's described here; when
+it does, extend this document rather than letting it drift out of sync with the code — a stale
+CLAUDE.md is worse than none, because it actively misleads the next session.
 
 ---
 
-## 1. Project mission
+## 1. Status and how to read this document
 
-Build a working MVP called **InfiniEnv**.
+This is not a build spec for an MVP anymore — the MVP shipped, is committed, and is verified
+against the real API. This document now describes the *current, standing system*: what exists,
+what invariants it must keep, and how to extend it further. When a request would add capability,
+default to building it. Don't weigh new work against "is this MVP scope" — that framing doesn't
+apply anymore. The only questions that matter for new work are:
 
-Given a text command such as:
+1. Does it keep section 2's invariants intact (validator wins, no model-authored code execution)?
+2. Is the new capability itself deterministic and testable, even if what it *enables* the model
+   to express is more open-ended?
 
-```text
-Create a warehouse where the agent must find a key, unlock a door, pick up a package, and deliver it to the exit.
-```
+If a request would require trading away #1 to get something the user wants (the sandbox-agents
+discussion in `notes.md` is the canonical example — full shell/code execution per scene, even
+sandboxed, breaks the solvability guarantee), say so explicitly and ask before building it, the
+same way section 6's declarative effect system was designed specifically to deliver the
+underlying ask ("let the model define real behavior") *without* that trade-off.
 
-The harness should produce:
-
-```text
-runs/<run_id>/
-├── scene.json          # structured SceneSpec ground truth
-├── validation.json     # validator checks and repair history
-├── metrics.json        # solvability, path length, success, timings
-├── render.png          # static visualization of the environment
-├── replay.gif          # replay of the agent solving the task
-└── report.md           # short human-readable run summary
-```
-
-The MVP should prove the full loop:
-
-```text
-Text Prompt
-  → OpenAI Agents SDK runtime planner
-  → SceneSpec JSON DSL
-  → deterministic validation
-  → repair loop if invalid
-  → playable 2D environment
-  → deterministic navigation / task planner
-  → code-level objective verification
-  → replay + metrics + report
-```
+`notes.md` is the running decision log — read it when you need the *why* and historical context
+behind something (a rejected alternative, a bug that was found and fixed, a live-verification
+result). This file is the *what/how*, kept current; `notes.md` is chronological and never
+rewritten. `README.md` is the reviewer-facing pitch. `PATHWAY.md` is a superseded roadmap
+document — treat it as historical input that was partially adopted (see `notes.md` for exactly
+which parts and why), not as a second source of truth.
 
 ---
 
-## 2. Most important design rule
+## 2. Non-negotiable invariants
 
-Do **not** let the LLM be the source of truth.
+These hold at every stage of the project, past, present, and future, regardless of how much the
+system grows:
 
-The LLM may propose a scene. It may repair a scene. It may mutate a scene. It may summarize a run.
-
-But these must remain deterministic and testable:
-
-- schema validation
-- object placement
-- collision checks
-- bounds checks
-- reachability checks
-- pathfinding
-- inventory transitions
-- goal completion
-- scoring
-- replay generation
-
-If there is a conflict between model output and deterministic validation, the validator wins.
-
-This still holds after section 28 (extended mechanics): the model may *define* a new object
-type or interaction, but only as data (declared JSON, checked against a fixed schema and a
-fixed, safe effect vocabulary) -- never as code. The engine that interprets that data is still
-100% deterministic and testable. The model is not the source of truth about what a "throw"
-action does at runtime; the fixed effect interpreter in `engine/interactions.py` is.
-
----
-
-## 3. Runtime agent choice
-
-The recommended submitted runtime uses the **OpenAI Agents SDK**.
-
-Claude Code is a development tool for building this repo. The final harness should not require an evaluator to run Claude Code interactively.
-
-Good final submission shape:
-
-```bash
-pip install -e .
-python -m infinienv generate \
-  --provider openai_agents \
-  --prompt "Create a kitchen where the agent picks up a can from the table and drops it in the sink." \
-  --seed 42 \
-  --out runs/kitchen_can
-```
-
-Bad final submission shape:
-
-```text
-Open Claude Code and ask it to create a level.
-```
-
-The runtime must also support a no-key fallback:
-
-```bash
-python -m infinienv generate \
-  --provider mock \
-  --prompt "Create a kitchen where the agent picks up a can from the table and drops it in the sink." \
-  --seed 42 \
-  --out runs/mock_kitchen
-```
-
-This ensures the project is runnable even without API credentials.
+- **The validator wins.** The LLM may propose a scene, repair a scene, mutate a scene, or define
+  new mechanics for a scene. But schema validation, object placement, collision checks, bounds
+  checks, reachability, pathfinding, inventory transitions, goal completion, and scoring are
+  always deterministic and testable. If model output and deterministic validation conflict, the
+  validator wins, full stop.
+- **No model-authored code execution, ever — sandboxed or not.** Not `eval`/`exec`, not shell
+  commands, not dynamically imported/chosen packages, not arbitrary file writes outside the
+  selected output directory. This is why section 6's extended mechanics are a *declarative
+  effect system* (a fixed, finite vocabulary of effect ops interpreted by real, tested Python in
+  `engine/interactions.py`) and not "let the model write and run a handler function." A sandbox
+  changes *where* code runs, not *whether* letting the model author it breaks the guarantee that
+  every scene's behavior is statically knowable before it runs. See `notes.md` for the concrete
+  case (OpenAI Agents SDK "sandbox agents") this was already tested against and declined.
+- **Movement and physics stay deterministic code, not per-step LLM calls.** The model plans task
+  *semantics* (which goals exist, what a custom interaction's effects are); A* pathfinding and
+  the primitive action executor (`engine/actions.py`) are always plain Python, never an LLM call
+  in the loop. This is also why the answer to "let a sandbox agent redefine movement/physics per
+  game" was no — see `notes.md`.
+- **Extend by adding new deterministic primitives, not by loosening the two rules above.** A
+  genuinely new capability (a new effect op, a new provider, a new pipeline stage) is real code
+  with real tests, same as it always was — never a way to let the model bypass the validator or
+  execute something unvetted.
+- **File writes are confined to the selected output directory**, with path-traversal validation
+  (`artifacts/writer.py::resolve_out_dir`).
 
 ---
 
-## 4. High-level architecture
-
-Implement the project as a clean Python package.
-
-Suggested structure:
+## 3. Architecture (current)
 
 ```text
-infinienv/
-├── README.md
-├── CLAUDE.md
+GenInt/                            # repo root
+├── README.md                      # reviewer-facing pitch and usage
+├── CLAUDE.md                      # this file
+├── PATHWAY.md                     # superseded roadmap (see notes.md for what was adopted)
+├── notes.md                       # chronological decision log — read for "why"
 ├── pyproject.toml
+├── .env                           # OPENAI_API_KEY / OP_KEY / ANTHROPIC_API_KEY (gitignored)
+├── .infinienv_asset_cache/        # generated sprite cache, keyed by object type (gitignored)
+├── .infinienv_mechanics_cache.json  # custom object type/interaction cache (gitignored)
 ├── examples/
-│   ├── prompts.txt
-│   ├── kitchen_can.json
-│   ├── warehouse_key.json
-│   └── obstacle_course.json
-├── src/
-│   └── infinienv/
-│       ├── __init__.py
-│       ├── cli.py
-│       ├── schema/
-│       │   ├── scene_schema.py
-│       │   └── scene_schema.json
-│       ├── llm/
-│       │   ├── base.py
-│       │   ├── providers/
-│       │   │   ├── openai_agents.py
-│       │   │   ├── openai_responses.py
-│       │   │   ├── anthropic.py
-│       │   │   ├── vllm.py
-│       │   │   └── mock.py
-│       │   └── prompts/
-│       │       ├── scene_planner.md
-│       │       ├── repair_agent.md
-│       │       ├── mutation_agent.md
-│       │       └── artifact_agent.md
-│       ├── generation/
-│       │   ├── compiler.py
-│       │   ├── templates.py
-│       │   ├── repair.py
-│       │   ├── mutation.py
-│       │   └── curriculum.py
-│       ├── engine/
-│       │   ├── grid.py
-│       │   ├── objects.py
-│       │   ├── physics.py
-│       │   ├── actions.py
-│       │   └── state.py
-│       ├── validation/
-│       │   ├── validator.py
-│       │   ├── reachability.py
-│       │   ├── solvability.py
-│       │   └── errors.py
-│       ├── navigation/
-│       │   ├── astar.py
-│       │   ├── planner.py
-│       │   └── policy.py
-│       ├── render/
-│       │   ├── pygame_renderer.py
-│       │   ├── image_export.py
-│       │   └── replay_export.py
-│       ├── evaluation/
-│       │   ├── runner.py
-│       │   ├── metrics.py
-│       │   └── benchmark.py
-│       └── artifacts/
-│           ├── writer.py
-│           └── report.py
-└── tests/
-    ├── test_schema.py
-    ├── test_validator.py
-    ├── test_reachability.py
-    ├── test_solver.py
-    ├── test_mock_generation.py
-    └── test_cli.py
+│   ├── prompts.txt                # benchmark-format prompt suite
+│   ├── kitchen_can.json / warehouse_key.json / obstacle_course.json / throw_vase_demo.json
+│   └── curriculum_warehouse.txt
+├── runs/                          # generated run output (gitignored except .gitkeep)
+├── src/infinienv/
+│   ├── cli.py                     # generate/validate/solve/play/benchmark/mutate/curriculum/export-dataset
+│   ├── schema/
+│   │   └── scene_schema.py        # SceneSpec, Mechanics, InteractGoal, etc. (pydantic)
+│   ├── llm/
+│   │   ├── base.py                # SceneProvider protocol, ProviderError
+│   │   ├── __init__.py            # get_provider() registry (lazy imports per provider)
+│   │   ├── providers/
+│   │   │   ├── mock.py            # deterministic, no key needed
+│   │   │   ├── openai_agents.py   # default runtime: ScenePlannerAgent/RepairAgent/MutationAgent
+│   │   │   ├── openai_responses.py  # lower-level fallback, one Responses API call
+│   │   │   └── anthropic.py       # optional Claude provider
+│   │   └── prompts/
+│   │       ├── scene_planner.md   # includes the mechanics worked example + rules
+│   │       ├── repair_agent.md
+│   │       └── mutation_agent.md
+│   ├── generation/
+│   │   ├── compiler.py            # generate_and_validate: propose -> validate -> repair -> fallback
+│   │   ├── templates.py           # mock provider's deterministic scene templates
+│   │   ├── mutation.py            # 5 deterministic strategies + optional LLM-proposed mutations
+│   │   ├── curriculum.py          # build/write/run_curriculum (--run executes every level)
+│   │   └── mechanics_cache.py     # persists/reuses custom object types + interactions
+│   ├── engine/
+│   │   ├── grid.py                # static occupancy from a SceneSpec
+│   │   ├── state.py                # GameState/ObjectState (mutable runtime state)
+│   │   ├── actions.py               # apply_action: move/pick_up/drop/unlock/wait + routes to...
+│   │   └── interactions.py          # ...the custom-interaction effect interpreter
+│   ├── validation/
+│   │   ├── errors.py                # ValidationIssue/ValidationResult
+│   │   ├── reachability.py          # BFS reachability pre-check
+│   │   ├── solvability.py           # full solve_scene() run as the real solvability check
+│   │   └── validator.py             # validate_scene / validate_scene_dict — the single source of truth
+│   ├── navigation/
+│   │   ├── astar.py                 # A* pathfinding
+│   │   ├── planner.py               # plan_goal / is_goal_complete (reach/pickup/deliver/unlock/interact/sequence)
+│   │   └── policy.py                # solve_scene(): top-level solver, SolveResult incl. goal_results
+│   ├── render/
+│   │   ├── image_export.py          # render.png, with sprite pasting + flat-color fallback
+│   │   └── replay_export.py         # replay.gif, re-simulates from the action list
+│   ├── assets/
+│   │   ├── placeholder_gen.py       # generates the checked-in base/*.png (run once, committed)
+│   │   ├── base/*.png               # local placeholder sprites, no key/network needed
+│   │   ├── generator_openai.py      # real sprite generation via the OpenAI Images API
+│   │   ├── resolver.py              # resolve_assets(): none/local/generated/auto modes
+│   │   └── manifest.py              # AssetEntry, asset_plan.json / asset_manifest.json builders
+│   ├── evaluation/
+│   │   ├── runner.py                # run_generation(): the full generate->...->artifacts pipeline
+│   │   ├── metrics.py               # compute_metrics()
+│   │   └── benchmark.py             # run_benchmark() over a prompt file
+│   ├── export/
+│   │   └── dataset.py                # export_dataset(): runs dir -> JSONL with programmatic_reward
+│   └── artifacts/
+│       ├── writer.py                  # resolve_out_dir (path-traversal-safe), JSON/report writers
+│       └── report.py                  # report.md builder
+└── tests/                              # one file per module above, plus test_cli.py, test_compiler.py
 ```
 
-Keep files small and responsibilities separated.
+Keep files small and responsibilities separated. When adding a module, put it in the package that
+owns that responsibility above — don't create a new top-level package without a reason.
 
 ---
 
-## 5. MVP feature priorities
+## 4. Scene representation: SceneSpec
 
-Build in this order.
-
-### P0: Must work
-
-- CLI command: `python -m infinienv generate --prompt ... --out ...`
-- `SceneSpec` JSON schema
-- mock provider with deterministic scenes
-- OpenAI Agents SDK provider
-- validator for schema, bounds, collisions, required objects, and reachability
-- A* navigation
-- simple task planner for pickup / deliver / unlock / reach goals
-- static render image
-- replay GIF
-- metrics JSON
-- human-readable report
-- tests for core validator and solver behavior
-
-### P1: Creativity boosters
-
-- mutation engine that creates variants of valid scenes
-- curriculum generator that produces easy → hard task suites
-- repair loop with clear failure reasons
-- benchmark mode over a prompt file
-- support for locked-door/key dependencies
-- support for distractor objects and decoy goals
-
-### P2: Stretch
-
-- local GPU inference through vLLM or another OpenAI-compatible server
-- Godot export path
-- 3D-ready scene schema fields
-- sprite/theme packs
-- visual observation frames for future vision-policy training
-
-Do not overbuild P2 before P0 is stable.
-
----
-
-## 6. SceneSpec DSL principles
-
-The scene spec is the contract between AI and the deterministic engine.
-
-It should be typed, explicit, compact, and easy to validate.
-
-A good scene spec looks like this:
+The scene spec is the contract between AI and the deterministic engine. It is typed (pydantic),
+explicit, and the single thing every provider must produce and every validator check runs
+against. Top-level fields: `version`, `seed`, `metadata`, `grid`, `agent`, `objects`, `walls`,
+`goals`, `mechanics`.
 
 ```json
 {
   "version": "0.1",
   "seed": 42,
-  "metadata": {
-    "name": "kitchen_can_delivery",
-    "prompt": "Create a kitchen where the agent picks up a can from the table and drops it in the sink.",
-    "theme": "kitchen"
-  },
-  "grid": {
-    "width": 16,
-    "height": 12,
-    "tile_size": 32
-  },
-  "agent": {
-    "id": "agent",
-    "x": 1,
-    "y": 1,
-    "inventory": []
-  },
+  "metadata": {"name": "kitchen_can_delivery", "prompt": "...", "theme": "kitchen"},
+  "grid": {"width": 16, "height": 12, "tile_size": 32},
+  "agent": {"id": "agent", "x": 1, "y": 1, "inventory": []},
   "objects": [
-    {"id": "table_1", "type": "table", "x": 6, "y": 4, "solid": true},
-    {"id": "can_1", "type": "can", "x": 6, "y": 3, "portable": true},
-    {"id": "sink_1", "type": "sink", "x": 13, "y": 9, "solid": false}
+    {"id": "table_1", "type": "table", "x": 6, "y": 4, "solid": true, "portable": false},
+    {"id": "can_1", "type": "can", "x": 6, "y": 3, "solid": false, "portable": true},
+    {"id": "sink_1", "type": "sink", "x": 13, "y": 9, "solid": false, "portable": false}
   ],
-  "walls": [
-    {"x": 0, "y": 0},
-    {"x": 1, "y": 0}
-  ],
-  "goals": [
-    {
-      "id": "deliver_can_to_sink",
-      "type": "deliver",
-      "object_id": "can_1",
-      "target_id": "sink_1"
-    }
-  ]
+  "walls": [{"x": 0, "y": 0}, {"x": 1, "y": 0}],
+  "goals": [{"id": "deliver_can_to_sink", "type": "deliver", "object_id": "can_1", "target_id": "sink_1"}],
+  "mechanics": {"custom_object_types": [], "custom_interactions": []}
 }
 ```
 
 Rules:
 
-- Prefer JSON over arbitrary generated code.
-- Every object must have a stable ID.
-- Coordinates are grid-based integers.
-- Walls and solid objects block movement.
-- Portable objects can be picked up if adjacent or on the same tile, depending on engine choice.
+- Every object/agent/goal/interaction needs a stable, unique `id`.
+- Coordinates are grid-based integers, `0 <= x < width`, `0 <= y < height`.
+- Walls and solid objects block movement; `walls` entries are single `{"x","y"}` cells, not line
+  segments.
+- Portable objects can be picked up when adjacent to or on the agent's cell.
 - Goals must be checkable from state, not from pixels.
-- Add new mechanics only when validators and tests are updated.
+- `SceneObject.type` is a free string at the schema (parse) layer — it's the validator, not
+  pydantic, that decides whether a given type is allowed (built-in, or declared in
+  `mechanics.custom_object_types`). This is deliberate: it's what lets custom types exist at all
+  while still being fully rejected if undeclared.
+
+### Base (built-in) vocabulary
+
+```text
+Object types:  wall, floor, table, can, box, key, door, package, sink, exit, hazard, distractor
+Actions:       move_up, move_down, move_left, move_right, pick_up(object_id), drop(object_id),
+               unlock(door_id, key_id), wait
+Goal types:    reach(target_id), pickup(object_id), deliver(object_id, target_id),
+               unlock(door_id), interact(interaction_id, target_id), sequence([...subgoals])
+```
+
+This vocabulary is closed by design — closed enough that the solver can *guarantee* solvability
+rather than hope for it. It is not, however, the ceiling on what a scene can express; that's what
+section 6 is for.
+
+### Locked doors
+
+A door needs `"solid": true, "locked": true, "key_id": "<a portable key object's id>"`. Goals for
+a key/door task are two ordered top-level entries in `scene.goals` (not a `sequence` wrapper):
+`unlock` for the door, then whatever needs what's behind it. The planner auto-fetches the key
+(paths to it, picks it up) the first time `unlock` needs it.
 
 ---
 
-## 7. Supported MVP mechanics
-
-Keep the initial engine small. (Section 28 adds a bounded, safe way to go beyond this fixed
-list on a per-scene basis -- read it before assuming a task needs an unsupported mechanic.)
-
-Supported actions:
-
-```text
-move_up
-move_down
-move_left
-move_right
-pick_up(object_id)
-drop(object_id)
-unlock(door_id, key_id)
-wait
-```
-
-Supported goal types:
-
-```text
-reach(target_id)
-pickup(object_id)
-deliver(object_id, target_id)
-unlock(door_id)
-interact(interaction_id, target_id)   # see section 28
-sequence([...subgoals])
-```
-
-Supported object types:
-
-```text
-agent
-wall
-floor
-table
-can
-box
-key
-door
-package
-sink
-exit
-hazard
-distractor
-```
-
-Do not add complicated physics until the gridworld version is reliable.
-
----
-
-## 8. Validation requirements
-
-The validator should return structured errors, not vague strings.
-
-Example:
-
-```json
-{
-  "valid": false,
-  "errors": [
-    {
-      "code": "UNREACHABLE_OBJECT",
-      "message": "Object can_1 cannot be reached from the agent spawn.",
-      "object_id": "can_1",
-      "severity": "error"
-    }
-  ]
-}
-```
-
-Minimum checks:
-
-- JSON parses
-- schema fields exist
-- grid dimensions are valid
-- all coordinates are in bounds
-- no invalid object types
-- no duplicate IDs
-- no illegal overlaps
-- agent exists exactly once
-- required goal objects exist
-- walls do not fully seal required objects
-- all required subgoals are reachable in order
-- final goal can be completed by deterministic planner
-
-Validation should be deterministic for a given scene and seed.
-
----
-
-## 9. Repair loop behavior
-
-The repair loop should be explicit and bounded.
-
-Default:
-
-```text
-MAX_REPAIR_ATTEMPTS=3
-```
-
-Flow:
-
-```text
-1. LLM proposes SceneSpec.
-2. Validator checks SceneSpec.
-3. If valid, build and solve.
-4. If invalid, pass original prompt + previous SceneSpec + validator errors to RepairAgent.
-5. RepairAgent returns a modified SceneSpec.
-6. Repeat until valid or max attempts reached.
-7. If still invalid, fall back to template generator and record failure.
-```
-
-The repair agent must preserve the original task unless impossible.
-
-Do not silently discard failures. Record them in `validation.json` and `report.md`.
-
----
-
-## 10. OpenAI Agents SDK implementation guidance
-
-Implement the default runtime provider in:
-
-```text
-src/infinienv/llm/providers/openai_agents.py
-```
-
-Use the Agents SDK for orchestration, not for unrestricted code execution.
-
-Recommended agents:
-
-```text
-ScenePlannerAgent
-RepairAgent
-MutationAgent
-ArtifactAgent
-```
-
-For MVP, only `ScenePlannerAgent` and `RepairAgent` are required.
-
-Tool boundary:
-
-```python
-@function_tool
-def validate_scene(scene_spec: dict) -> dict:
-    """Validate schema, geometry, reachability, and solvability."""
-
-@function_tool
-def get_scene_schema() -> dict:
-    """Return the current SceneSpec schema."""
-
-@function_tool
-def get_supported_mechanics() -> dict:
-    """Return supported objects, actions, and goals."""
-```
-
-The OpenAI agent should not call tools that write arbitrary project files during normal generation.
-
-The project-level Python code should own:
-
-- parsing final output
-- calling validator
-- retrying repair
-- writing artifacts
-- rendering
-- solving
-- benchmark execution
-
-Keep model output constrained to SceneSpec JSON.
-
----
-
-## 11. Provider abstraction
-
-All model providers should implement a common interface.
-
-Example:
-
-```python
-class SceneProvider(Protocol):
-    def generate_scene(self, prompt: str, seed: int) -> SceneSpec:
-        ...
-
-    def repair_scene(
-        self,
-        prompt: str,
-        scene: SceneSpec,
-        validation_errors: list[ValidationError],
-        seed: int,
-    ) -> SceneSpec:
-        ...
-```
-
-Required providers:
-
-```text
-mock.py             # deterministic, no API key required
-openai_agents.py    # default intended runtime
-```
-
-Optional providers:
-
-```text
-openai_responses.py
-anthropic.py
-vllm.py
-```
-
-The benchmark should be able to compare providers without changing engine code.
-
----
-
-## 12. CLI requirements
-
-Minimum CLI commands:
-
-```bash
-python -m infinienv generate --prompt "..." --out runs/demo
-python -m infinienv play runs/demo/scene.json
-python -m infinienv validate runs/demo/scene.json
-python -m infinienv solve runs/demo/scene.json --out runs/demo
-python -m infinienv benchmark examples/prompts.txt --out runs/benchmark
-```
-
-Useful optional commands:
-
-```bash
-python -m infinienv mutate runs/demo/scene.json --count 10 --out runs/mutations
-python -m infinienv curriculum --theme warehouse --out examples/curriculum_warehouse.txt
-python -m infinienv export-godot runs/demo/scene.json --out exports/godot_demo
-```
-
-Always design CLI output for reviewers. It should clearly state what happened.
-
-Good CLI output:
-
-```text
-InfiniEnv run: runs/kitchen_can
-Prompt: Create a kitchen where the agent picks up a can from the table and drops it in the sink.
-Provider: openai_agents
-Seed: 42
-
-[1/6] Generated initial SceneSpec
-[2/6] Validation failed: 1 reachable-object error
-[3/6] Repair succeeded on attempt 1
-[4/6] Built playable gridworld
-[5/6] Solver completed goal in 34 actions
-[6/6] Wrote artifacts:
-      - scene.json
-      - validation.json
-      - metrics.json
-      - render.png
-      - replay.gif
-      - report.md
-```
-
----
-
-## 13. Renderer guidance
-
-Use the simplest renderer that produces clear artifacts.
-
-Preferred MVP option:
-
-```text
-pygame + Pillow/imageio
-```
-
-Renderer must create:
-
-- `render.png`: static top-down map
-- `replay.gif`: agent action replay
-
-Do not spend time on beautiful art before the core loop works.
-
-Reviewer-friendly visuals matter more than aesthetic perfection.
-
-Use labels or a legend if helpful.
-
----
-
-## 14. Navigation and planning
-
-Use deterministic planning for MVP.
-
-Recommended approach:
-
-- A* or BFS over the grid for low-level movement
-- high-level symbolic task planner for subgoals
-- state machine for inventory and interactions
-
-Example for deliver goal:
-
-```text
-1. path to object
-2. pick_up(object)
-3. path to target
-4. drop(object)
-5. verify object at target
-```
-
-For locked-door tasks:
-
-```text
-1. path to key
-2. pick_up(key)
-3. path to door
-4. unlock(door, key)
-5. path to target behind door
-6. complete final goal
-```
-
-Do not use an LLM for every movement step.
-
-The LLM may plan task semantics, but actual movement should be code.
-
----
-
-## 15. Evaluation and metrics
-
-Every run should produce `metrics.json`.
-
-Minimum metrics:
-
-```json
-{
-  "success": true,
-  "provider": "openai_agents",
-  "seed": 42,
-  "repair_attempts": 1,
-  "validation_passed": true,
-  "solver_success": true,
-  "path_length": 34,
-  "num_objects": 8,
-  "num_walls": 44,
-  "num_goals": 1,
-  "generation_time_seconds": 2.41,
-  "solve_time_seconds": 0.02
-}
-```
-
-Benchmark mode should aggregate:
-
-- number of prompts
-- valid on first try
-- valid after repair
-- failed after repair
-- solved successfully
-- average repair attempts
-- average path length
-- average generation time
-
-This directly supports the challenge’s “working output” and “clarity” criteria.
-
----
-
-## 16. Creativity features to emphasize
-
-The project should not look like a basic text-to-grid demo.
-
-Emphasize these ideas in code, docs, and demo examples:
-
-### A. Verified environment factory
-
-The harness does not merely create worlds. It creates worlds with machine-checkable objectives and proof of completion.
-
-### B. Mutation engine
-
-Given one valid scene, produce many valid variants:
-
-```text
-same goal, different layout
-same layout, different object positions
-same task, extra obstacles
-same task, distractor objects
-same task, key-door dependency added
-same task, reversed start and target
-```
-
-Every mutation must pass validation and solvability checks.
-
-### C. Curriculum generation
-
-Generate easy → hard variants:
-
-```text
-Level 1: open room pickup
-Level 2: pickup behind obstacle
-Level 3: delivery across rooms
-Level 4: key-door dependency
-Level 5: decoy object and longer path
-```
-
-### D. Impossible prompt handling
-
-If the user requests something impossible or contradictory, the harness should classify it:
-
-```text
-make_solvable
-preserve_impossible_as_test
-unsupported_mechanic
-ambiguous_goal
-```
-
-For MVP, default to `make_solvable` unless the CLI flag says otherwise.
-
-### E. Dual output
-
-Every scene should produce both:
-
-```text
-symbolic truth: scene.json, validation.json, metrics.json
-visual proof: render.png, replay.gif
-```
-
-This aligns with the research motivation of bridging code-defined truth and pixel observations.
-
----
-
-## 17. Coding standards
-
-Use Python 3.11+.
-
-Prefer:
-
-- dataclasses or Pydantic models for structured specs
-- type hints everywhere
-- clear module boundaries
-- deterministic seeds
-- small pure functions where possible
-- explicit exceptions for invalid state
-- pytest tests
-- ruff or similar linting if configured
-
-Avoid:
-
-- hidden global state
-- nondeterministic tests
-- giant files
-- broad `except Exception` blocks without logging
-- arbitrary LLM-generated code execution
-- adding mechanics without validators
-- features that require GPU/API keys for the basic demo
-
----
-
-## 18. Testing expectations
-
-Add tests as functionality is implemented.
-
-Minimum tests:
-
-```text
-test_schema.py
-- valid SceneSpec parses
-- missing required fields fail
-- duplicate IDs fail
-
-test_validator.py
-- out-of-bounds objects fail
-- overlapping solid objects fail
-- missing goal target fails
-
-test_reachability.py
-- reachable target passes
-- sealed target fails
-
-test_solver.py
-- pickup task succeeds
-- deliver task succeeds
-- locked door task succeeds
-- impossible task fails cleanly
-
-test_mock_generation.py
-- mock provider creates deterministic valid scene
-
-test_cli.py
-- generate command writes expected artifacts
-```
-
-Before final handoff, run:
-
-```bash
-pytest
-python -m infinienv generate --provider mock --prompt "Create a kitchen delivery task" --out runs/smoke_test
-python -m infinienv validate runs/smoke_test/scene.json
-python -m infinienv solve runs/smoke_test/scene.json --out runs/smoke_test
-```
-
-If tests cannot be run in the current environment, state that honestly in the final response and explain what was not verified.
-
----
-
-## 19. Documentation requirements
-
-The README must remain reviewer-first.
-
-It should include:
-
-- one-paragraph project explanation
-- architecture diagram or text pipeline
-- setup instructions
-- OpenAI Agents SDK runtime section
-- no-key mock mode
-- CLI examples
-- generated artifact examples
-- evaluation criteria mapping
-- limitations and roadmap
-
-Do not bury the demo instructions.
-
-A reviewer should understand how to run the project within 60 seconds of opening the README.
-
----
-
-## 20. Development workflow for Claude Code
-
-When working in Claude Code:
-
-1. Read `README.md`, `CLAUDE.md`, and current file tree first.
-2. Identify the smallest next working slice.
-3. Make code changes.
-4. Run relevant tests or smoke commands.
-5. Fix failures.
-6. Summarize what changed and what remains.
-
-Default to building working vertical slices instead of many disconnected stubs.
-
-Preferred order:
-
-```text
-1. SceneSpec model
-2. validator
-3. mock generator
-4. grid engine
-5. A* solver
-6. renderer
-7. CLI generate command
-8. artifacts writer
-9. OpenAI Agents SDK provider
-10. repair loop
-11. mutation / curriculum extensions
-```
-
----
-
-## 21. Suggested Claude Code subagents
-
-Use subagents only when useful. Keep them focused.
-
-Suggested subagents:
-
-```text
-schema-agent
-- Owns SceneSpec models, JSON schema, and examples.
-
-validator-agent
-- Owns validation rules, reachability, and structured errors.
-
-solver-agent
-- Owns A*, task planning, and state transitions.
-
-renderer-agent
-- Owns render.png and replay.gif export.
-
-openai-runtime-agent
-- Owns OpenAI Agents SDK provider and tool boundaries.
-
-docs-agent
-- Owns README, reports, demo instructions, and evaluation framing.
-
-test-agent
-- Adds pytest coverage and smoke tests.
-```
-
-Do not let subagents make incompatible schema assumptions. The `SceneSpec` schema is the shared contract.
-
----
-
-## 22. Prompting guidance for runtime agents
-
-The runtime agent prompts should be strict.
-
-Scene planner instruction should say:
-
-```text
-You are a scene compiler for InfiniEnv. Convert the user's request into a valid SceneSpec JSON object.
-Use only supported object types, action types, and goal types.
-Prefer solvable 2D grid layouts.
-Do not output markdown.
-Do not output explanation.
-Do not invent unsupported mechanics.
-All object IDs must be unique.
-All coordinates must be integers inside the grid.
-The agent must be able to complete the goal.
-```
-
-Repair agent instruction should say:
-
-```text
-You repair invalid SceneSpec JSON. Preserve the user's original task as much as possible.
-Use the validator errors as ground truth.
-Modify only what is necessary to make the scene valid and solvable.
-Do not introduce unsupported mechanics.
-Return only the repaired SceneSpec JSON object.
-```
-
-Mutation agent instruction should say:
-
-```text
-You create variants of an already valid scene.
-Preserve the core objective but vary layout, object positions, obstacles, distractors, and difficulty.
-Every variant must remain solvable.
-Return only SceneSpec JSON.
-```
-
-Artifact agent instruction should say:
-
-```text
-You summarize a completed InfiniEnv run for a technical reviewer.
-Be concise. Explain the prompt, generated world, validation result, solver result, and artifact files.
-Do not claim success unless metrics.json says success=true.
-```
-
----
-
-## 23. Safety and sandboxing
-
-The runtime LLM must not execute arbitrary generated code.
-
-Allowed:
-
-- emitting JSON
-- calling deterministic Python tools with typed inputs
-- requesting validation
-- requesting repair
-
-Not allowed:
-
-- shell execution from model output
-- arbitrary file writes from model output
-- importing packages chosen by the model at runtime
-- using unrestricted Python `eval` or `exec`
-
-File writes should go only to the selected output directory.
-
-Validate output paths to avoid path traversal.
-
----
-
-## 24. GPU access guidance
-
-GPU access is optional for MVP.
-
-The core demo must run on CPU.
-
-GPU can be used for:
-
-- local LLM inference through vLLM
-- batch generation of prompt suites
-- future vision-policy training
-- future 3D simulation or rendering
-
-Do not make the basic CLI require a GPU.
-
-If implementing local GPU support, use an OpenAI-compatible endpoint so the provider abstraction remains simple:
-
-```bash
-LLM_PROVIDER=vllm
-LLM_BASE_URL=http://localhost:8000/v1
-LLM_MODEL=Qwen/Qwen2.5-Coder-32B-Instruct
-```
-
----
-
-## 25. 3D extension path
-
-The MVP is 2D-first. Do not pretend it solves full 3D navigation.
-
-But design the schema so it can evolve.
-
-Future 3D fields may include:
-
-```json
-{
-  "position": {"x": 1.0, "y": 0.0, "z": 2.0},
-  "rotation": {"yaw": 90.0, "pitch": 0.0, "roll": 0.0},
-  "scale": {"x": 1.0, "y": 1.0, "z": 1.0},
-  "asset": "kitchen/table.glb"
-}
-```
-
-Potential export targets:
-
-```text
-Godot
-Unity ML-Agents
-NVIDIA Isaac Lab
-Genesis
-Habitat
-ManiSkill
-MuJoCo
-```
-
-The honest story:
-
-> InfiniEnv proves the language → verified scene → objective → replay loop in 2D. The same SceneSpec abstraction can later target 3D engines, where the internal vision-based policy would replace the deterministic 2D planner.
-
----
-
-## 26. Final demo checklist
-
-Before considering the MVP ready, verify:
-
-```text
-[ ] README explains the project in under 60 seconds.
-[ ] `pip install -e .` works.
-[ ] `python -m infinienv generate --provider mock ...` works without API keys.
-[ ] `python -m infinienv generate --provider openai_agents ...` works with OPENAI_API_KEY.
-[ ] A valid scene produces scene.json.
-[ ] Invalid scenes produce clear validation errors.
-[ ] Repair attempts are recorded.
-[ ] Solver completes at least pickup and deliver tasks.
-[ ] render.png is generated.
-[ ] replay.gif is generated.
-[ ] metrics.json reports success truthfully.
-[ ] benchmark mode runs over multiple prompts.
-[ ] At least one creative mutation/curriculum demo exists.
-[ ] Tests pass or failures are documented honestly.
-[ ] At least one scene exercises section 28's extended mechanics (a model-defined custom
-    object type + interaction, e.g. the "throw a vase out a window" example), validated,
-    solved, and replayed like any other scene.
-```
-
----
-
-## 27. Submission framing
-
-Frame the project like this:
-
-> InfiniEnv is a verified environment factory. It compiles natural language into structured, playable worlds; repairs invalid generations using deterministic validator feedback; mutates successful worlds into infinite variants; and emits replayable proof that an agent can complete code-defined objectives.
-
-Avoid framing it as:
-
-```text
-An LLM makes a game.
-```
-
-Use this stronger framing instead:
-
-```text
-A model proposes. The harness verifies. The agent proves.
-```
-
-That is the core research contribution.
-
----
-
-## 28. Extended mechanics: model-defined object types and interactions (post-MVP)
-
-The sections above describe the MVP: a fixed, closed vocabulary of object types, actions, and
-goal types (section 7), chosen deliberately so the deterministic solver can *guarantee*
-solvability rather than hope for it. This section is an explicit, intentional expansion beyond
-that MVP scope, added once the MVP was solid and verified against the real API: the harness
-should be able to represent things the fixed vocabulary doesn't cover -- "a window you can throw
-things out of," "a switch that opens a door," "a trapdoor that drops the agent to a new
-location" -- without every such idea requiring a new hand-written Python feature landing in this
-repo first.
-
-**The rule this must not break:** section 2's "do not let the LLM be the source of truth" and
-section 23's "no arbitrary code execution from model output" still apply in full. The way to let
-a model define *real, checkable behavior* per scene without letting it author code is a small
-**declarative effect system**:
-
-- A scene may declare **custom object types** (`mechanics.custom_object_types`): just an `id` and
-  a description. A custom type must be declared before any object uses it -- an object whose
-  `type` isn't built-in and isn't declared fails validation (`UNSUPPORTED_OBJECT_TYPE`), the same
-  as an unsupported type always has.
-- A scene may declare **custom interactions** (`mechanics.custom_interactions`): a new verb
-  (`trigger_action`, must not collide with a built-in action), a `target_type` it applies to, an
-  optional `must_hold_type` precondition, and an ordered list of **effects**.
+## 5. Extended mechanics: model-defined object types and interactions
+
+The base vocabulary above doesn't cover everything a task might need — "a window you can throw
+things out of," "a switch that unlocks a door," "a wall safe you crack with a stethoscope." A
+scene can declare its own **mechanics** so the model can express these without every idea needing
+a new hand-written Python feature to land in this repo first, and without ever letting it author
+code (see section 2's invariants).
+
+- **`mechanics.custom_object_types`**: `[{"id": "window", "description": "..."}]`. A type must be
+  declared here before any object uses it, or validation rejects it (`UNSUPPORTED_OBJECT_TYPE`) —
+  same as an unsupported type always has been. A custom type id colliding with a built-in one is
+  also rejected (`MECHANICS_TYPE_COLLISION`).
+- **`mechanics.custom_interactions`**: a new verb (`trigger_action`, must not collide with a
+  built-in action — `MECHANICS_ACTION_COLLISION`), a `target_type` it applies to, an optional
+  `must_hold_type` precondition, and an ordered, non-empty list of **effects**.
 - Each effect is `{"op": ..., "target": ..., ...}` where `op` is one of a **fixed, small
-  vocabulary** implemented in `engine/interactions.py`: `remove_held_object`,
-  `drop_held_object_at_target`, `remove_object`, `unlock_target`, `set_object_property`,
-  `teleport_agent`. There is no "run this code" op. The model composes behavior out of these
-  primitives; it never writes the primitives themselves.
-- A goal type `interact(interaction_id, target_id)` is satisfied once that interaction has been
-  successfully performed against that target -- planned and executed the same deterministic way
-  as `unlock`/`deliver`/etc (path to target, satisfy `must_hold_type` by picking up a matching
-  portable object first if needed, apply the interaction, done).
+  vocabulary** implemented in `engine/interactions.py`:
 
-This means "throw a vase out a window" becomes:
+  | op | effect |
+  |---|---|
+  | `remove_held_object` | the held object (matching `must_hold_type`) is removed from the world entirely |
+  | `drop_held_object_at_target` | the held object ends up at the target's position |
+  | `remove_object` | removes the referenced object (`target`: `"target"`/`"held"`/an explicit id) from the world |
+  | `unlock_target` | unlocks the target object (same effect as a normal `unlock`, generalized) |
+  | `set_object_property` | sets `property_name`/`property_value` on the referenced object's `properties` bag |
+  | `teleport_agent` | moves the agent to `x`/`y` |
+
+  There is no "run this code" op. The model composes behavior out of these primitives; it never
+  writes the primitives themselves. A new op is a real code change with tests, same as adding a
+  new built-in action always was.
+- A goal `{"type": "interact", "interaction_id": ..., "target_id": ...}` is satisfied once that
+  interaction has actually been performed against that target — planned the same deterministic
+  way as `unlock`/`deliver` (path to target, satisfy `must_hold_type` by picking up a matching
+  portable object first if needed, apply the interaction, done), tracked in
+  `GameState.completed_interactions`.
+
+Validated, planned, executed, and replayed exactly like everything else: `validate_scene` checks
+the mechanics block is internally consistent (no built-in collisions, every reference resolves,
+every interaction has effects) before ever touching reachability/solvability;
+`navigation/planner.py` plans `interact` goals the same way it plans `unlock`;
+`render/replay_export.py` shows the effect (an object vanishing, a door unlocking) in the
+animated replay because it re-simulates from the real action list, same as everything else.
+
+### Mechanics get cached, not reinvented per scene
+
+`generation/mechanics_cache.py` persists every new custom object type/interaction from a
+*validated* scene into `.infinienv_mechanics_cache.json` (gitignored, project-local runtime
+cache — same treatment as the asset cache below). The `get_known_mechanics` tool exposes that
+cache back to `ScenePlannerAgent`/`RepairAgent`/`MutationAgent`; the prompt instructs the model to
+check it first and reuse an existing definition verbatim rather than invent a new one. First
+definition wins on a cache write (existing entries are never overwritten) — once "window" means
+something, it keeps meaning that.
+
+### What this deliberately does not do
+
+- No `eval`/`exec`, no model-authored Python, no dynamically imported code of any kind.
+- No unbounded property system — `SceneObject.properties` and `set_object_property` are for
+  simple flags an interaction's effects can read/write, not a general scripting surface.
+- The validator still decides whether a scene is accepted. A model can propose `mechanics` that
+  don't validate exactly as it can propose an invalid `SceneSpec` today — same repair loop, same
+  fallback.
+
+Worked example (`examples/throw_vase_demo.json` is a hand-authored, always-valid instance of
+this):
 
 ```json
 {
@@ -1102,42 +293,441 @@ This means "throw a vase out a window" becomes:
   "mechanics": {
     "custom_object_types": [{"id": "vase"}, {"id": "window"}],
     "custom_interactions": [{
-      "id": "throw_through_window",
-      "trigger_action": "throw",
-      "target_type": "window",
-      "must_hold_type": "vase",
-      "effects": [{"op": "remove_held_object", "target": "held"}]
+      "id": "throw_through_window", "trigger_action": "throw", "target_type": "window",
+      "must_hold_type": "vase", "effects": [{"op": "remove_held_object", "target": "held"}]
     }]
   },
   "goals": [{"id": "declutter", "type": "interact", "interaction_id": "throw_through_window", "target_id": "window_1"}]
 }
 ```
 
-Validated, planned, executed, and replayed exactly like everything else -- `validate_scene`
-checks the mechanics block is internally consistent (no collisions with built-ins, every
-reference resolves) before ever touching reachability/solvability; `navigation/planner.py`
-plans `interact` goals the same way it plans `unlock`; `render/replay_export.py` shows the vase
-actually vanish from the animated replay when thrown.
+Live-verified (see `notes.md`) with prompts that had no exact hand-authored precedent in this
+repo — including a genuinely different mechanic (a "flip a switch to unlock a vault door"
+interaction using `set_object_property` + `unlock_target`) — confirming the model generalizes
+this pattern rather than echoing one canned example.
 
-### Reuse: mechanics get cached, not reinvented per scene
+---
 
-A model re-deriving "window"/"throw" slightly differently every time it's needed would be both
-wasteful and inconsistent. `generation/mechanics_cache.py` persists every new custom object
-type/interaction from a *validated* scene into a shared, project-local cache
-(`.infinienv_mechanics_cache.json`, gitignored -- it's a runtime cache, not project source, same
-treatment as `.infinienv_asset_cache/`). The `get_known_mechanics` tool exposes that cache back
-to `ScenePlannerAgent`/`RepairAgent`/`MutationAgent`; the prompt instructs the model to check it
-first and reuse an existing definition verbatim rather than invent a new one. First definition
-wins on a cache write (existing entries are never overwritten), so once "window" means something,
-it keeps meaning that.
+## 6. Validation
 
-### What this deliberately does not do
+`validation/validator.py::validate_scene` is the single source of truth; every provider's output
+goes through it before anything is built, rendered, or solved. Returns structured errors, not
+vague strings:
 
-- No `eval`/`exec`, no model-authored Python, no dynamically imported code of any kind -- the
-  effect vocabulary is fixed and finite; extending it (a new `op`) is a real code change with
-  tests, same as adding a new built-in action always was.
-- No unbounded property system -- `SceneObject.properties` and `set_object_property` exist for
-  simple flags an interaction's effects can read/write, not a general scripting surface.
-- The validator, not the model, still decides whether a scene is accepted. A model can propose
-  `mechanics` that don't validate (unknown target_type, colliding trigger_action, empty effects,
-  etc.) exactly as it can propose an invalid `SceneSpec` today -- same repair loop, same fallback.
+```json
+{
+  "valid": false,
+  "errors": [
+    {"code": "UNREACHABLE_OBJECT", "message": "Object can_1 cannot be reached from the agent spawn.", "object_id": "can_1", "severity": "error"}
+  ]
+}
+```
+
+Checks, roughly in order (later checks short-circuit if earlier ones fail, since geometry that's
+broken enough makes reachability/solvability meaningless to even attempt):
+
+1. Schema parses (`SCHEMA_ERROR` from pydantic if not).
+2. `DUPLICATE_ID` across agent + all objects + all interaction ids.
+3. Mechanics internal consistency: `MECHANICS_TYPE_COLLISION`, `MECHANICS_ACTION_COLLISION`,
+   `MECHANICS_UNKNOWN_TYPE` (an interaction's `target_type`/`must_hold_type` isn't known/declared),
+   `MECHANICS_NO_EFFECTS`, `UNSUPPORTED_OBJECT_TYPE`, `MECHANICS_UNKNOWN_INTERACTION` (a goal
+   references an undeclared interaction).
+4. `OUT_OF_BOUNDS` for the agent, every object, every wall.
+5. `ILLEGAL_OVERLAP` — two solid occupants (walls, solid objects, the agent) on one cell.
+6. `MISSING_GOAL_OBJECT` — every goal's referenced object/target/door/interaction-target id must
+   exist.
+7. `NO_GOALS` if the scene has none.
+8. `UNREACHABLE_OBJECT` — a cheap BFS pre-check from spawn, with doors treated as *optimistically
+   unlocked* (this is "is it walled off entirely by permanent walls," not a real lock/key
+   simulation — that's next).
+9. `UNSOLVABLE` — the real gate: `validation/solvability.py` actually runs `solve_scene()` (the
+   full deterministic planner) and requires every goal to be genuinely completable in order,
+   respecting real lock state as it evolves through the scene.
+
+Validation is deterministic for a given scene.
+
+---
+
+## 7. Generation pipeline: providers, repair, fallback
+
+`generation/compiler.py::generate_and_validate` owns the loop:
+
+```text
+1. provider.generate_scene(prompt, seed)
+2. validate_scene(scene)
+3. If valid: done. If a schema-parse/API failure occurred: treated as a validation
+   failure (GENERATION_FAILED), not a crash -- feeds into the same repair loop.
+4. If invalid and attempts < MAX_REPAIR_ATTEMPTS (default 3, env override):
+   provider.repair_scene(prompt, scene, errors, seed) -> validate again -> repeat.
+5. If still invalid after repair budget:
+   - allow_fallback=True (default): fall back to the deterministic template generator
+     (always valid by construction). used_fallback=True is recorded.
+   - allow_fallback=False (--no-fallback): raise GenerationFailedError instead, showing
+     every attempt's real error (not just the last, often-generic one) -- see notes.md
+     for why that message construction matters.
+6. On any valid result: remember_scene_mechanics(scene) persists new custom mechanics
+   to the shared cache.
+```
+
+Every attempt (valid or not) is recorded in `validation.json`'s `repair_history` and surfaced in
+`report.md`. Never silently discard a failure.
+
+### Providers (`llm/providers/`, common `SceneProvider` protocol in `llm/base.py`)
+
+| Provider | Key needed | Notes |
+|---|---|---|
+| `mock` | No | Deterministic templates (`generation/templates.py`): kitchen delivery, warehouse key/door, obstacle course — picked by prompt keywords, parameterized by `--seed`. Always valid and solvable by construction. This is the CI/offline path, not the primary demo path. |
+| `openai_agents` | `OPENAI_API_KEY` | **Default runtime.** `ScenePlannerAgent`/`RepairAgent` (required) and `MutationAgent` (optional, via a duck-typed `propose_mutation` method) built with the OpenAI Agents SDK. Structured output via `AgentOutputSchema(SceneSpec, strict_json_schema=False)` — non-strict because `SceneObject.properties`/`InteractionEffect.property_value` are open-ended dict/union shapes OpenAI's strict/grammar-constrained mode rejects outright. Tools: `get_scene_schema`, `get_supported_mechanics`, `validate_scene_tool` (`strict_mode=False`, same reason), `get_known_mechanics`. |
+| `openai_responses` | `OPENAI_API_KEY` | Lower-level fallback: one Responses API call with a non-strict `text.format` json_schema, no agent orchestration. |
+| `anthropic` | `ANTHROPIC_API_KEY` | Optional Claude provider. Same protocol, same JSON-parsing path as `openai_responses`. Implemented but not exercised against a live key as heavily as the OpenAI paths — see `notes.md`. |
+
+The model never executes code or writes files directly: it emits `SceneSpec` JSON and may call
+the read-only/validate-only tools above. All file writes, retries, rendering, and scoring are
+owned by this repo's Python code.
+
+### Key loading
+
+`.env` (`OPENAI_API_KEY=...` or `OP_KEY=...`, `ANTHROPIC_API_KEY=...`) is loaded with
+`load_dotenv(override=True)` specifically so a stale key already exported in the parent shell
+doesn't silently win over a freshly-updated `.env` — this was a real bug (see `notes.md`).
+`OP_KEY`, if set, is unconditionally copied over `OPENAI_API_KEY` — i.e. `OP_KEY` wins whenever
+both are present, not just as a fallback when `OPENAI_API_KEY` is absent.
+
+---
+
+## 8. Engine and navigation
+
+Deterministic, always — no LLM in this loop, ever (section 2).
+
+- `engine/grid.py` — static occupancy (walls, solid objects) built once from a `SceneSpec`.
+- `engine/state.py` — `GameState`/`ObjectState`: mutable runtime state (agent position,
+  inventory, per-object `properties`, `unlocked_doors`, `completed_interactions`).
+- `engine/actions.py::apply_action` — the primitive executor for
+  move/pick_up/drop/unlock/wait, with legality checks (adjacency, portability, held-state). An
+  unrecognized verb routes to `engine/interactions.py::apply_custom_interaction` when the scene
+  defines a matching `custom_interactions` entry; otherwise it's a hard `ActionError`.
+- `navigation/astar.py` — plain A* pathfinding over the grid.
+- `navigation/planner.py::plan_goal` — the symbolic task planner: expands one goal
+  (reach/pickup/deliver/unlock/interact/sequence) into a primitive action sequence, applying each
+  action to `state` immediately as it's planned (via `_emit`) so later planning steps see
+  up-to-date state. If a `trace` list is passed in, `_emit` also records a step snapshot *at the
+  moment the action is applied* — this must stay true; see `notes.md` for the bug that happened
+  when a caller tried to reconstruct per-step trace data after the fact instead.
+- `navigation/policy.py::solve_scene` — the top-level solver: runs every top-level goal in
+  order, returns a `SolveResult` with `success`, `actions`, `trace`, and `goal_results` (a
+  per-top-level-goal `{"id","type","success"}` list — the real signal behind dataset export's
+  `programmatic_reward`, not a single flattened bool).
+
+For a `deliver` goal: path to object, pick up, path to target, drop, verify. For a locked door:
+path to key, pick up, path to door, unlock, path to what's behind it. For `interact`: path to a
+`must_hold_type` match if not already held and pick it up, path to the interaction's target,
+apply the interaction.
+
+---
+
+## 9. Renderer and asset pipeline
+
+### Renderer (`render/`)
+
+Pillow-based, not pygame — pygame needs an SDL display context that's a real risk headless;
+Pillow produces both deliverables reliably with no such dependency risk.
+
+- `render/image_export.py::save_render_png` — static top-down map with a legend. Draws a sprite
+  (via `asset_paths`) when one's resolved for a given `type`/`"wall"`/`"agent"`, and always falls
+  back to a flat colored cell + first-letter label when it isn't — this fallback is what makes
+  novel model-defined object types render sensibly with zero per-type code.
+- `render/replay_export.py::save_replay_gif` — re-simulates the scene from the actual action list
+  (not from the solver's internal state) frame by frame, so the GIF is always a faithful replay
+  even if something about trace bookkeeping elsewhere were ever wrong.
+
+### Asset pipeline (`assets/`)
+
+`generate --assets {none,local,generated,auto}` (default `none`, i.e. the original flat-colored
+rendering, unchanged unless opted into):
+
+- `local` — checked-in placeholder sprites (`assets/base/*.png`, produced once by
+  `assets/placeholder_gen.py`, simple Pillow-drawn icons). No key or network needed.
+- `generated` — real sprites via the OpenAI Images API (`assets/generator_openai.py`). No silent
+  fallback if generation fails.
+- `auto` — generated, falling back to the local placeholder (noted in `asset_manifest.json`) if
+  generation is unavailable.
+
+**Model:** `gpt-image-1`, not `gpt-image-2` — per OpenAI's own docs, `gpt-image-2` explicitly does
+not support `background: "transparent"`; `gpt-image-1`/`1.5`/`1-mini` do. Overridable via
+`INFINIENV_IMAGE_MODEL`, but transparency silently stops working on `gpt-image-2`. Two request
+shapes, chosen by whether the type is a discrete object or a tile *texture*:
+
+- **Discrete objects** (everything not in `TEXTURE_TILE_TYPES`): `background="transparent"`,
+  a prompt asking for an isolated object filling most of the frame, then
+  `_crop_to_content` (crop to the alpha bounding box + small padding, pad to square) before the
+  final 64x64 resize — without this, the model's baked-in canvas margin makes sprites look small
+  and sparse once tiled.
+- **Texture tiles** (`TEXTURE_TILE_TYPES = {"wall", "floor"}`): these aren't objects sitting on a
+  tile, they *are* the tile's surface — `background="opaque"`, a distinct prompt demanding a
+  seamless, zero-margin, edge-to-edge texture, and **no** crop step (cropping a texture meant to
+  already fill 100% of the frame is a no-op at best, clips a busy pattern at worst). Getting this
+  distinction wrong was a real, user-reported bug — see `notes.md`.
+
+Sprites are cached **by object type**, not per-scene or per-run, in `.infinienv_asset_cache/` at
+the repo root (gitignored) — generating "table" once means every future scene with a table reuses
+it; `generated`/`auto` only ever calls out for types not already cached. `asset_manifest.json`
+records exactly where each sprite came from (`local`/`generated`/`none`) so a run never silently
+claims a generated asset that wasn't actually generated.
+
+---
+
+## 10. Creativity systems: mutation, curriculum, dataset export
+
+### Mutation (`generation/mutation.py`)
+
+`infinienv mutate <scene.json> --count N [--provider openai_agents --llm-fraction 0.5]`. Five
+deterministic strategies (reposition objects, add obstacle, add distractor, reverse start, theme
+reskin) plus an optional LLM-proposed strategy — `provider.propose_mutation(scene, seed)`,
+duck-typed (only `OpenAIAgentsProvider` implements it; `mutate` skips the LLM path entirely if no
+provider is given or `llm_fraction=0`). Every candidate, LLM-proposed or deterministic, goes
+through the exact same `validate_scene()` before being kept; a failed/malformed LLM proposal is
+caught and treated like any other rejected candidate — the loop just keeps trying, never crashes.
+"Theme reskin" is metadata-only (`metadata.theme`, not a distinct per-theme object vocabulary) —
+the object-type vocabulary being fixed-or-declared is a deliberate schema-simplicity choice, so a
+"reskin" can't swap object types without redeclaring mechanics. Automatic key-door-dependency
+injection isn't a deterministic strategy (only available via the LLM-proposed path) — see
+`notes.md` for the scoping call.
+
+### Curriculum (`generation/curriculum.py`)
+
+`infinienv curriculum --theme X --levels N [--out path]` writes a prompts.txt-style level list
+(5 built-in level templates: open-room pickup → obstacle → cross-room delivery → key/door →
+decoy + long path). Add `--run --provider ... --seed ...` to actually execute every level
+end-to-end (generate/validate/solve/render) into `<out>/level_NN/`, not just write the prompt
+list — `<out>/prompts.txt` is still written alongside for benchmark compatibility.
+
+### Dataset export (`export/dataset.py`)
+
+`infinienv export-dataset <runs_dir> --out dataset.jsonl` scans a directory of executed run
+folders (anything with `scene.json` + `metrics.json` — curriculum level dirs, benchmark
+`prompt_NNN/` dirs, mutation-then-solve output, etc.) and emits one JSONL row per run:
+`id` (unique: `<run_dir_name>__<scene_metadata_name>`), `prompt`, `scene_path`,
+`asset_manifest_path`, `replay_path`, `gif_path`, `success`, `path_length`, `goal`, and
+`programmatic_reward` — a **real per-goal completion signal** sourced from
+`SolveResult.goal_results` in `replay.json` (`{"deliver_package": 1, "unlock_door": 1, "total":
+2}`), not a single flattened success bit.
+
+### Benchmark (`evaluation/benchmark.py`)
+
+`infinienv benchmark <prompts.txt> --provider ... --out runs/benchmark` runs `run_generation`
+over every prompt (blank lines and `#`-comments in the prompt file are skipped), aggregates valid
+on first try / valid after repair / failed after repair / solved successfully / avg repair
+attempts / avg path length / avg generation time, and writes `benchmark_summary.json`.
+
+---
+
+## 11. CLI reference
+
+```bash
+python -m infinienv generate --prompt "..." --provider {mock,openai_agents,openai_responses,anthropic} \
+  --seed 42 --out runs/demo [--max-repair-attempts N] [--no-fallback] \
+  [--assets {none,local,generated,auto}]
+
+python -m infinienv validate runs/demo/scene.json
+python -m infinienv solve runs/demo/scene.json [--out runs/demo]
+python -m infinienv play runs/demo/scene.json          # interactive terminal play; also
+                                                          # accepts a scene's custom trigger_actions
+python -m infinienv benchmark examples/prompts.txt --provider mock --out runs/benchmark
+
+python -m infinienv mutate runs/demo/scene.json --count 10 --out runs/mutations \
+  [--provider openai_agents --llm-fraction 0.5]
+
+python -m infinienv curriculum --theme warehouse --levels 5 --out examples/curriculum_warehouse.txt
+python -m infinienv curriculum --theme warehouse --levels 5 --run --provider mock --seed 1 --out runs/curriculum
+
+python -m infinienv export-dataset runs/curriculum --out runs/curriculum/dataset.jsonl
+```
+
+Every `generate` writes stage-by-stage progress to stdout (`[n/total] ...`) ending in a clear
+`Result: SUCCESS`/`FAILED (see report.md)`. Design all CLI output for a reviewer skimming a
+terminal, not just for a human who already knows what happened.
+
+Artifacts written per successful `generate` run:
+
+```text
+runs/<run_id>/
+├── scene.json            # structured SceneSpec ground truth
+├── validation.json       # validator checks + full repair_history
+├── metrics.json          # solvability, path length, success, timings
+├── replay.json           # action trace + per-goal completion (goal_results)
+├── render.png             # static top-down visualization
+├── replay.gif              # animated replay of the agent solving the task
+├── report.md                # human-readable run summary
+├── asset_plan.json          # (only if --assets != none) requested sprite types
+└── asset_manifest.json      # (only if --assets != none) resolved sprite source per type
+```
+
+---
+
+## 12. Evaluation and metrics
+
+`metrics.json` (via `evaluation/metrics.py::compute_metrics`):
+
+```json
+{
+  "success": true, "provider": "openai_agents", "seed": 42, "repair_attempts": 1,
+  "used_fallback": false, "validation_passed": true, "solver_success": true,
+  "path_length": 34, "num_objects": 8, "num_walls": 44, "num_goals": 1,
+  "generation_time_seconds": 2.41, "solve_time_seconds": 0.02
+}
+```
+
+`success` is only `true` if both `validation_passed` and `solver_success` are true — never claim
+success otherwise, in `metrics.json` or in `report.md`.
+
+---
+
+## 13. Coding standards
+
+Python 3.11+.
+
+Prefer: pydantic models for structured specs, type hints everywhere, clear module boundaries
+(section 3's package layout), deterministic seeds, small pure functions, explicit exceptions for
+invalid state (`ActionError`, `PlanError`, `ProviderError`, `GenerationFailedError`), pytest,
+lazy imports for optional/heavy dependencies (every provider module, `assets/generator_openai.py`)
+so `mock`-only usage never needs them installed.
+
+Avoid: hidden global state, nondeterministic tests, giant files, broad `except Exception` without
+a clear reason, model-authored code execution (section 2), adding a mechanic/effect op without a
+validator check and a test, dead code (delete it, don't comment it out or leave it "for later").
+
+---
+
+## 14. Testing
+
+One test module per source module, roughly (`tests/test_<name>.py` for `src/infinienv/**/<name>.py`).
+Minimum coverage per area:
+
+```text
+test_schema.py        - valid scenes parse; missing fields fail; arbitrary `type` strings parse
+                         at the schema layer (validator.py enforces the allowlist, not pydantic);
+                         mechanics/InteractGoal parse
+test_validator.py      - bounds/overlap/missing-goal-object/duplicate-id/no-goals fail; every
+                          MECHANICS_* code has a test; the full "throw vase through window"
+                          scenario validates end-to-end
+test_reachability.py    - reachable passes; sealed fails
+test_solver.py           - pickup/deliver/locked-door succeed; impossible task fails cleanly;
+                            trace/goal_results reflect real incremental state, not a
+                            reconstructed-after-the-fact snapshot (regression coverage for the
+                            bug in notes.md)
+test_interactions.py      - the effect interpreter: precondition enforcement, each effect op,
+                             routing from apply_action for an unrecognized verb
+test_mechanics_cache.py    - persist/reload, no duplication or overwrite on repeated calls
+test_mock_generation.py     - mock provider is deterministic and always valid
+test_assets.py               - scene_asset_types includes wall+agent; none/local resolution modes
+test_generator_openai.py      - mocked OpenAI client (no network): texture vs. discrete-object
+                                 branching (background param, prompt template, crop applied only
+                                 for discrete types)
+test_mutation.py               - mutations valid+distinct; LLM-proposed path used and validated;
+                                  LLM failure degrades gracefully
+test_curriculum.py              - level templates easy->hard; --run executes and writes artifacts
+test_dataset_export.py           - per-goal programmatic_reward, not a flattened bool
+test_compiler.py                  - --no-fallback raises with the real root cause surfaced, not
+                                     just the last (often generic) history entry
+test_cli.py                        - generate/validate/solve write expected artifacts
+```
+
+Before considering a change done:
+
+```bash
+pytest
+python -m infinienv generate --provider mock --prompt "Create a kitchen delivery task" --out runs/smoke_test
+python -m infinienv validate runs/smoke_test/scene.json
+python -m infinienv solve runs/smoke_test/scene.json --out runs/smoke_test
+```
+
+For anything touching a provider, a mechanic, or the asset pipeline, also verify live against the
+real API at least once (not just the offline test suite) before calling it done — several real
+bugs this session (schema/structured-output mismatches, the trace bug, the wall-texture bug) were
+only caught this way. Record what you verified live in `notes.md`. If tests can't be run in the
+current environment, say so honestly rather than claiming untested work passes.
+
+---
+
+## 15. Documentation
+
+`README.md` must stay reviewer-first: one-paragraph pitch, pipeline diagram, setup, no-key mock
+mode, CLI examples, artifact examples, evaluation-criteria mapping, an honest limitations section.
+A reviewer should understand how to run the project within 60 seconds of opening it. Don't bury
+the demo instructions.
+
+When you ship a feature, update, in this order: the code, its tests, `README.md` (if it changes
+what a reviewer would run or see), this file (if it changes an invariant, adds a new
+subsystem, or changes an existing one's behavior), and `notes.md` (the decision/bug log entry —
+always, for anything non-obvious).
+
+---
+
+## 16. Safety and sandboxing
+
+The runtime LLM must not execute arbitrary generated code (section 2). Concretely:
+
+Allowed: emitting `SceneSpec`/mechanics JSON, calling the deterministic read-only/validate-only
+tools (`get_scene_schema`, `get_supported_mechanics`, `get_known_mechanics`, `validate_scene_tool`),
+requesting validation, requesting repair.
+
+Not allowed: shell execution from model output, arbitrary file writes from model output
+(`artifacts/writer.py::resolve_out_dir` rejects path traversal outside the working directory),
+importing packages chosen by the model at runtime, unrestricted `eval`/`exec`, and — per the
+explicit decision recorded in `notes.md` — sandboxed arbitrary code execution frameworks (e.g.
+the OpenAI Agents SDK's "sandbox agents"), because sandboxing changes the blast radius of running
+untrusted code, not whether doing so breaks the deterministic-validation guarantee.
+
+---
+
+## 17. Roadmap: GPU and 3D
+
+Not required for the CPU/2D core. GPU becomes relevant for local LLM inference (an
+OpenAI-compatible endpoint, e.g. `LLM_PROVIDER=vllm`, `LLM_BASE_URL=http://localhost:8000/v1`),
+batch prompt-suite generation, or future vision-policy training — none of this should make the
+basic CLI require a GPU.
+
+3D: the schema is deliberately flat 2D (`x`/`y`, not `position`/`rotation`/`scale`) so validation
+stays simple. A future 3D path would add those fields and exporters (Godot, Unity ML-Agents,
+Isaac Lab, Genesis, Habitat, ManiSkill, MuJoCo) targeting the same `SceneSpec` abstraction, with a
+vision-based policy eventually replacing the deterministic 2D planner for that path specifically
+— the 2D path keeps its guarantees regardless.
+
+---
+
+## 18. Release checklist
+
+```text
+[ ] README explains the project in under 60 seconds.
+[ ] `pip install -e .` works.
+[ ] `python -m infinienv generate --provider mock ...` works without API keys.
+[ ] `python -m infinienv generate --provider openai_agents ...` works with a real key.
+[ ] Invalid scenes produce clear, structured validation errors; repair attempts are recorded.
+[ ] render.png / replay.gif / metrics.json / replay.json are generated and metrics.json is truthful.
+[ ] `--assets local` and `--assets generated` both produce a correctly-scaled, seamless-where-
+    appropriate render (texture tiles fill edge-to-edge; discrete objects fill their cell without
+    a boxy margin).
+[ ] benchmark mode runs over multiple prompts; mutate/curriculum --run/export-dataset all work.
+[ ] At least one scene exercises section 5's extended mechanics end-to-end (validated, solved,
+    replayed), ideally live-verified against a prompt with no exact hand-authored precedent.
+[ ] pytest passes; anything touching a provider/mechanic/asset was also verified live, not just
+    against the offline suite.
+[ ] notes.md reflects any non-obvious decision or bug fix from the current work.
+```
+
+---
+
+## 19. Framing
+
+> InfiniEnv is a verified environment factory. It compiles natural language into structured,
+> playable worlds — including worlds with mechanics the model defined itself, expressed as safe,
+> validated data rather than code; repairs invalid generations using deterministic validator
+> feedback; mutates successful worlds into infinite variants; and emits replayable proof that an
+> agent can complete code-defined objectives.
+
+Avoid framing it as "an LLM makes a game." Use instead:
+
+> A model proposes. The harness verifies. The agent proves.
+
+That is the core research contribution, and it still holds at every layer this project has grown
+into.

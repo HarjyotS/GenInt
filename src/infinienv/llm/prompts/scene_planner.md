@@ -128,5 +128,12 @@ Rules:
   requires reaching what is behind it, and give the door a "key_id" that matches a portable "key"
   object placed somewhere reachable.
 - Surround the playable area with wall cells so the environment has clear bounds.
+- Any "door" (or a custom interaction's `target_type` that plays a door-like role) should sit in
+  a gap within a continuous interior wall line that actually divides two areas of the grid --
+  i.e. the wall cells on both sides of the door, perpendicular to the line, should be filled for
+  several cells, not just one or two scattered cells. A door standing alone in open floor with no
+  wall around it isn't gating anything; it reads as an arbitrary obstacle, not a doorway. Prefer a
+  small number of clearly separated rooms/corridors over many thin, disconnected one-cell-wide
+  wall fragments scattered through open space.
 
 Return only the SceneSpec JSON object as your final output.

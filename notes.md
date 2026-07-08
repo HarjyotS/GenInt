@@ -309,3 +309,73 @@ with scenes that use mechanics: `mutate` preserves `mechanics` through `model_co
 and re-validates each variant (including re-solving the custom interaction) same as any other
 mutation; the renderer's existing `COLORS.get(type, gray)` fallback already handles types it's
 never seen, no changes needed.
+
+## Museum heist full demo: sprite-fill bug, LLM sampling variance, sandbox agents declined
+
+Built a genuinely complex demo combining a built-in key/door goal with a custom `crack_open_safe`
+interaction (`must_hold_type: "stethoscope"`, effect `unlock_target`) and `--assets generated`.
+Emergent design worth noting: the model placed `jewel_1` and `safe_1` on the *same* cell with the
+safe `solid=True, locked=True` -- the jewel is physically inaccessible until `crack` fires
+`unlock_target` on the safe, at which point the cell becomes enterable. Not something I designed
+for explicitly; the model figured out how to express "jewel is inside the safe" using only
+existing primitives (shared position + solid/locked).
+
+**Real bug, user-reported from a screenshot**: wall tiles had visible padding around a "brick
+chunk" instead of filling their cell, making the whole layout read as scattered blocks rather
+than a floor plan (compounding a separate, correct observation that the door looked "arbitrary" --
+it wasn't logically arbitrary, there was a real wall gap, but non-filling wall sprites made the
+partition unreadable as a wall). Root cause: `_crop_to_content` (added right before this) treats
+every object the same way -- crop to bounding box, pad to square. That's correct for a discrete
+object like a key sitting *on* a tile, but wrong for wall/floor, which aren't objects on a tile,
+they *are* the tile's surface and should be a seamless edge-to-edge texture with zero margin.
+Fixed by splitting into `TEXTURE_TILE_TYPES = {"wall", "floor"}` with their own prompt template
+(explicitly demanding a seamless, opaque, zero-margin, zero-transparency tile) and
+`background="opaque"` instead of `"transparent"`, and skipping `_crop_to_content` entirely for
+that path (cropping a texture that's supposed to already fill 100% of the frame would be a
+no-op at best, risk clipping a busy edge-to-edge pattern at worst). Verified with a 4x4 tiled
+sheet of the regenerated wall sprite -- genuinely seamless, no visible grid. Re-rendering the
+existing museum heist scene with the fixed wall sprite (everything else cache-hit) turned it from
+"scattered icons" into a readable floor plan with the door correctly sitting in a real wall
+opening. Added `tests/test_generator_openai.py` (mocked OpenAI client, no network) asserting the
+texture/discrete branching: correct `background` value, correct prompt template, crop applied
+only for discrete types.
+
+**Model correction on gpt-image-2**: mentioned gpt-image-2 has transparent-background support.
+Two independent OpenAI doc fetches (API reference + guide page) both said the opposite --
+gpt-image-2 explicitly does NOT support `background: "transparent"`; that's gpt-image-1/1.5/
+1-mini. Flagged the contradiction rather than either silently complying or silently overriding,
+since shipping code that silently drops the requested feature (transparency requested on a model
+that rejects it) would be worse than asking. Confirmed via `AskUserQuestion`: kept `gpt-image-1`
+(already the default, already proven working this session) and added `background="transparent"`
++ `output_format="png"` to the real API call -- genuine alpha transparency instead of the
+color-distance-based matting I'd been about to build as a workaround, which is a strictly better
+fix once available.
+
+**LLM sampling variance, not a bug**: chasing a "regenerate the same demo" request, the exact
+same prompt+seed produced valid-on-first-try, invalid-with-recoverable-repair, and
+invalid-after-exhausting-3-repairs outcomes across different calls. `seed` is embedded in the
+user message text, not used as a real sampling seed, so this is expected -- confirmed the
+specific "safe+jewel share a locked cell, deliver to separate exit" pattern solves correctly
+when it validates (goal_results all true, 48 correct actions), so the sporadic `UNSOLVABLE`
+failures are the validator correctly rejecting genuinely-different bad layouts on a harder
+prompt, not a hidden engine defect. Reported this distinction explicitly rather than either
+claiming a bug that wasn't there or hand-waving away real failures: the *delivered* output
+(`runs/.../scene.json`) has always validated in every demo shipped this session, because the
+repair-then-fallback loop is precisely the mitigation for this variance. The `--no-fallback`
+failures the user saw were debug probes I ran on purpose with that safety net deliberately
+switched off.
+
+**Sandbox agents (declined for now)**: asked to give each game a
+[sandbox agent](https://openai.github.io/openai-agents-python/sandbox_agents/) that could
+redefine movement/physics/mechanics per scene via arbitrary tool use, framed as reducing errors.
+Looked up what "sandbox agents" actually means in the Agents SDK before responding (shell access
++ command execution + file editing in an isolated sandbox) rather than assuming from the name.
+That's model-authored code actually executing, which directly conflicts with two things at once:
+CLAUDE.md section 23 (no arbitrary code execution from model output, sandboxed or not) and the
+user's own separate request in the same conversation that generation should never produce
+something that doesn't validate -- arbitrary sandboxed code has no equivalent to the fixed,
+enumerable effect vocabulary that makes our validator's solvability guarantee possible, so
+adopting it would trade a hard guarantee for a soft one while being told the opposite was wanted.
+Explained the conflict and asked rather than either building it or refusing outright; user chose
+to defer sandbox agents and continue extending capability through the existing effect-op
+vocabulary instead (echoed in the new CLAUDE.md section 0).
