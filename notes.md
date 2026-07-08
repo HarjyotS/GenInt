@@ -112,6 +112,39 @@ the first try (confirms the structured-output fix above actually resolved the un
 reliability problem, not just the fallback masking it); a stub provider that always returns an
 invalid scene correctly raises `GenerationFailedError` with `allow_fallback=False`.
 
+## --no-fallback surfaced two more real bugs on a harder prompt
+
+Used `--no-fallback` on a genuinely complex prompt ("4 packages across a multi-room office
+building") and it did its job: two real problems surfaced instead of being masked.
+
+1. **`SceneObject.type` was `str` + a runtime check, not a schema-level enum.** Under
+   `output_type=SceneSpec` structured output, the model happily sampled `"desk"`, `"sofa"`,
+   `"cabinet"`, `"chair"` — none of which are supported object types — because the JSON schema
+   for `type` only said `{"type": "string"}`. The runtime `@model_validator` caught it, but only
+   *after* the SDK had already tried (and failed) to parse the output, producing an opaque `SDK
+   run failed` error. Fixed by making `type` a `Literal[OBJECT_TYPE_VALUES]` so the JSON schema
+   itself carries an `enum` constraint — this is a real behavior change (constrains what the
+   model can even sample), not just a nicer error. Added
+   `test_object_type_is_an_enum_in_the_json_schema` as a regression test.
+2. **`GenerationFailedError` only showed `history[-1]`.** When the initial `generate_scene` call
+   raises, the loop appends one more entry ("no parseable previous scene to repair") before
+   breaking — and the error message was built from *that* entry, not the original one, so the
+   real cause (a 401, a JSON parse error, whatever) was invisible unless you went digging in
+   `.history` yourself. Fixed to join every attempt's description into the message. Added
+   `test_generation_failed_error_surfaces_root_cause_not_just_last_entry`.
+3. **The model put `// comment` lines inside a large `walls` array**, which isn't valid JSON,
+   on the same complex prompt — even with `output_type=SceneSpec` set. Best guess: the schema's
+   recursive `sequence` goal (a goal containing a list of goals, one of which can itself be a
+   `sequence`) makes the schema self-referential in a way OpenAI's strict/grammar-constrained
+   structured-output mode doesn't fully support, so this particular call likely degraded to
+   non-strict mode without erroring, and the model reverted to human-readable JSON-with-comments
+   habits once its own walls array got long. Not confirmed via API-level introspection (would
+   need to compare the actual request payload's `strict` flag), just the most plausible
+   explanation for output that violates the schema in a way the JSON-schema `enum`/strict layer
+   should have prevented. Mitigated at the prompt layer (`scene_planner.md` now explicitly
+   forbids comments/trailing commas and calls out long wall arrays as expected). Confirmed fixed
+   end-to-end: the same prompt+seed that failed now succeeds after one repair attempt.
+
 ## Mutation engine: 4 of the 5 listed strategies
 
 CLAUDE.md section 16.B lists six mutation ideas. Implemented four as real operators in
