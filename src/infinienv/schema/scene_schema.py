@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, Union
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
-OBJECT_TYPES: set[str] = {
+OBJECT_TYPE_VALUES: tuple[str, ...] = (
     "wall",
     "floor",
     "table",
@@ -19,7 +19,14 @@ OBJECT_TYPES: set[str] = {
     "exit",
     "hazard",
     "distractor",
-}
+)
+OBJECT_TYPES: set[str] = set(OBJECT_TYPE_VALUES)
+
+# A Literal (not a plain `str` + runtime check) so the JSON schema itself carries an
+# enum constraint -- under structured-output / strict mode, this stops the model from
+# ever sampling an unsupported type (e.g. "desk", "sofa") instead of only rejecting it
+# after the fact once validation/parsing has already failed.
+ObjectType = Literal[OBJECT_TYPE_VALUES]
 
 ACTION_TYPES: set[str] = {
     "move_up",
@@ -56,19 +63,13 @@ class AgentSpec(BaseModel):
 
 class SceneObject(BaseModel):
     id: str
-    type: str
+    type: ObjectType
     x: int
     y: int
     solid: bool = False
     portable: bool = False
     locked: bool = False
     key_id: str | None = None
-
-    @model_validator(mode="after")
-    def _check_type(self) -> "SceneObject":
-        if self.type not in OBJECT_TYPES:
-            raise ValueError(f"unsupported object type: {self.type!r}")
-        return self
 
 
 class WallCell(BaseModel):

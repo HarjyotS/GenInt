@@ -51,6 +51,11 @@ Rules:
 - Prefer solvable 2D grid layouts. Keep the room open unless the task requires obstacles.
 - Do not output markdown or code fences.
 - Do not output explanation, only the JSON object.
+- Output MUST be valid JSON parseable by a strict JSON parser: no `//` or `/* */` comments, no
+  trailing commas, no unquoted keys. If you want to note what a group of walls represents, encode
+  that in the room layout itself (or in `metadata`), never as a comment inside `walls`/`objects`.
+- For a scene with many walls (a multi-room building, a maze), list every `{"x", "y"}` wall cell
+  individually with no annotation -- long arrays are fine, comments are not.
 - Do not invent unsupported mechanics.
 - All object IDs must be unique strings.
 - All coordinates must be integers inside the grid (0 <= x < width, 0 <= y < height).

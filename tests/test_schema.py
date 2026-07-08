@@ -50,6 +50,16 @@ def test_unsupported_object_type_fails():
         scene_spec_from_dict(data)
 
 
+def test_object_type_is_an_enum_in_the_json_schema():
+    # This is what makes structured-output generation refuse unsupported types (e.g. "desk",
+    # "sofa") at sampling time, instead of only rejecting them after the fact.
+    from infinienv.schema.scene_schema import OBJECT_TYPE_VALUES, scene_spec_json_schema
+
+    schema = scene_spec_json_schema()
+    object_type_schema = schema["$defs"]["SceneObject"]["properties"]["type"]
+    assert set(object_type_schema["enum"]) == set(OBJECT_TYPE_VALUES)
+
+
 def test_sequence_goal_nests():
     data = _base_scene()
     data["goals"] = [

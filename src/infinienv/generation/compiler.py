@@ -22,17 +22,27 @@ def _schema_failure_result(exc: Exception) -> ValidationResult:
     return ValidationResult(valid=False, errors=[ValidationIssue("GENERATION_FAILED", str(exc))])
 
 
+def _describe_attempt(entry: dict) -> str:
+    label = f"attempt {entry.get('attempt')} ({entry.get('stage')})"
+    if entry.get("error"):
+        return f"{label}: {entry['error']}"
+    if entry.get("errors"):
+        return f"{label}: " + "; ".join(f"{e['code']}: {e['message']}" for e in entry["errors"])
+    return f"{label}: valid={entry.get('valid')}"
+
+
 class GenerationFailedError(ProviderError):
     """Raised instead of silently falling back to a template when allow_fallback=False."""
 
     def __init__(self, prompt: str, history: list[dict]):
         self.prompt = prompt
         self.history = history
-        last = history[-1] if history else {}
-        reason = last.get("error") or "; ".join(e["message"] for e in last.get("errors", []))
+        # Show every attempt, not just the last -- the last entry is often just a
+        # loop-exit note ("no parseable previous scene to repair"), while the actual
+        # root cause (e.g. the real pydantic/API error) is earlier in the history.
+        trail = "\n  ".join(_describe_attempt(e) for e in history)
         super().__init__(
-            f"generation failed for prompt {prompt!r} and fallback is disabled "
-            f"(--no-fallback): {reason or 'validation never passed'}"
+            f"generation failed for prompt {prompt!r} and fallback is disabled (--no-fallback):\n  {trail}"
         )
 
 
