@@ -73,6 +73,12 @@ by `tests/`.
 | `openai_responses` | Yes | Lower-level fallback: a single Responses API call with a strict JSON-schema `text.format`, no agent orchestration. |
 | `anthropic` | Yes | Optional Claude provider (see Limitations). |
 
+By default, if the provider can't produce a valid scene within `MAX_REPAIR_ATTEMPTS`, `generate`
+silently falls back to the deterministic template generator so the pipeline still produces a
+successful run (useful for unattended/reviewer runs). Pass `--no-fallback` to disable that and
+have the command error out instead — useful while iterating on prompts/providers, so a real
+generation failure is loud instead of quietly masked by the fallback.
+
 If `OPENAI_API_KEY` isn't set, either use `--provider mock` or drop the key in a project-root
 `.env` file (`OPENAI_API_KEY=sk-...`, or `OP_KEY=sk-...` — both are read).
 

@@ -22,6 +22,20 @@ def _schema_failure_result(exc: Exception) -> ValidationResult:
     return ValidationResult(valid=False, errors=[ValidationIssue("GENERATION_FAILED", str(exc))])
 
 
+class GenerationFailedError(ProviderError):
+    """Raised instead of silently falling back to a template when allow_fallback=False."""
+
+    def __init__(self, prompt: str, history: list[dict]):
+        self.prompt = prompt
+        self.history = history
+        last = history[-1] if history else {}
+        reason = last.get("error") or "; ".join(e["message"] for e in last.get("errors", []))
+        super().__init__(
+            f"generation failed for prompt {prompt!r} and fallback is disabled "
+            f"(--no-fallback): {reason or 'validation never passed'}"
+        )
+
+
 DEFAULT_MAX_REPAIR_ATTEMPTS = int(os.environ.get("MAX_REPAIR_ATTEMPTS", "3"))
 
 
@@ -40,6 +54,7 @@ def generate_and_validate(
     seed: int,
     *,
     max_repair_attempts: int | None = None,
+    allow_fallback: bool = True,
 ) -> GenerationResult:
     max_attempts = DEFAULT_MAX_REPAIR_ATTEMPTS if max_repair_attempts is None else max_repair_attempts
 
@@ -78,6 +93,9 @@ def generate_and_validate(
         except _PROVIDER_FAILURE_EXCEPTIONS as exc:
             history.append({"attempt": attempts, "stage": "repair", "error": str(exc)})
             # keep the last valid `scene`/`validation` and try repairing again next iteration
+
+    if not validation.valid and not allow_fallback:
+        raise GenerationFailedError(prompt, history)
 
     used_fallback = False
     if not validation.valid:

@@ -95,6 +95,23 @@ protocol, direct Messages API call, same JSON-parsing path as `openai_responses`
 leaving a dangling reference. Not exercised against a live key in this session (no
 `ANTHROPIC_API_KEY` available) — fails cleanly with a clear message if the key is missing.
 
+## `--no-fallback`: make silent template fallback opt-out, not just opt-in
+
+The default repair-then-template-fallback behavior (CLAUDE.md section 9) is right for
+unattended/reviewer runs, but it means a real provider failure (bad JSON, rate limit, wrong
+schema) can still end in `Result: SUCCESS` because the *fallback* scene validated fine — masking
+the actual problem while iterating on prompts/providers. Added `generate_and_validate(...,
+allow_fallback: bool)`; when `False` and validation never passes, it raises
+`GenerationFailedError` (a `ProviderError` subclass) instead of generating the template scene.
+`runner.run_generation` raises before any artifact is written (no fake `scene.json` /
+`metrics.json` for a run that didn't really work), and `cli.py`'s existing `ProviderError`
+handler in `main()` turns that into a clean non-zero exit with the real reason printed. Wired up
+as `infinienv generate --no-fallback`. Verified: `mock --no-fallback` still succeeds (mock is
+valid by construction); `openai_agents --no-fallback` against the real API also now succeeds on
+the first try (confirms the structured-output fix above actually resolved the underlying
+reliability problem, not just the fallback masking it); a stub provider that always returns an
+invalid scene correctly raises `GenerationFailedError` with `allow_fallback=False`.
+
 ## Mutation engine: 4 of the 5 listed strategies
 
 CLAUDE.md section 16.B lists six mutation ideas. Implemented four as real operators in

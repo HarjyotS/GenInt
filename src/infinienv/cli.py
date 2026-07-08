@@ -49,6 +49,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
         args.seed,
         args.out,
         max_repair_attempts=args.max_repair_attempts,
+        allow_fallback=not args.no_fallback,
         on_stage=on_stage,
     )
     print()
@@ -175,6 +176,12 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--seed", type=int, default=42)
     g.add_argument("--out", required=True)
     g.add_argument("--max-repair-attempts", type=int, default=None, dest="max_repair_attempts")
+    g.add_argument(
+        "--no-fallback",
+        action="store_true",
+        help="Error out instead of silently falling back to the template generator when the "
+        "provider can't produce a valid scene within the repair budget.",
+    )
     g.set_defaults(func=cmd_generate)
 
     v = sub.add_parser("validate", help="Validate a scene.json file.")

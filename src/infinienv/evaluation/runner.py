@@ -38,6 +38,7 @@ def run_generation(
     out_dir: str,
     *,
     max_repair_attempts: int | None = None,
+    allow_fallback: bool = True,
     on_stage: StageCallback | None = None,
 ) -> RunResult:
     def stage(msg: str) -> None:
@@ -47,7 +48,9 @@ def run_generation(
     resolved_out = resolve_out_dir(out_dir)
 
     t0 = time.perf_counter()
-    generation = generate_and_validate(provider, prompt, seed, max_repair_attempts=max_repair_attempts)
+    generation = generate_and_validate(
+        provider, prompt, seed, max_repair_attempts=max_repair_attempts, allow_fallback=allow_fallback
+    )
     generation_time = time.perf_counter() - t0
     if generation.repair_attempts == 0 and generation.validation.valid:
         stage("Generated initial SceneSpec (valid on first try)")
