@@ -6,12 +6,22 @@ Used by both `infinienv generate` and benchmark mode.
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 from typing import Callable
 
 from infinienv.artifacts.report import build_report
-from infinienv.artifacts.writer import resolve_out_dir, write_metrics, write_report, write_scene, write_validation
+from infinienv.artifacts.writer import (
+    resolve_out_dir,
+    write_json,
+    write_metrics,
+    write_report,
+    write_scene,
+    write_validation,
+)
+from infinienv.assets.manifest import build_asset_manifest, build_asset_plan
+from infinienv.assets.resolver import resolve_assets, scene_asset_types
 from infinienv.evaluation.metrics import compute_metrics
 from infinienv.generation.compiler import GenerationResult, generate_and_validate
 from infinienv.llm.base import SceneProvider
@@ -39,6 +49,8 @@ def run_generation(
     *,
     max_repair_attempts: int | None = None,
     allow_fallback: bool = True,
+    assets_mode: str = "none",
+    asset_cache_dir: str | None = None,
     on_stage: StageCallback | None = None,
 ) -> RunResult:
     def stage(msg: str) -> None:
@@ -84,11 +96,36 @@ def run_generation(
     )
     metrics_path = write_metrics(resolved_out, metrics)
 
+    asset_paths: dict[str, str] = {}
+    extra_paths: dict[str, str] = {}
+    if assets_mode != "none":
+        cache_dir = asset_cache_dir or os.path.join(os.getcwd(), ".infinienv_asset_cache")
+        entries, notes = resolve_assets(generation.scene, assets_mode, os.path.abspath(cache_dir))
+        asset_paths = {t: e.path for t, e in entries.items() if e.path}
+        plan_path = write_json(resolved_out, "asset_plan.json", build_asset_plan(scene_asset_types(generation.scene)))
+        manifest_path = write_json(resolved_out, "asset_manifest.json", build_asset_manifest(entries, notes))
+        extra_paths["asset_plan"] = plan_path
+        extra_paths["asset_manifest"] = manifest_path
+        sources = ", ".join(sorted({e.source for e in entries.values()}))
+        stage(f"Resolved {len(entries)} asset type(s) ({sources})" + (f"; {len(notes)} note(s)" if notes else ""))
+
     render_path = f"{resolved_out}/render.png"
-    save_render_png(generation.scene, render_path, title=generation.scene.metadata.name)
+    save_render_png(generation.scene, render_path, title=generation.scene.metadata.name, asset_paths=asset_paths)
 
     replay_path = f"{resolved_out}/replay.gif"
-    save_replay_gif(generation.scene, solve.actions, replay_path)
+    save_replay_gif(generation.scene, solve.actions, replay_path, asset_paths=asset_paths)
+
+    replay_json_path = write_json(
+        resolved_out,
+        "replay.json",
+        {
+            "actions": solve.actions,
+            "trace": solve.trace,
+            "success": solve.success,
+            "goal_results": solve.goal_results,
+        },
+    )
+    extra_paths["replay_json"] = replay_json_path
 
     report_md = build_report(
         prompt=prompt,
@@ -101,27 +138,22 @@ def run_generation(
     )
     report_path = write_report(resolved_out, report_md)
 
-    stage(
-        "Wrote artifacts:\n"
-        f"      - {scene_path}\n"
-        f"      - {validation_path}\n"
-        f"      - {metrics_path}\n"
-        f"      - {render_path}\n"
-        f"      - {replay_path}\n"
-        f"      - {report_path}"
-    )
+    all_paths = {
+        "scene": scene_path,
+        "validation": validation_path,
+        "metrics": metrics_path,
+        "render": render_path,
+        "replay": replay_path,
+        "report": report_path,
+        **extra_paths,
+    }
+
+    stage("Wrote artifacts:\n" + "\n".join(f"      - {p}" for p in all_paths.values()))
 
     return RunResult(
         out_dir=resolved_out,
         generation=generation,
         solve=solve,
         metrics=metrics,
-        paths={
-            "scene": scene_path,
-            "validation": validation_path,
-            "metrics": metrics_path,
-            "render": render_path,
-            "replay": replay_path,
-            "report": report_path,
-        },
+        paths=all_paths,
     )

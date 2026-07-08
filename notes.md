@@ -154,3 +154,76 @@ dependency" as a mutation operator — restructuring goals/walls to correctly re
 into an arbitrary scene is materially more complex than the other four and lower value than
 getting the rest of the P0/P1 surface solid first; noted as a gap in the README rather than
 silently dropped.
+
+## PATHWAY.md: build new capabilities on the working foundation, don't rewrite it
+
+The user pasted `PATHWAY.md`, a much larger roadmap (asset pipeline, dataset export, richer
+mutation/curriculum, a renamed package layout, pygame-ce, typer/rich CLI, a v0.2 `SceneSpec`
+with `tiles`/`goal.steps`). Asked the user directly rather than guessing on scope, since large
+parts of it either duplicate or conflict with decisions already made and *verified against the
+real API* in this session. Confirmed direction: build the genuinely new capabilities
+(asset pipeline, dataset export, curriculum execution, richer mutations) on top of the current
+architecture; explicitly skip the package rename, the `SceneSpec` v0.2 migration, the typer/rich
+CLI swap, and pygame-ce. Reasoning for each skip is in the README's Limitations section now
+(not duplicating it here) — the short version is: none of those four actually add capability,
+they're alternate implementations of things that already work and are tested, and the schema/
+package rewrites specifically would invalidate every real-API-verified scene and test built so
+far for no functional gain.
+
+## Asset pipeline: type-keyed caching, not scene-keyed
+
+`assets/resolver.py` resolves one sprite per object **type** (not per object instance, not per
+scene) into a shared `.infinienv_asset_cache/` directory at the repo root (not inside any single
+run's output dir). This was a deliberate choice, confirmed against the user's explicit ask ("we
+should cache images... only generate more if we need it"): a "table" sprite generated for one
+scene is reused by every future scene with a table, so `--assets auto`/`generated` only ever
+calls the Images API for types that have never been generated before. Verified live: cold run
+with 5 uncached types took ~4 minutes (real gpt-image-1 calls); an immediate second run with the
+same types took 0.8s total, `asset_manifest.json` showing `"source": "generated", "note": "cache
+hit"` for all 5. Local placeholders (`assets/placeholder_gen.py`) are simple Pillow-drawn icons,
+generated once and checked into git (`assets/base/*.png`) — no network needed for `--assets
+local`, which is the safe default for CI/offline smoke tests.
+
+One real bug caught while building this: `resolver.scene_asset_types` only scanned
+`scene.objects`, so `walls` (a separate list, not `SceneObject`s) never got a "wall" entry in the
+manifest and always rendered as flat color even with `--assets local/auto`. Fixed by unconditionally
+including `"wall"` in the requested type set whenever `scene.walls` is non-empty.
+
+Model note: PATHWAY.md names `gpt-image-2`, which isn't a real released OpenAI model as of this
+session; defaulted to `gpt-image-1` (the actual current image model), overridable via
+`INFINIENV_IMAGE_MODEL` in case a newer model name becomes available later.
+
+## Dataset export: real per-goal reward, not a flattened success bit
+
+PATHWAY.md's `programmatic_reward` example has named per-subgoal keys (`picked_key: 1,
+unlocked_freezer: 1, ...`). To make that real rather than just relabeling `metrics.json`'s single
+`success` bool four ways, added `SolveResult.goal_results` to `navigation/policy.py` — a
+per-top-level-goal `{"id", "type", "success"}` list recorded as `solve_scene` processes each goal
+in order (including on early failure/`PlanError`, so every goal is always represented). This gets
+written into `replay.json` (a new artifact `run_generation` now always writes, alongside the
+existing six) and `export/dataset.py` reads it to build a genuine per-goal
+`programmatic_reward` — e.g. a 4-package delivery scene where the solver got 3/4 shows
+`{"deliver_package_1": 1, "deliver_package_2": 1, "deliver_package_3": 1, "deliver_package_4": 0,
+"total": 3}`, not a flat `0`.
+
+## Curriculum `--run`: reconciled two different meanings of `--out`
+
+The original `curriculum` command's `--out` was a single prompts.txt file path. PATHWAY.md's
+curriculum wants `<out>/level_01/{scene.json,replay.gif,metrics.json}` per level. Rather than
+picking one and breaking the other, `--out` keeps its original meaning (a prompts.txt file path)
+unless `--run` is passed, in which case `--out` is treated as a directory: each level gets
+executed into `<out>/level_NN/` via the normal `run_generation` pipeline, and a `prompts.txt` is
+still written alongside for benchmark compatibility. No existing usage breaks either way.
+
+## LLM-driven mutations: duck-typed, not a schema/protocol change
+
+`SceneProvider` (the `generate_scene`/`repair_scene` protocol) wasn't extended with a required
+`propose_mutation` method — only `OpenAIAgentsProvider` implements it. `generation/mutation.py`
+checks `hasattr(provider, "propose_mutation")` at call time and mixes LLM-proposed candidates in
+alongside the deterministic strategies at a caller-chosen `--llm-fraction`; every candidate,
+LLM-proposed or not, goes through the exact same `validate_scene()` before being kept, and a
+failed/malformed LLM proposal (`ProviderError`/pydantic `ValidationError`) is caught and treated
+like any other rejected candidate — the loop just keeps trying, never crashes. Verified live
+against the real API: 4/4 requested mutations at `llm_fraction=0.9` came back genuinely
+LLM-proposed (moved objects, added a distractor/obstacle box, added walls) and all passed full
+validation on the first attempt.

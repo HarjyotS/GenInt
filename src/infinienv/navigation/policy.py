@@ -17,6 +17,9 @@ class SolveResult:
     trace: list[dict] = field(default_factory=list)
     error: str | None = None
     final_state: GameState | None = None
+    # Per top-level goal: {"id", "type", "success"} -- the real signal behind
+    # dataset export's programmatic_reward, not just a copy of overall `success`.
+    goal_results: list[dict] = field(default_factory=list)
 
 
 def solve_scene(scene: SceneSpec) -> SolveResult:
@@ -24,6 +27,7 @@ def solve_scene(scene: SceneSpec) -> SolveResult:
     state = GameState.from_scene(scene)
     actions: list[dict] = []
     trace: list[dict] = [{"t": 0, "action": None, "position": list(state.agent_pos())}]
+    goal_results: list[dict] = []
 
     try:
         for goal in scene.goals:
@@ -38,17 +42,35 @@ def solve_scene(scene: SceneSpec) -> SolveResult:
                         "inventory": list(state.inventory),
                     }
                 )
-            if not is_goal_complete(goal, state):
+            goal_done = is_goal_complete(goal, state)
+            goal_results.append({"id": goal.id, "type": goal.type, "success": goal_done})
+            if not goal_done:
                 return SolveResult(
                     success=False,
                     actions=actions,
                     trace=trace,
                     error=f"goal {goal.id!r} not satisfied after planning",
                     final_state=state,
+                    goal_results=goal_results,
                 )
     except PlanError as exc:
-        return SolveResult(success=False, actions=actions, trace=trace, error=str(exc), final_state=state)
+        # Mark every goal not yet recorded as not (yet) achieved, so goal_results always
+        # covers every top-level goal even when planning itself raised mid-scene.
+        recorded = {g["id"] for g in goal_results}
+        for goal in scene.goals:
+            if goal.id not in recorded:
+                goal_results.append({"id": goal.id, "type": goal.type, "success": False})
+        return SolveResult(
+            success=False, actions=actions, trace=trace, error=str(exc), final_state=state, goal_results=goal_results
+        )
 
-    success = all(is_goal_complete(g, state) for g in scene.goals)
+    success = all(g["success"] for g in goal_results)
     trace.append({"t": len(actions) + 1, "success": success})
-    return SolveResult(success=success, actions=actions, trace=trace, final_state=state, error=None if success else "unsatisfied goals")
+    return SolveResult(
+        success=success,
+        actions=actions,
+        trace=trace,
+        final_state=state,
+        goal_results=goal_results,
+        error=None if success else "unsatisfied goals",
+    )

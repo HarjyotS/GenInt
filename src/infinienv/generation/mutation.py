@@ -9,14 +9,18 @@ full solvability run) before being kept; invalid candidates are discarded.
 from __future__ import annotations
 
 import json
-import os
 import random
 
+from pydantic import ValidationError as PydanticValidationError
+
 from infinienv.artifacts.writer import resolve_out_dir, write_json
+from infinienv.llm.base import ProviderError
 from infinienv.schema.scene_schema import SceneObject, SceneSpec, scene_spec_from_dict
 from infinienv.validation.validator import validate_scene
 
 MAX_ATTEMPTS_PER_MUTATION = 8
+
+THEME_ROTATION = ("kitchen", "warehouse", "office", "convenience_store", "obstacle_course")
 
 
 def _occupied_cells(scene: SceneSpec) -> set[tuple[int, int]]:
@@ -36,28 +40,6 @@ def _free_cell(rng: random.Random, scene: SceneSpec, taken: set[tuple[int, int]]
     if not candidates:
         return None
     return rng.choice(candidates)
-
-
-def _referenced_object_ids(scene: SceneSpec) -> set[str]:
-    ids: set[str] = set()
-
-    def walk(goal):
-        if goal.type == "reach":
-            ids.add(goal.target_id)
-        elif goal.type == "pickup":
-            ids.add(goal.object_id)
-        elif goal.type == "deliver":
-            ids.add(goal.object_id)
-            ids.add(goal.target_id)
-        elif goal.type == "unlock":
-            ids.add(goal.door_id)
-        elif goal.type == "sequence":
-            for sub in goal.subgoals:
-                walk(sub)
-
-    for g in scene.goals:
-        walk(g)
-    return ids
 
 
 def mutate_reposition_objects(scene: SceneSpec, rng: random.Random) -> SceneSpec:
@@ -121,16 +103,48 @@ def mutate_reverse_start(scene: SceneSpec, rng: random.Random) -> SceneSpec:
     return mutant
 
 
+def mutate_theme_reskin(scene: SceneSpec, rng: random.Random) -> SceneSpec:
+    """Same symbolic task, different theme (PATHWAY.md section 11): swaps `metadata.theme`.
+
+    Object *types* stay within the fixed, validator-enforced vocabulary (kitchen/warehouse/
+    office/etc. don't get distinct object sets in this schema by design -- see notes.md), so
+    this is a metadata-level reskin, not a full art/vocabulary swap. Always valid: it only
+    touches labels, never geometry or goals.
+    """
+    mutant = scene.model_copy(deep=True)
+    choices = [t for t in THEME_ROTATION if t != mutant.metadata.theme] or list(THEME_ROTATION)
+    mutant.metadata.theme = rng.choice(choices)
+    return mutant
+
+
 STRATEGIES = {
     "reposition": mutate_reposition_objects,
     "add_obstacle": mutate_add_obstacle,
     "add_distractor": mutate_add_distractor,
     "reverse_start": mutate_reverse_start,
+    "theme_reskin": mutate_theme_reskin,
 }
 
 
-def generate_mutations(scene: SceneSpec, count: int, seed: int) -> list[SceneSpec]:
-    """Return up to `count` distinct, validated mutations of `scene`."""
+def _try_llm_mutation(scene: SceneSpec, provider, seed: int) -> SceneSpec | None:
+    propose = getattr(provider, "propose_mutation", None)
+    if propose is None:
+        return None
+    try:
+        return propose(scene, seed)
+    except (ProviderError, PydanticValidationError):
+        return None  # treat like any other rejected candidate; caller just retries
+
+
+def generate_mutations(scene: SceneSpec, count: int, seed: int, *, provider=None, llm_fraction: float = 0.0) -> list[SceneSpec]:
+    """Return up to `count` distinct, validated mutations of `scene`.
+
+    If `provider` implements `propose_mutation` (currently only OpenAIAgentsProvider),
+    `llm_fraction` of attempts ask it for a creative variant instead of using a
+    deterministic strategy; every candidate -- LLM-proposed or deterministic -- goes
+    through the same full validate_scene() (schema + geometry + solvability) before
+    being kept, per CLAUDE.md section 16.B.
+    """
     rng = random.Random(seed)
     strategy_names = list(STRATEGIES.keys())
     results: list[SceneSpec] = []
@@ -139,9 +153,16 @@ def generate_mutations(scene: SceneSpec, count: int, seed: int) -> list[SceneSpe
     max_total_tries = count * MAX_ATTEMPTS_PER_MUTATION
     while len(results) < count and tries < max_total_tries:
         tries += 1
-        strategy_name = strategy_names[idx % len(strategy_names)]
-        idx += 1
-        candidate = STRATEGIES[strategy_name](scene, rng)
+        use_llm = provider is not None and llm_fraction > 0 and rng.random() < llm_fraction
+        if use_llm:
+            strategy_name = "llm_proposed"
+            candidate = _try_llm_mutation(scene, provider, seed + tries)
+            if candidate is None:
+                continue
+        else:
+            strategy_name = strategy_names[idx % len(strategy_names)]
+            idx += 1
+            candidate = STRATEGIES[strategy_name](scene, rng)
         candidate.metadata.name = f"{scene.metadata.name}_mut{len(results)}_{strategy_name}"
         candidate.seed = seed + len(results) + 1
         if validate_scene(candidate).valid:
@@ -149,10 +170,12 @@ def generate_mutations(scene: SceneSpec, count: int, seed: int) -> list[SceneSpe
     return results
 
 
-def mutate_scene_file(scene_path: str, out_dir: str, *, count: int, seed: int) -> list[str]:
+def mutate_scene_file(
+    scene_path: str, out_dir: str, *, count: int, seed: int, provider=None, llm_fraction: float = 0.0
+) -> list[str]:
     with open(scene_path) as f:
         scene = scene_spec_from_dict(json.load(f))
-    mutations = generate_mutations(scene, count, seed)
+    mutations = generate_mutations(scene, count, seed, provider=provider, llm_fraction=llm_fraction)
     resolved_out = resolve_out_dir(out_dir)
     written = []
     for i, mutant in enumerate(mutations):

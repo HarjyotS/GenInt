@@ -15,7 +15,9 @@ def _object_positions(state: GameState) -> dict[str, tuple[int, int] | None]:
     return {oid: (None if o.held else (o.x, o.y)) for oid, o in state.objects.items()}
 
 
-def build_replay_frames(scene: SceneSpec, actions: list[dict]) -> list[Image.Image]:
+def build_replay_frames(
+    scene: SceneSpec, actions: list[dict], *, asset_paths: dict[str, str] | None = None
+) -> list[Image.Image]:
     grid = Grid(scene)
     state = GameState.from_scene(scene)
 
@@ -25,7 +27,8 @@ def build_replay_frames(scene: SceneSpec, actions: list[dict]) -> list[Image.Ima
             agent_pos=state.agent_pos(),
             inventory=list(state.inventory),
             object_positions=_object_positions(state),
-            title=f"t=0 start",
+            title="t=0 start",
+            asset_paths=asset_paths,
         )
     ]
     for i, action in enumerate(actions, start=1):
@@ -37,13 +40,21 @@ def build_replay_frames(scene: SceneSpec, actions: list[dict]) -> list[Image.Ima
                 inventory=list(state.inventory),
                 object_positions=_object_positions(state),
                 title=f"t={i} {action['action']}",
+                asset_paths=asset_paths,
             )
         )
     return frames
 
 
-def save_replay_gif(scene: SceneSpec, actions: list[dict], out_path: str, *, frame_duration_ms: int = 220) -> None:
-    frames = build_replay_frames(scene, actions)
+def save_replay_gif(
+    scene: SceneSpec,
+    actions: list[dict],
+    out_path: str,
+    *,
+    frame_duration_ms: int = 220,
+    asset_paths: dict[str, str] | None = None,
+) -> None:
+    frames = build_replay_frames(scene, actions, asset_paths=asset_paths)
     if len(frames) == 1:
         frames.append(frames[0])
     frames[0].save(

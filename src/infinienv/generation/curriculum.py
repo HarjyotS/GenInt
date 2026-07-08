@@ -37,3 +37,24 @@ def write_curriculum(theme: str, out_path: str, *, levels: int = 5) -> str:
         for i, prompt in enumerate(prompts, start=1):
             f.write(f"# level {i}\n{prompt}\n")
     return out_path
+
+
+def run_curriculum(theme: str, out_dir: str, *, levels: int, provider, seed: int, on_level=None) -> list[dict]:
+    """Execute each curriculum level end-to-end (generate/validate/solve/render), per
+    PATHWAY.md section 12: <out_dir>/level_01/{scene.json,replay.gif,metrics.json,...}.
+    Also writes <out_dir>/prompts.txt (benchmark-compatible) alongside the level dirs.
+    """
+    from infinienv.evaluation.runner import run_generation
+
+    prompts = build_curriculum(theme, levels)
+    os.makedirs(out_dir, exist_ok=True)
+    write_curriculum(theme, os.path.join(out_dir, "prompts.txt"), levels=levels)
+
+    results = []
+    for i, prompt in enumerate(prompts, start=1):
+        level_dir = os.path.join(out_dir, f"level_{i:02d}")
+        result = run_generation(provider, prompt, seed + i, level_dir)
+        results.append({"level": i, "prompt": prompt, "out_dir": level_dir, **result.metrics})
+        if on_level:
+            on_level(i, len(prompts), result)
+    return results

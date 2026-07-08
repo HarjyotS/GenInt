@@ -27,4 +27,4 @@ infinienv = "infinienv.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-infinienv = ["schema/scene_schema.json", "llm/prompts/*.md"]
+infinienv = ["schema/scene_schema.json", "llm/prompts/*.md", "assets/base/*.png"]

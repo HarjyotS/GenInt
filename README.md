@@ -38,12 +38,15 @@ Either command prints stage-by-stage progress and writes:
 
 ```text
 runs/<run_id>/
-├── scene.json          # structured SceneSpec ground truth
+├── scene.json           # structured SceneSpec ground truth
 ├── validation.json      # validator checks + repair history
 ├── metrics.json         # solvability, path length, success, timings
+├── replay.json          # action trace + per-goal completion (goal_results)
 ├── render.png           # static top-down visualization
 ├── replay.gif           # animated replay of the agent solving the task
-└── report.md            # human-readable run summary
+├── report.md            # human-readable run summary
+├── asset_plan.json      # (only with --assets != none) requested sprite types
+└── asset_manifest.json  # (only with --assets != none) resolved sprite source per type
 ```
 
 ## Pipeline
@@ -96,57 +99,110 @@ python -m infinienv play runs/demo/scene.json          # interactive terminal pl
 python -m infinienv benchmark examples/prompts.txt --provider mock --out runs/benchmark
 python -m infinienv mutate runs/demo/scene.json --count 10 --out runs/mutations
 python -m infinienv curriculum --theme warehouse --levels 5 --out examples/curriculum_warehouse.txt
+python -m infinienv curriculum --theme warehouse --levels 5 --run --provider mock --out runs/curriculum
+python -m infinienv export-dataset runs/curriculum --out runs/curriculum/dataset.jsonl
 ```
 
-## Creativity: mutation + curriculum
+## Asset pipeline
 
-`infinienv mutate` takes one valid scene and produces N *validated* variants (repositioned
-objects, added obstacles, decoy objects, reversed spawn) — every mutation is re-run through
-the full validator + solvability check before being kept, so "infinite generation" never means
-"infinite garbage." `infinienv curriculum` emits an easy -> hard prompt suite (open-room pickup
--> obstacle -> cross-room delivery -> key/door -> decoy + long path) that feeds straight into
-`infinienv benchmark`.
+`--assets {none,local,generated,auto}` on `generate` (default `none`, which keeps the original
+flat-colored-cell rendering exactly as before):
+
+- `none` — flat colored cells, no sprites (original/default behavior, zero dependencies).
+- `local` — the checked-in placeholder sprites in `src/infinienv/assets/base/*.png`
+  (`src/infinienv/assets/placeholder_gen.py`, simple Pillow-drawn icons, no key/network needed).
+- `generated` — real sprites from the OpenAI Images API (`gpt-image-1`; `INFINIENV_IMAGE_MODEL`
+  to override) only; no silent fallback if generation fails.
+- `auto` — generated, falling back to the local placeholder (with a note in
+  `asset_manifest.json`) if generation is unavailable.
+
+Sprites are cached by object **type** (not per-scene) in `.infinienv_asset_cache/` at the repo
+root, shared across every run — generating a "table" sprite once means every future scene with a
+table reuses it instead of calling the API again; `--assets auto`/`generated` only ever calls out
+for types not already cached. `asset_manifest.json` records exactly where each sprite came from
+(`local` / `generated` / `none`) so a run never silently claims a generated asset that wasn't
+actually generated.
+
+## Creativity: mutation + curriculum + dataset export
+
+`infinienv mutate` takes one valid scene and produces N *validated* variants — five deterministic
+strategies (reposition objects, add obstacle, add distractor, reverse start, theme reskin) plus
+an optional LLM-proposed strategy (`--provider openai_agents --llm-fraction 0.5`: a `MutationAgent`
+proposes creative layout changes while preserving the goal structure). Every candidate, LLM or
+deterministic, goes through the same full validator + solvability check before being kept, so
+"infinite generation" never means "infinite garbage."
+
+`infinienv curriculum` emits an easy -> hard prompt suite (open-room pickup -> obstacle ->
+cross-room delivery -> key/door -> decoy + long path). Add `--run` to actually execute every
+level (generate/validate/solve/render) into `<out>/level_NN/`, not just write the prompt list.
+
+`infinienv export-dataset <runs_dir> --out dataset.jsonl` scans a directory of executed run
+folders (anything with `scene.json` + `metrics.json` — curriculum level dirs, benchmark
+`prompt_NNN/` dirs, etc.) and emits one JSONL row per run with `programmatic_reward`: a real
+per-goal completion signal (`{"deliver_package": 1, "unlock_door": 1, "total": 2}`), sourced from
+`SolveResult.goal_results` in `replay.json`, not a single flattened success bit.
 
 ## Evaluation criteria mapping
 
 | Challenge criterion | How this repo addresses it |
 |---|---|
-| Creativity | Mutation engine + curriculum generator produce infinite validated variants from one seed scene, not a single text-to-grid demo. |
+| Creativity | Mutation engine (5 deterministic strategies + LLM-proposed) + curriculum generator + asset pipeline produce infinite validated, visually distinct variants from one seed scene, not a single text-to-grid demo. |
 | Clarity | Narrow P0 scope, one schema (`SceneSpec`) as the shared contract, `report.md` per run, this README. |
-| Working output | `--provider mock` runs with zero setup; `pytest` covers schema/validator/reachability/solver/mock/CLI; `metrics.json` reports truthfully (`success` is only `true` if both validation and the solver actually succeeded). |
+| Working output | `--provider mock` runs with zero setup; `pytest` covers schema/validator/reachability/solver/mock/CLI/assets/mutation/curriculum/dataset export; `metrics.json` reports truthfully (`success` is only `true` if both validation and the solver actually succeeded). |
 
 ## Project layout
 
 ```text
 src/infinienv/
-├── cli.py                  # generate / validate / solve / play / benchmark / mutate / curriculum
+├── cli.py                  # generate / validate / solve / play / benchmark / mutate / curriculum / export-dataset
 ├── schema/                 # SceneSpec (pydantic) + JSON schema
 ├── llm/                    # provider protocol + mock / openai_agents / openai_responses / anthropic
 ├── generation/             # compiler (generate->validate->repair->fallback), templates, mutation, curriculum
 ├── engine/                 # grid, mutable game state, action legality
 ├── validation/             # structured errors, reachability (BFS), solvability (full solve), validator
 ├── navigation/              # A*, symbolic task planner, top-level solve_scene
-├── render/                  # render.png (Pillow) + replay.gif
+├── render/                  # render.png (Pillow) + replay.gif, with optional sprite pasting
+├── assets/                  # placeholder sprite generator, resolver, OpenAI Images generator, manifest
 ├── evaluation/               # per-run metrics, end-to-end runner, benchmark aggregation
+├── export/                    # dataset.py: runs directory -> JSONL with programmatic_reward
 └── artifacts/                 # scene/validation/metrics JSON writers, report.md builder
-tests/                          # pytest: schema, validator, reachability, solver, mock generation, CLI, mutation
+tests/                          # pytest: schema, validator, reachability, solver, mock generation, CLI,
+                                # mutation, assets, curriculum, dataset export
 examples/                        # example prompts + example scene.json files
 ```
 
 ## Limitations and roadmap
 
-- **2D-first by design.** The `SceneSpec` schema is intentionally flat (grid `x`/`y`, not
-  `position`/`rotation`/`scale`) so validation stays simple and testable; see CLAUDE.md section
-  25 for the planned 3D field additions and exporter targets (Godot, Isaac Lab, MuJoCo, ...).
+`PATHWAY.md` sketches a considerably larger version of this project (renamed package layout,
+pygame-ce rendering, a typer/rich CLI, and an incompatible v0.2 `SceneSpec` with `tiles`/
+`goal.steps`). The asset pipeline, dataset export, curriculum execution, and LLM-driven mutations
+above were built as additions on top of the existing, real-API-verified architecture; the
+following were deliberately *not* done, to avoid rewriting a working system for redundant gain
+(see `notes.md` for the full reasoning):
+
+- **No package rename/restructure** (`agents/`/`providers/`/`core/`/`export/` split) — the
+  current `schema/llm/generation/engine/validation/navigation/render/evaluation/artifacts`
+  layout already separates the same concerns and matches CLAUDE.md's suggested structure.
+- **No `SceneSpec` v0.2 migration** (`tiles`, `goal: {type: sequence, steps: [...]}`,
+  `position: [x, y]`) — the current schema already expresses the same mechanics (ordered
+  top-level goals, `locked`/`key_id` for doors, `solid` for blocking) and a breaking schema
+  change would invalidate every real-API-verified scene and test in this repo.
+- **No typer/rich CLI rewrite** — the existing argparse CLI is tested and already gives
+  reviewer-friendly stage-by-stage output; not worth the churn for a cosmetic framework swap.
+- **No pygame-ce renderer** — pygame needs an SDL display context that's a real risk headless;
+  Pillow already produces `render.png`/`replay.gif` reliably, and now optionally with real
+  sprites via the asset pipeline above.
+- **2D-first by design.** See CLAUDE.md section 25 for the planned 3D field additions and
+  exporter targets (Godot, Isaac Lab, MuJoCo, ...).
 - **`anthropic` provider is implemented but untested against a live key** in this session (no
   `ANTHROPIC_API_KEY` was available) — it follows the same protocol and JSON-parsing path as
   `openai_responses`, and fails cleanly with a clear `ProviderError` if the key is missing.
   OpenAI Agents SDK remains the recommended/default runtime per the project brief.
-- **Renderer is Pillow-only, not pygame.** pygame needs an SDL display context that isn't
-  reliably available headless; Pillow produces the same `render.png`/`replay.gif` deliverables
-  without that dependency risk.
-- **Automatic key-door mutation** (from CLAUDE.md's mutation list) isn't implemented; the other
-  four mutation strategies (reposition, add obstacle, add distractor, reverse start) are.
+- **`theme_reskin` mutation is metadata-only.** The object-type vocabulary is a fixed,
+  validator-enforced enum (by design, for schema simplicity), so a reskin changes
+  `metadata.theme`/name, not a distinct per-theme object/art set.
+- **Automatic key-door-dependency mutation** (from CLAUDE.md's mutation list) isn't implemented
+  as a deterministic strategy; the LLM-proposed mutation path can add one opportunistically.
 - Godot export, vLLM local-GPU provider, and diversity scoring are P2 stretch goals, not
   implemented in this MVP pass.
 

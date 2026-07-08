@@ -8,3 +8,4 @@ dist/
 runs/*
 !runs/.gitkeep
 .env
+.infinienv_asset_cache/

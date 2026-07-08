@@ -144,3 +144,19 @@ class OpenAIAgentsProvider:
             "Return only the repaired SceneSpec JSON."
         )
         return self._run(agent, user_message)
+
+    def propose_mutation(self, scene: SceneSpec, seed: int) -> SceneSpec:
+        """Optional capability (duck-typed, not part of SceneProvider): a creative,
+        LLM-proposed variant of `scene`. Callers (generation.mutation) must still validate
+        the result the same as any deterministic mutation -- this only proposes."""
+        from agents import Agent
+
+        agent = Agent(
+            name="MutationAgent",
+            instructions=_load_prompt("mutation_agent.md"),
+            tools=self._tools(),
+            model=self.model,
+            output_type=SceneSpec,
+        )
+        user_message = f"Seed: {seed}\nBase SceneSpec:\n{json.dumps(scene.model_dump())}\n\nReturn only the mutated SceneSpec JSON."
+        return self._run(agent, user_message)

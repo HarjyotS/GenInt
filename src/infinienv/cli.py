@@ -37,7 +37,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
     print()
 
     stage_num = [0]
-    total_stages = 6
+    total_stages = 6 if args.assets == "none" else 7
 
     def on_stage(msg: str) -> None:
         stage_num[0] += 1
@@ -50,6 +50,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
         args.out,
         max_repair_attempts=args.max_repair_attempts,
         allow_fallback=not args.no_fallback,
+        assets_mode=args.assets,
         on_stage=on_stage,
     )
     print()
@@ -84,7 +85,16 @@ def cmd_solve(args: argparse.Namespace) -> int:
 
     if args.out:
         out_dir = resolve_out_dir(args.out)
-        write_json(out_dir, "replay.json", {"actions": result.actions, "trace": result.trace, "success": result.success})
+        write_json(
+            out_dir,
+            "replay.json",
+            {
+                "actions": result.actions,
+                "trace": result.trace,
+                "success": result.success,
+                "goal_results": result.goal_results,
+            },
+        )
         save_replay_gif(scene, result.actions, f"{out_dir}/replay.gif")
         print(f"Wrote {out_dir}/replay.json and {out_dir}/replay.gif")
 
@@ -153,16 +163,39 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
 def cmd_mutate(args: argparse.Namespace) -> int:
     from infinienv.generation.mutation import mutate_scene_file
 
-    written = mutate_scene_file(args.scene_path, args.out, count=args.count, seed=args.seed)
+    provider = get_provider(args.provider) if args.llm_fraction > 0 else None
+    written = mutate_scene_file(
+        args.scene_path, args.out, count=args.count, seed=args.seed, provider=provider, llm_fraction=args.llm_fraction
+    )
     print(f"Wrote {len(written)} valid mutations to {args.out}")
     return 0
 
 
 def cmd_curriculum(args: argparse.Namespace) -> int:
-    from infinienv.generation.curriculum import write_curriculum
+    from infinienv.generation.curriculum import run_curriculum, write_curriculum
 
-    path = write_curriculum(args.theme, args.out, levels=args.levels)
-    print(f"Wrote curriculum to {path}")
+    if not args.run:
+        path = write_curriculum(args.theme, args.out, levels=args.levels)
+        print(f"Wrote curriculum prompt list to {path}")
+        return 0
+
+    provider = get_provider(args.provider)
+
+    def on_level(i: int, total: int, result) -> None:
+        status = "SUCCESS" if result.metrics["success"] else "FAILED"
+        print(f"[level {i}/{total}] {status} -> {result.out_dir}")
+
+    results = run_curriculum(args.theme, args.out, levels=args.levels, provider=provider, seed=args.seed, on_level=on_level)
+    solved = sum(1 for r in results if r["success"])
+    print(f"Ran {len(results)} level(s) into {args.out}: {solved}/{len(results)} succeeded")
+    return 0 if solved == len(results) else 1
+
+
+def cmd_export_dataset(args: argparse.Namespace) -> int:
+    from infinienv.export.dataset import export_dataset
+
+    count = export_dataset(args.runs_dir, args.out)
+    print(f"Wrote {count} row(s) to {args.out}")
     return 0
 
 
@@ -181,6 +214,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Error out instead of silently falling back to the template generator when the "
         "provider can't produce a valid scene within the repair budget.",
+    )
+    g.add_argument(
+        "--assets",
+        default="none",
+        choices=["none", "local", "generated", "auto"],
+        help="none: flat colored cells (default). local: checked-in placeholder sprites, no key "
+        "needed. generated: OpenAI image generation only, no silent fallback. auto: generated "
+        "then local placeholder fallback.",
     )
     g.set_defaults(func=cmd_generate)
 
@@ -209,13 +250,35 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("--count", type=int, default=10)
     m.add_argument("--seed", type=int, default=42)
     m.add_argument("--out", required=True)
+    m.add_argument("--provider", default="openai_agents", choices=["mock", "openai_agents", "openai_responses", "anthropic"])
+    m.add_argument(
+        "--llm-fraction",
+        type=float,
+        default=0.0,
+        dest="llm_fraction",
+        help="Fraction (0-1) of mutation attempts that ask an LLM (MutationAgent) for a creative "
+        "variant instead of a deterministic strategy. 0 (default) is fully deterministic/offline.",
+    )
     m.set_defaults(func=cmd_mutate)
 
     c = sub.add_parser("curriculum", help="Generate an easy-to-hard prompt suite for a theme.")
     c.add_argument("--theme", default="warehouse")
     c.add_argument("--levels", type=int, default=5)
     c.add_argument("--out", required=True)
+    c.add_argument(
+        "--run",
+        action="store_true",
+        help="Also execute each level (generate/validate/solve/render) into <out-dir>/level_NN/, "
+        "not just write the prompt list.",
+    )
+    c.add_argument("--provider", default="mock", choices=["mock", "openai_agents", "openai_responses", "anthropic"])
+    c.add_argument("--seed", type=int, default=42)
     c.set_defaults(func=cmd_curriculum)
+
+    ed = sub.add_parser("export-dataset", help="Export a directory of executed runs to a JSONL dataset.")
+    ed.add_argument("runs_dir", help="Directory containing run subdirectories (each with scene.json + metrics.json).")
+    ed.add_argument("--out", required=True)
+    ed.set_defaults(func=cmd_export_dataset)
 
     return parser
 
