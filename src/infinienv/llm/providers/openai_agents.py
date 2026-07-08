@@ -28,6 +28,17 @@ def _load_prompt(filename: str) -> str:
     return resources.files("infinienv.llm.prompts").joinpath(filename).read_text()
 
 
+def _scene_output_type():
+    # Non-strict: SceneSpec now has open-ended fields (SceneObject.properties: dict[str,
+    # bool|str|int], InteractionEffect.property_value union, etc.) that OpenAI's strict/
+    # grammar-constrained structured-output mode rejects outright ("output type is not
+    # valid"). The SDK still validates the returned JSON against SceneSpec afterward either
+    # way; non-strict just means the request-time JSON schema isn't grammar-enforced.
+    from agents import AgentOutputSchema
+
+    return AgentOutputSchema(SceneSpec, strict_json_schema=False)
+
+
 def _extract_json(output) -> dict:
     if isinstance(output, dict):
         return output
@@ -88,7 +99,15 @@ class OpenAIAgentsProvider:
 
             return validate_scene_dict(scene_spec).to_dict()
 
-        return [get_scene_schema, get_supported_mechanics, validate_scene_tool]
+        @function_tool
+        def get_known_mechanics() -> dict:
+            """Return previously-defined custom object types and interactions (from past runs)
+            that can be reused verbatim instead of inventing new, slightly different ones."""
+            from infinienv.generation.mechanics_cache import load_mechanics_library
+
+            return load_mechanics_library()
+
+        return [get_scene_schema, get_supported_mechanics, validate_scene_tool, get_known_mechanics]
 
     def _run(self, agent, user_message: str) -> SceneSpec:
         from agents import Runner
@@ -98,7 +117,7 @@ class OpenAIAgentsProvider:
         except Exception as exc:  # SDK/network/auth failures should surface as ProviderError
             raise ProviderError(f"OpenAI Agents SDK run failed: {exc}") from exc
         output = result.final_output
-        # output_type=SceneSpec asks the SDK for structured output matching our schema
+        # _scene_output_type() asks the SDK for structured output matching our schema
         # directly, so final_output is usually already a parsed SceneSpec instance.
         if isinstance(output, SceneSpec):
             return output
@@ -114,7 +133,7 @@ class OpenAIAgentsProvider:
             instructions=_load_prompt("scene_planner.md"),
             tools=self._tools(),
             model=self.model,
-            output_type=SceneSpec,
+            output_type=_scene_output_type(),
         )
         user_message = f"Seed: {seed}\nTask: {prompt}\n\nReturn only SceneSpec JSON."
         return self._run(agent, user_message)
@@ -133,7 +152,7 @@ class OpenAIAgentsProvider:
             instructions=_load_prompt("repair_agent.md"),
             tools=self._tools(),
             model=self.model,
-            output_type=SceneSpec,
+            output_type=_scene_output_type(),
         )
         errors_text = "\n".join(f"- {e.code}: {e.message}" for e in validation_errors)
         user_message = (
@@ -156,7 +175,7 @@ class OpenAIAgentsProvider:
             instructions=_load_prompt("mutation_agent.md"),
             tools=self._tools(),
             model=self.model,
-            output_type=SceneSpec,
+            output_type=_scene_output_type(),
         )
         user_message = f"Seed: {seed}\nBase SceneSpec:\n{json.dumps(scene.model_dump())}\n\nReturn only the mutated SceneSpec JSON."
         return self._run(agent, user_message)

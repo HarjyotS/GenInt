@@ -31,17 +31,12 @@ def solve_scene(scene: SceneSpec) -> SolveResult:
 
     try:
         for goal in scene.goals:
-            goal_actions = plan_goal(goal, grid, state)
-            for act in goal_actions:
-                actions.append(act)
-                trace.append(
-                    {
-                        "t": len(actions),
-                        "action": act["action"],
-                        "position": list(state.agent_pos()),
-                        "inventory": list(state.inventory),
-                    }
-                )
+            # `trace` is populated incrementally *inside* plan_goal (by _emit, at the
+            # moment each action is actually applied) -- not rebuilt here afterward,
+            # since by the time plan_goal returns, `state` already reflects the goal's
+            # *final* step, not each intermediate one.
+            goal_actions = plan_goal(goal, grid, state, scene, trace)
+            actions.extend(goal_actions)
             goal_done = is_goal_complete(goal, state)
             goal_results.append({"id": goal.id, "type": goal.type, "success": goal_done})
             if not goal_done:

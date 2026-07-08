@@ -20,6 +20,32 @@ def test_pickup_task_succeeds():
     assert "can_1" in result.final_state.inventory
 
 
+def test_trace_records_incremental_state_not_final_state_repeated():
+    # Regression test: trace entries used to be built *after* plan_goal had already
+    # mutated `state` all the way to the goal's end, so every entry past t=0 showed
+    # the same final position/inventory instead of the real step-by-step values.
+    scene = scene_spec_from_dict(
+        {
+            "version": "0.1",
+            "seed": 1,
+            "metadata": {"name": "t", "prompt": "p"},
+            "grid": {"width": 6, "height": 6, "tile_size": 32},
+            "agent": {"id": "agent", "x": 0, "y": 0},
+            "objects": [{"id": "can_1", "type": "can", "x": 3, "y": 0, "portable": True}],
+            "walls": [],
+            "goals": [{"id": "pick", "type": "pickup", "object_id": "can_1"}],
+        }
+    )
+    result = solve_scene(scene)
+    assert result.success, result.error
+    positions = [tuple(t["position"]) for t in result.trace if "position" in t]
+    # t=0 start, then 3 rightward moves, then pick_up: positions must actually
+    # progress, not repeat the final one for every step.
+    assert positions == [(0, 0), (1, 0), (2, 0), (3, 0), (3, 0)]
+    inventories = [t["inventory"] for t in result.trace if "inventory" in t]
+    assert inventories == [[], [], [], ["can_1"]]
+
+
 def test_deliver_task_succeeds():
     scene = scene_spec_from_dict(
         {

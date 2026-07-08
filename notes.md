@@ -227,3 +227,85 @@ like any other rejected candidate — the loop just keeps trying, never crashes.
 against the real API: 4/4 requested mutations at `llm_fraction=0.9` came back genuinely
 LLM-proposed (moved objects, added a distractor/obstacle box, added walls) and all passed full
 validation on the first attempt.
+
+## Extended mechanics: "let the model define real behavior" without letting it execute code
+
+User request: the harness should be able to represent things outside the fixed object/action
+vocabulary -- a window you can throw things out of, a switch that unlocks a door, etc. -- with
+the model defining the actual behavior, not just flavor text. Explicitly asked me to update
+`CLAUDE.md` to formally allow this, since it's a direct extension beyond the MVP's core rule
+("do not let the LLM be the source of truth" / "add mechanics only when validators and tests are
+updated").
+
+Gave the user three options before building anything (curated hand-written expansion / generic
+property system / model-authored per-scene behavior) because the third one directly touches
+CLAUDE.md's most load-bearing safety rule (section 23: no eval/exec, no arbitrary code from model
+output) and I wasn't going to guess at that tradeoff. User picked option 3, explicitly framed as
+"beyond the MVP, make it full-fledged."
+
+Resolved the apparent conflict with a **declarative effect system**, not code execution: a scene
+can declare `mechanics.custom_object_types` (new type ids) and `mechanics.custom_interactions` (a
+new verb + preconditions + an ordered list of **effects**, each one of a small *fixed* vocabulary
+-- `remove_held_object`, `drop_held_object_at_target`, `remove_object`, `unlock_target`,
+`set_object_property`, `teleport_agent` -- implemented in the new `engine/interactions.py`). The
+model composes behavior out of these primitives; it never writes the primitives themselves, and
+there is no eval/exec anywhere in the interpreter. This is the only way to honor "model defines
+real behavior" without breaking section 23, and I said so explicitly rather than silently
+reinterpreting the user's request into something safer without flagging the substitution.
+
+New pieces: `SceneObject.type` reverted from the `Literal` enum (added earlier this session) back
+to a free `str` -- custom types are now legitimate, so the enum would have blocked the very thing
+being added; the actual "is this type allowed" check moved to `validate_scene` (built-in OR
+declared in `mechanics.custom_object_types`). `InteractGoal` (`type: "interact"`) is satisfied
+once `(interaction_id, target_id)` is in a new `GameState.completed_interactions` set. Planner
+gained `_plan_interact` (paths to target, auto-picks-up a `must_hold_type` match first if not
+already held, emits the custom verb) following the same pattern as `_plan_unlock`.
+`generation/mechanics_cache.py` persists every new custom type/interaction from a *validated*
+scene into `.infinienv_mechanics_cache.json` (gitignored, same treatment as the asset cache) and
+a new `get_known_mechanics` tool exposes it back to the model so "window" means the same thing
+next time instead of drifting.
+
+**Real bug found via this feature, unrelated to it:** the very first live test (`--no-fallback`
+on a real "throw a vase out a window" prompt) produced a scene where `replay.json`'s `trace` had
+the *same* position/inventory repeated for every step past t=0, and `inventory` stayed `[]` even
+after a successful `pick_up`. Root cause, pre-dating this session's mechanics work entirely:
+`solve_scene`'s trace-building loop sampled `state` *after* `plan_goal` had already fully mutated
+it to the goal's end state (since `plan_goal`/`_emit` apply each action to `state` immediately as
+they're planned, by design, so later planning steps see up-to-date state) -- so every "per-step"
+trace entry was actually reading the same final snapshot. `replay.gif` was never affected (
+`render/replay_export.py` independently re-simulates from `actions`), which is why nobody had
+noticed. Fixed by threading an optional `trace` list through `_emit`/`_path_moves_to`/
+`_ensure_holding`/every `_plan_*` function in `navigation/planner.py`, so each trace entry is
+recorded at the exact moment its action is applied, not reconstructed afterward from a
+by-then-stale-in-a-different-way state reference. `solve_scene` now just passes its `trace` list
+into `plan_goal` and stops trying to rebuild it itself. Added
+`test_trace_records_incremental_state_not_final_state_repeated` as a regression test -- confirmed
+it fails against the old code and passes against the fix.
+
+**Real integration bug found via this feature:** `output_type=SceneSpec` (added earlier this
+session for structured-output reliability) started failing with "Strict JSON schema is enabled,
+but the output type is not valid" the moment `SceneObject.properties: dict[str, bool|str|int]`
+and `InteractionEffect.property_value: bool|str|int|None` existed -- OpenAI's strict/
+grammar-constrained structured-output mode rejects open-ended dict/union shapes outright (same
+underlying class of issue as the earlier `validate_scene_tool(scene_spec: dict)` strict-mode
+failure). Fixed by switching all three `Agent(...)` constructions in
+`llm/providers/openai_agents.py` to `output_type=AgentOutputSchema(SceneSpec,
+strict_json_schema=False)`, and `openai_responses.py`'s Responses API call to `"strict": False`
+in its `text.format` (dropping the now-broken `ensure_strict_json_schema` conversion entirely,
+since a schema this open-ended can't be made strict-compatible without lossy restructuring).
+`validate_scene_dict` remains the real gate either way; non-strict just means the request-time
+JSON schema is advisory instead of grammar-enforced.
+
+**Live verification, both valid on the first attempt, no repair needed:** (1) "pick up a vase
+from a table and throw it out the window" -> model declared `vase`/`window` custom types and a
+`throw_through_window` interaction (`must_hold_type: "vase"`, effect `remove_held_object`),
+solved in 10 actions, vase genuinely removed from `final_state.objects`. (2) An unrelated prompt
+("flip a switch to unlock a vault door") to check this generalizes rather than just echoing the
+prompt's one worked example -- came back with a *different* verb (`"flip"`) and a *different*
+effect composition (`set_object_property` + `unlock_target` against an explicit target object id,
+not the `"target"`/`"held"` shorthand), solved in 13 actions. Mechanics cache correctly
+accumulated both across the two runs. Also confirmed existing systems degrade/compose correctly
+with scenes that use mechanics: `mutate` preserves `mechanics` through `model_copy(deep=True)`
+and re-validates each variant (including re-solving the custom interaction) same as any other
+mutation; the renderer's existing `COLORS.get(type, gray)` fallback already handles types it's
+never seen, no changes needed.

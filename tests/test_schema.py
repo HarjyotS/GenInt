@@ -43,21 +43,35 @@ def test_duplicate_ids_allowed_at_schema_level_but_caught_by_validator():
     assert sum(1 for o in scene.objects if o.id == "can_1") == 2
 
 
-def test_unsupported_object_type_fails():
+def test_arbitrary_object_type_parses_at_schema_level():
+    # `type` is a free string at the schema layer (not a Literal enum): a custom/LLM-declared
+    # type like "window" must parse. Whether it's *allowed* (built-in or declared in
+    # mechanics.custom_object_types) is validator.py's job -- see test_validator.py.
     data = _base_scene()
-    data["objects"][0]["type"] = "spaceship"
-    with pytest.raises(PydanticValidationError):
-        scene_spec_from_dict(data)
+    data["objects"][0]["type"] = "window"
+    scene = scene_spec_from_dict(data)
+    assert scene.objects[0].type == "window"
 
 
-def test_object_type_is_an_enum_in_the_json_schema():
-    # This is what makes structured-output generation refuse unsupported types (e.g. "desk",
-    # "sofa") at sampling time, instead of only rejecting them after the fact.
-    from infinienv.schema.scene_schema import OBJECT_TYPE_VALUES, scene_spec_json_schema
-
-    schema = scene_spec_json_schema()
-    object_type_schema = schema["$defs"]["SceneObject"]["properties"]["type"]
-    assert set(object_type_schema["enum"]) == set(OBJECT_TYPE_VALUES)
+def test_interact_goal_and_mechanics_parse():
+    data = _base_scene()
+    data["mechanics"] = {
+        "custom_object_types": [{"id": "window", "description": "a window"}],
+        "custom_interactions": [
+            {
+                "id": "throw_through_window",
+                "trigger_action": "throw",
+                "target_type": "window",
+                "must_hold_type": "can",
+                "effects": [{"op": "remove_held_object", "target": "held"}],
+            }
+        ],
+    }
+    data["goals"] = [{"id": "throw_it", "type": "interact", "interaction_id": "throw_through_window", "target_id": "sink_1"}]
+    scene = scene_spec_from_dict(data)
+    assert scene.mechanics.custom_object_types[0].id == "window"
+    assert scene.mechanics.custom_interactions[0].effects[0].op == "remove_held_object"
+    assert scene.goals[0].type == "interact"
 
 
 def test_sequence_goal_nests():

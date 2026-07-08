@@ -1,0 +1,183 @@
+{
+  "version": "0.1",
+  "seed": 1,
+  "metadata": {
+    "name": "throw_vase_demo",
+    "prompt": "throw a vase out a window"
+  },
+  "grid": {
+    "width": 8,
+    "height": 8,
+    "tile_size": 32
+  },
+  "agent": {
+    "id": "agent",
+    "x": 1,
+    "y": 1
+  },
+  "objects": [
+    {
+      "id": "vase_1",
+      "type": "vase",
+      "x": 2,
+      "y": 2,
+      "portable": true
+    },
+    {
+      "id": "window_1",
+      "type": "window",
+      "x": 5,
+      "y": 5,
+      "solid": false
+    }
+  ],
+  "walls": [
+    {
+      "x": 0,
+      "y": 0
+    },
+    {
+      "x": 0,
+      "y": 1
+    },
+    {
+      "x": 0,
+      "y": 2
+    },
+    {
+      "x": 0,
+      "y": 3
+    },
+    {
+      "x": 0,
+      "y": 4
+    },
+    {
+      "x": 0,
+      "y": 5
+    },
+    {
+      "x": 0,
+      "y": 6
+    },
+    {
+      "x": 0,
+      "y": 7
+    },
+    {
+      "x": 1,
+      "y": 0
+    },
+    {
+      "x": 1,
+      "y": 7
+    },
+    {
+      "x": 2,
+      "y": 0
+    },
+    {
+      "x": 2,
+      "y": 7
+    },
+    {
+      "x": 3,
+      "y": 0
+    },
+    {
+      "x": 3,
+      "y": 7
+    },
+    {
+      "x": 4,
+      "y": 0
+    },
+    {
+      "x": 4,
+      "y": 7
+    },
+    {
+      "x": 5,
+      "y": 0
+    },
+    {
+      "x": 5,
+      "y": 7
+    },
+    {
+      "x": 6,
+      "y": 0
+    },
+    {
+      "x": 6,
+      "y": 7
+    },
+    {
+      "x": 7,
+      "y": 0
+    },
+    {
+      "x": 7,
+      "y": 1
+    },
+    {
+      "x": 7,
+      "y": 2
+    },
+    {
+      "x": 7,
+      "y": 3
+    },
+    {
+      "x": 7,
+      "y": 4
+    },
+    {
+      "x": 7,
+      "y": 5
+    },
+    {
+      "x": 7,
+      "y": 6
+    },
+    {
+      "x": 7,
+      "y": 7
+    }
+  ],
+  "mechanics": {
+    "custom_object_types": [
+      {
+        "id": "vase",
+        "description": "a fragile vase"
+      },
+      {
+        "id": "window",
+        "description": "a window"
+      }
+    ],
+    "custom_interactions": [
+      {
+        "id": "throw_through_window",
+        "trigger_action": "throw",
+        "target_type": "window",
+        "must_hold_type": "vase",
+        "effects": [
+          {
+            "op": "remove_held_object",
+            "target": "held"
+          }
+        ],
+        "description": "Throws the held vase out the window."
+      }
+    ]
+  },
+  "goals": [
+    {
+      "id": "declutter",
+      "type": "interact",
+      "interaction_id": "throw_through_window",
+      "target_id": "window_1"
+    }
+  ]
+}

@@ -72,8 +72,8 @@ by `tests/`.
 | Provider | Needs a key | Notes |
 |---|---|---|
 | `mock` | No | Deterministic templates (kitchen delivery, warehouse key/door, obstacle course), seeded by prompt keywords + `--seed`. Always valid and solvable by construction. |
-| `openai_agents` | Yes (`OPENAI_API_KEY`) | Default runtime. `ScenePlannerAgent` / `RepairAgent` built with the OpenAI Agents SDK, using structured output (`output_type=SceneSpec`) plus `validate_scene`, `get_scene_schema`, and `get_supported_mechanics` function tools. |
-| `openai_responses` | Yes | Lower-level fallback: a single Responses API call with a strict JSON-schema `text.format`, no agent orchestration. |
+| `openai_agents` | Yes (`OPENAI_API_KEY`) | Default runtime. `ScenePlannerAgent` / `RepairAgent` / `MutationAgent` built with the OpenAI Agents SDK, using non-strict structured output (`AgentOutputSchema(SceneSpec, strict_json_schema=False)` — SceneSpec's open-ended fields, like custom object properties, aren't strict-schema-compatible) plus `validate_scene`, `get_scene_schema`, `get_supported_mechanics`, and `get_known_mechanics` function tools. |
+| `openai_responses` | Yes | Lower-level fallback: a single Responses API call with a non-strict JSON-schema `text.format`, no agent orchestration. |
 | `anthropic` | Yes | Optional Claude provider (see Limitations). |
 
 By default, if the provider can't produce a valid scene within `MAX_REPAIR_ATTEMPTS`, `generate`
@@ -86,8 +86,53 @@ If `OPENAI_API_KEY` isn't set, either use `--provider mock` or drop the key in a
 `.env` file (`OPENAI_API_KEY=sk-...`, or `OP_KEY=sk-...` — both are read).
 
 The LLM never executes code or writes files directly: it only emits `SceneSpec` JSON and may
-call the three read-only/validate-only tools above. All file writes, retries, rendering, and
-scoring are owned by this repo's Python code (`generation/`, `evaluation/`, `artifacts/`).
+call the read-only/validate-only tools above. All file writes, retries, rendering, and scoring
+are owned by this repo's Python code (`generation/`, `evaluation/`, `artifacts/`).
+
+## Extended mechanics: model-defined object types and interactions
+
+The base schema (see CLAUDE.md section 7) is a small, fixed, validator-enforced vocabulary --
+deliberately, so solvability stays guaranteed rather than hoped-for. But not every task fits
+`table`/`can`/`sink`/`deliver`. So a scene can declare its own `mechanics`:
+
+- **`custom_object_types`**: new object types (e.g. `"window"`) beyond the base vocabulary. Must
+  be declared before any object uses them, or validation rejects the object as unsupported.
+- **`custom_interactions`**: a new verb (`trigger_action`, e.g. `"throw"`) usable against a
+  `target_type`, with an optional `must_hold_type` precondition and an ordered list of
+  **effects** -- `remove_held_object`, `drop_held_object_at_target`, `remove_object`,
+  `unlock_target`, `set_object_property`, `teleport_agent`. This is a fixed, safe, declarative
+  vocabulary interpreted by `engine/interactions.py`, never executed code (see CLAUDE.md section
+  28 for the full design rationale and why this doesn't violate "the LLM is never the source of
+  truth").
+- A goal `{"type": "interact", "interaction_id": ..., "target_id": ...}` is satisfied once that
+  interaction has actually been performed -- planned (path to target, pick up a matching object
+  first if needed) and executed exactly like `unlock`/`deliver`.
+
+```bash
+python -m infinienv generate \
+  --provider openai_agents \
+  --prompt "Create a small apartment with a window. The agent must pick up a vase from a table and throw it out the window." \
+  --seed 3 --out runs/throw_vase --no-fallback
+```
+
+Verified live against the real API, valid on the first attempt: the model declared `vase` and
+`window` as custom object types and a `throw_through_window` interaction
+(`must_hold_type: "vase"`, effect `remove_held_object`) entirely on its own from that prompt --
+no hand-authored example in the codebase for this exact scenario beyond the prompt's worked
+example. A second, unrelated prompt ("flip a switch to unlock a vault door") produced a genuinely
+different mechanic (verb `"flip"`, effects `set_object_property` + `unlock_target` against an
+explicit target id) — confirming this generalizes rather than just echoing one canned example.
+
+New object types with no built-in color/sprite render as a labeled gray cell automatically (see
+`render/image_export.py`'s fallback) — no per-type hardcoding needed for the renderer to stay
+correct.
+
+**Mechanics get cached, not reinvented per scene.** `generation/mechanics_cache.py` persists
+every new custom object type/interaction from a validated scene into
+`.infinienv_mechanics_cache.json` (gitignored, project-local, same treatment as
+`.infinienv_asset_cache/`). The `get_known_mechanics` tool exposes that cache back to the model,
+and the prompt instructs it to reuse an existing definition verbatim before inventing a new one
+— so "window" keeps meaning the same thing across a session instead of drifting scene to scene.
 
 ## CLI
 
@@ -146,28 +191,29 @@ per-goal completion signal (`{"deliver_package": 1, "unlock_door": 1, "total": 2
 
 | Challenge criterion | How this repo addresses it |
 |---|---|
-| Creativity | Mutation engine (5 deterministic strategies + LLM-proposed) + curriculum generator + asset pipeline produce infinite validated, visually distinct variants from one seed scene, not a single text-to-grid demo. |
+| Creativity | Mutation engine (5 deterministic strategies + LLM-proposed) + curriculum generator + asset pipeline + model-definable object types/interactions produce infinite validated, visually and mechanically distinct variants from one seed scene, not a single text-to-grid demo. |
 | Clarity | Narrow P0 scope, one schema (`SceneSpec`) as the shared contract, `report.md` per run, this README. |
-| Working output | `--provider mock` runs with zero setup; `pytest` covers schema/validator/reachability/solver/mock/CLI/assets/mutation/curriculum/dataset export; `metrics.json` reports truthfully (`success` is only `true` if both validation and the solver actually succeeded). |
+| Working output | `--provider mock` runs with zero setup; `pytest` covers schema/validator/reachability/solver/mock/CLI/assets/mutation/curriculum/dataset export/mechanics; `metrics.json` reports truthfully (`success` is only `true` if both validation and the solver actually succeeded). |
 
 ## Project layout
 
 ```text
 src/infinienv/
 ├── cli.py                  # generate / validate / solve / play / benchmark / mutate / curriculum / export-dataset
-├── schema/                 # SceneSpec (pydantic) + JSON schema
+├── schema/                 # SceneSpec (pydantic) + JSON schema, incl. Mechanics/InteractGoal
 ├── llm/                    # provider protocol + mock / openai_agents / openai_responses / anthropic
-├── generation/             # compiler (generate->validate->repair->fallback), templates, mutation, curriculum
-├── engine/                 # grid, mutable game state, action legality
+├── generation/             # compiler (generate->validate->repair->fallback), templates, mutation,
+│                           # curriculum, mechanics_cache (persist/reuse custom mechanics)
+├── engine/                 # grid, mutable game state, action legality, interactions.py (effect interpreter)
 ├── validation/             # structured errors, reachability (BFS), solvability (full solve), validator
-├── navigation/              # A*, symbolic task planner, top-level solve_scene
+├── navigation/              # A*, symbolic task planner (incl. interact goals), top-level solve_scene
 ├── render/                  # render.png (Pillow) + replay.gif, with optional sprite pasting
 ├── assets/                  # placeholder sprite generator, resolver, OpenAI Images generator, manifest
 ├── evaluation/               # per-run metrics, end-to-end runner, benchmark aggregation
 ├── export/                    # dataset.py: runs directory -> JSONL with programmatic_reward
 └── artifacts/                 # scene/validation/metrics JSON writers, report.md builder
 tests/                          # pytest: schema, validator, reachability, solver, mock generation, CLI,
-                                # mutation, assets, curriculum, dataset export
+                                # mutation, assets, curriculum, dataset export, interactions, mechanics cache
 examples/                        # example prompts + example scene.json files
 ```
 

@@ -68,3 +68,86 @@ def test_no_goals_fails():
     result = validate_scene(scene)
     assert not result.valid
     assert any(e.code == "NO_GOALS" for e in result.errors)
+
+
+def test_undeclared_custom_object_type_fails():
+    data = _base_scene()
+    data["objects"][0]["type"] = "desk"  # not built-in, not declared in mechanics
+    scene = scene_spec_from_dict(data)
+    result = validate_scene(scene)
+    assert not result.valid
+    assert any(e.code == "UNSUPPORTED_OBJECT_TYPE" for e in result.errors)
+
+
+def test_custom_object_type_colliding_with_builtin_fails():
+    data = _base_scene()
+    data["mechanics"] = {"custom_object_types": [{"id": "table"}], "custom_interactions": []}
+    scene = scene_spec_from_dict(data)
+    result = validate_scene(scene)
+    assert not result.valid
+    assert any(e.code == "MECHANICS_TYPE_COLLISION" for e in result.errors)
+
+
+def test_interaction_trigger_action_colliding_with_builtin_fails():
+    data = _base_scene()
+    data["mechanics"] = {
+        "custom_object_types": [{"id": "window"}],
+        "custom_interactions": [
+            {"id": "i1", "trigger_action": "pick_up", "target_type": "window", "effects": [{"op": "remove_object"}]}
+        ],
+    }
+    scene = scene_spec_from_dict(data)
+    result = validate_scene(scene)
+    assert not result.valid
+    assert any(e.code == "MECHANICS_ACTION_COLLISION" for e in result.errors)
+
+
+def test_interaction_unknown_target_type_fails():
+    data = _base_scene()
+    data["mechanics"] = {
+        "custom_object_types": [],
+        "custom_interactions": [
+            {"id": "i1", "trigger_action": "throw", "target_type": "window", "effects": [{"op": "remove_object"}]}
+        ],
+    }
+    scene = scene_spec_from_dict(data)
+    result = validate_scene(scene)
+    assert not result.valid
+    assert any(e.code == "MECHANICS_UNKNOWN_TYPE" for e in result.errors)
+
+
+def test_interact_goal_referencing_undeclared_interaction_fails():
+    data = _base_scene()
+    data["goals"] = [{"id": "g1", "type": "interact", "interaction_id": "nonexistent", "target_id": "sink_1"}]
+    scene = scene_spec_from_dict(data)
+    result = validate_scene(scene)
+    assert not result.valid
+    assert any(e.code == "MECHANICS_UNKNOWN_INTERACTION" for e in result.errors)
+
+
+def test_throw_object_through_window_end_to_end():
+    """The user's own example: a window you can throw a held object out of."""
+    data = _base_scene()
+    data["objects"] = [
+        {"id": "vase_1", "type": "vase", "x": 2, "y": 2, "portable": True},
+        {"id": "window_1", "type": "window", "x": 5, "y": 5, "solid": False},
+    ]
+    data["mechanics"] = {
+        "custom_object_types": [{"id": "vase", "description": "a fragile vase"}, {"id": "window"}],
+        "custom_interactions": [
+            {
+                "id": "throw_through_window",
+                "trigger_action": "throw",
+                "target_type": "window",
+                "must_hold_type": "vase",
+                "effects": [{"op": "remove_held_object", "target": "held"}],
+                "description": "Throws the held vase out the window.",
+            }
+        ],
+    }
+    data["goals"] = [
+        {"id": "declutter", "type": "interact", "interaction_id": "throw_through_window", "target_id": "window_1"}
+    ]
+    scene = scene_spec_from_dict(data)
+    result = validate_scene(scene)
+    assert result.valid, result.errors

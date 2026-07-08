@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from infinienv.schema.scene_schema import SceneObject, SceneSpec
 
@@ -18,6 +19,7 @@ class ObjectState:
     locked: bool
     key_id: str | None
     held: bool = False
+    properties: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_spec(cls, obj: SceneObject) -> "ObjectState":
@@ -30,6 +32,7 @@ class ObjectState:
             portable=obj.portable,
             locked=obj.locked,
             key_id=obj.key_id,
+            properties=dict(obj.properties),
         )
 
 
@@ -40,6 +43,9 @@ class GameState:
     inventory: list[str] = field(default_factory=list)
     objects: dict[str, ObjectState] = field(default_factory=dict)
     unlocked_doors: set[str] = field(default_factory=set)
+    # (interaction_id, target_id) pairs that have been successfully performed --
+    # how InteractGoal completion is checked. See engine/interactions.py.
+    completed_interactions: set[tuple[str, str]] = field(default_factory=set)
 
     @classmethod
     def from_scene(cls, scene: SceneSpec) -> "GameState":

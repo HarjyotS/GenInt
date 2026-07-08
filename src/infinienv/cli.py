@@ -115,7 +115,15 @@ def cmd_play(args: argparse.Namespace) -> int:
 
     grid = Grid(scene)
     state = GameState.from_scene(scene)
-    print(f"Playing {scene.metadata.name}. Commands: w/a/s/d move, p <id> pickup, o <id> drop, u <door> <key> unlock, q quit.")
+    interactions_help = ""
+    if scene.mechanics.custom_interactions:
+        verbs = ", ".join(sorted({i.trigger_action for i in scene.mechanics.custom_interactions}))
+        interactions_help = f" This scene also defines: {verbs} <target_id>."
+    print(
+        f"Playing {scene.metadata.name}. Commands: w/a/s/d move, p <id> pickup, o <id> drop, "
+        f"u <door> <key> unlock, q quit.{interactions_help}"
+    )
+    custom_verbs = {i.trigger_action for i in scene.mechanics.custom_interactions}
     while True:
         print(f"agent=({state.agent_x},{state.agent_y}) inventory={state.inventory}")
         if all(is_goal_complete(g, state) for g in scene.goals):
@@ -132,19 +140,21 @@ def cmd_play(args: argparse.Namespace) -> int:
             if cmd == "q":
                 return 1
             if cmd == "w":
-                apply_action(state, grid, {"action": "move_up"})
+                apply_action(state, grid, {"action": "move_up"}, scene)
             elif cmd == "s":
-                apply_action(state, grid, {"action": "move_down"})
+                apply_action(state, grid, {"action": "move_down"}, scene)
             elif cmd == "a":
-                apply_action(state, grid, {"action": "move_left"})
+                apply_action(state, grid, {"action": "move_left"}, scene)
             elif cmd == "d":
-                apply_action(state, grid, {"action": "move_right"})
+                apply_action(state, grid, {"action": "move_right"}, scene)
             elif cmd == "p" and rest:
-                apply_action(state, grid, {"action": "pick_up", "object_id": rest[0]})
+                apply_action(state, grid, {"action": "pick_up", "object_id": rest[0]}, scene)
             elif cmd == "o" and rest:
-                apply_action(state, grid, {"action": "drop", "object_id": rest[0]})
+                apply_action(state, grid, {"action": "drop", "object_id": rest[0]}, scene)
             elif cmd == "u" and len(rest) == 2:
-                apply_action(state, grid, {"action": "unlock", "door_id": rest[0], "key_id": rest[1]})
+                apply_action(state, grid, {"action": "unlock", "door_id": rest[0], "key_id": rest[1]}, scene)
+            elif cmd in custom_verbs and rest:
+                apply_action(state, grid, {"action": cmd, "target_id": rest[0]}, scene)
             else:
                 print("unrecognized command")
         except ActionError as exc:

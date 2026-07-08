@@ -11,12 +11,6 @@ from infinienv.schema.scene_schema import SceneSpec, scene_spec_from_dict, scene
 from infinienv.validation.errors import ValidationIssue
 
 
-def _strict_scene_schema() -> dict:
-    # Reuses the Agents SDK's strict-schema converter (all-required + no bare
-    # additionalProperties) so the Responses API's structured-output mode accepts it.
-    from agents.strict_schema import ensure_strict_json_schema
-
-    return ensure_strict_json_schema(scene_spec_json_schema())
 
 
 class OpenAIResponsesProvider:
@@ -37,20 +31,19 @@ class OpenAIResponsesProvider:
         self.client = OpenAI()
 
     def _call(self, instructions: str, user_message: str) -> dict:
-        text_config = None
-        try:
-            text_config = {
-                "format": {"type": "json_schema", "name": "SceneSpec", "schema": _strict_scene_schema(), "strict": True}
-            }
-        except ImportError:
-            pass  # openai-agents not installed; fall back to prompt-only JSON extraction below.
-
+        # Non-strict json_schema: SceneSpec has open-ended fields (SceneObject.properties:
+        # dict[str, bool|str|int], InteractionEffect.property_value union, custom mechanics)
+        # that the Responses API's strict/grammar-constrained mode rejects outright. Non-strict
+        # still steers the model toward the right shape; validate_scene_dict is the real gate.
+        text_config = {
+            "format": {"type": "json_schema", "name": "SceneSpec", "schema": scene_spec_json_schema(), "strict": False}
+        }
         try:
             response = self.client.responses.create(
                 model=self.model,
                 instructions=instructions,
                 input=user_message,
-                **({"text": text_config} if text_config else {}),
+                text=text_config,
             )
         except Exception as exc:
             raise ProviderError(f"OpenAI Responses API call failed: {exc}") from exc

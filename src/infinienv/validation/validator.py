@@ -10,7 +10,7 @@ from __future__ import annotations
 from pydantic import ValidationError as PydanticValidationError
 
 from infinienv.engine.grid import Grid
-from infinienv.schema.scene_schema import GOAL_TYPES, SceneSpec, scene_spec_from_dict
+from infinienv.schema.scene_schema import ACTION_TYPES, OBJECT_TYPES, SceneSpec, scene_spec_from_dict
 from infinienv.validation.errors import ValidationIssue, ValidationResult
 from infinienv.validation.reachability import is_reachable
 from infinienv.validation.solvability import check_solvability
@@ -44,6 +44,8 @@ def _iter_goal_refs(goal) -> list[str]:
         return [goal.object_id, goal.target_id]
     if kind == "unlock":
         return [goal.door_id]
+    if kind == "interact":
+        return [goal.target_id]
     if kind == "sequence":
         refs: list[str] = []
         for sub in goal.subgoals:
@@ -72,6 +74,84 @@ def validate_scene(scene: SceneSpec) -> ValidationResult:
         if oid in seen:
             issues.append(ValidationIssue("DUPLICATE_ID", f"Duplicate object id {oid!r}.", oid))
         seen.add(oid)
+
+    # -- mechanics: custom object types and interactions must be internally consistent
+    # before we trust anything that references them. See CLAUDE.md section 28.
+    custom_type_ids = {t.id for t in scene.mechanics.custom_object_types}
+    for t in scene.mechanics.custom_object_types:
+        if t.id in OBJECT_TYPES:
+            issues.append(
+                ValidationIssue(
+                    "MECHANICS_TYPE_COLLISION",
+                    f"Custom object type {t.id!r} collides with a built-in type.",
+                    t.id,
+                )
+            )
+    known_types = OBJECT_TYPES | custom_type_ids
+
+    interaction_ids: set[str] = set()
+    for interaction in scene.mechanics.custom_interactions:
+        if interaction.id in interaction_ids:
+            issues.append(
+                ValidationIssue("DUPLICATE_ID", f"Duplicate interaction id {interaction.id!r}.", interaction.id)
+            )
+        interaction_ids.add(interaction.id)
+        if interaction.trigger_action in ACTION_TYPES:
+            issues.append(
+                ValidationIssue(
+                    "MECHANICS_ACTION_COLLISION",
+                    f"Interaction {interaction.id!r} trigger_action {interaction.trigger_action!r} "
+                    "collides with a built-in action.",
+                    interaction.id,
+                )
+            )
+        if interaction.target_type not in known_types:
+            issues.append(
+                ValidationIssue(
+                    "MECHANICS_UNKNOWN_TYPE",
+                    f"Interaction {interaction.id!r} target_type {interaction.target_type!r} is not a "
+                    "known or declared object type.",
+                    interaction.id,
+                )
+            )
+        if interaction.must_hold_type is not None and interaction.must_hold_type not in known_types:
+            issues.append(
+                ValidationIssue(
+                    "MECHANICS_UNKNOWN_TYPE",
+                    f"Interaction {interaction.id!r} must_hold_type {interaction.must_hold_type!r} is not "
+                    "a known or declared object type.",
+                    interaction.id,
+                )
+            )
+        if not interaction.effects:
+            issues.append(
+                ValidationIssue(
+                    "MECHANICS_NO_EFFECTS",
+                    f"Interaction {interaction.id!r} has no effects; it would do nothing.",
+                    interaction.id,
+                )
+            )
+
+    for obj in scene.objects:
+        if obj.type not in known_types:
+            issues.append(
+                ValidationIssue(
+                    "UNSUPPORTED_OBJECT_TYPE",
+                    f"Object {obj.id!r} has type {obj.type!r}, which is neither a built-in type nor "
+                    "declared in mechanics.custom_object_types.",
+                    obj.id,
+                )
+            )
+
+    for goal in _flatten_goals(scene.goals):
+        if goal.type == "interact" and goal.interaction_id not in interaction_ids:
+            issues.append(
+                ValidationIssue(
+                    "MECHANICS_UNKNOWN_INTERACTION",
+                    f"Goal {goal.id!r} references undeclared interaction {goal.interaction_id!r}.",
+                    goal.interaction_id,
+                )
+            )
 
     # -- agent exists exactly once & is in bounds --
     grid_w, grid_h = scene.grid.width, scene.grid.height

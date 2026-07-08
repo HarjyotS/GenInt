@@ -32,7 +32,7 @@ def build_replay_frames(
         )
     ]
     for i, action in enumerate(actions, start=1):
-        apply_action(state, grid, action)
+        apply_action(state, grid, action, scene)
         frames.append(
             render_scene_image(
                 scene,

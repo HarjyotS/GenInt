@@ -15,9 +15,11 @@ variant that:
   layout change specifically requires resizing.
 
 Follow the exact same field structure and constraints as scene generation: only the supported
-object types, action types, and goal types; every object needs `id`/`type`/`x`/`y`; every goal
-needs `id`/`type`; walls are single `{"x","y"}` cells, not line segments; output MUST be valid
-JSON with no comments or trailing commas.
+object types, action types, and goal types (plus anything declared in the base scene's
+`mechanics`, which you must preserve exactly if the base scene has one -- don't drop or rename a
+custom object type/interaction the base scene relies on); every object needs `id`/`type`/`x`/`y`;
+every goal needs `id`/`type`; walls are single `{"x","y"}` cells, not line segments; output MUST
+be valid JSON with no comments or trailing commas.
 
 Do not output markdown or code fences. Do not output explanation. Return only the mutated
 SceneSpec JSON object.

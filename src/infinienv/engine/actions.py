@@ -1,9 +1,14 @@
-"""Deterministic action application: move / pick_up / drop / unlock / wait."""
+"""Deterministic action application: move / pick_up / drop / unlock / wait / custom interactions."""
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from infinienv.engine.grid import Grid
 from infinienv.engine.state import GameState
+
+if TYPE_CHECKING:
+    from infinienv.schema.scene_schema import SceneSpec
 
 MOVE_DELTAS = {
     "move_up": (0, -1),
@@ -17,7 +22,7 @@ class ActionError(Exception):
     """Raised when an action is illegal given the current state."""
 
 
-def apply_action(state: GameState, grid: Grid, action: dict) -> GameState:
+def apply_action(state: GameState, grid: Grid, action: dict, scene: "SceneSpec | None" = None) -> GameState:
     """Apply one action in place and return the mutated state. Raises ActionError if illegal."""
     kind = action.get("action")
 
@@ -72,5 +77,10 @@ def apply_action(state: GameState, grid: Grid, action: dict) -> GameState:
 
     if kind == "wait":
         return state
+
+    if scene is not None and scene.mechanics.custom_interactions:
+        from infinienv.engine.interactions import apply_custom_interaction  # local: avoids a circular import
+
+        return apply_custom_interaction(state, scene, action)
 
     raise ActionError(f"unsupported action {kind!r}")

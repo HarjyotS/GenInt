@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 
 from pydantic import ValidationError as PydanticValidationError
 
+from infinienv.generation.mechanics_cache import remember_scene_mechanics
 from infinienv.generation.templates import generate_from_template
 from infinienv.llm.base import ProviderError, SceneProvider
 from infinienv.schema.scene_schema import SceneSpec
@@ -120,6 +121,12 @@ def generate_and_validate(
                 "errors": [e.to_dict() for e in validation.errors],
             }
         )
+
+    if validation.valid:
+        # Persist any new custom object types/interactions this scene defined, so
+        # future ScenePlannerAgent runs can reuse them via get_known_mechanics
+        # instead of reinventing a slightly-different one each time.
+        remember_scene_mechanics(scene)
 
     return GenerationResult(
         scene=scene,

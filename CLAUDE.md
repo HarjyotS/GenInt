@@ -75,6 +75,12 @@ But these must remain deterministic and testable:
 
 If there is a conflict between model output and deterministic validation, the validator wins.
 
+This still holds after section 28 (extended mechanics): the model may *define* a new object
+type or interaction, but only as data (declared JSON, checked against a fixed schema and a
+fixed, safe effect vocabulary) -- never as code. The engine that interprets that data is still
+100% deterministic and testable. The model is not the source of truth about what a "throw"
+action does at runtime; the fixed effect interpreter in `engine/interactions.py` is.
+
 ---
 
 ## 3. Runtime agent choice
@@ -297,7 +303,8 @@ Rules:
 
 ## 7. Supported MVP mechanics
 
-Keep the initial engine small.
+Keep the initial engine small. (Section 28 adds a bounded, safe way to go beyond this fixed
+list on a per-scene basis -- read it before assuming a task needs an unsupported mechanic.)
 
 Supported actions:
 
@@ -319,6 +326,7 @@ reach(target_id)
 pickup(object_id)
 deliver(object_id, target_id)
 unlock(door_id)
+interact(interaction_id, target_id)   # see section 28
 sequence([...subgoals])
 ```
 
@@ -1021,6 +1029,9 @@ Before considering the MVP ready, verify:
 [ ] benchmark mode runs over multiple prompts.
 [ ] At least one creative mutation/curriculum demo exists.
 [ ] Tests pass or failures are documented honestly.
+[ ] At least one scene exercises section 28's extended mechanics (a model-defined custom
+    object type + interaction, e.g. the "throw a vase out a window" example), validated,
+    solved, and replayed like any other scene.
 ```
 
 ---
@@ -1044,3 +1055,89 @@ A model proposes. The harness verifies. The agent proves.
 ```
 
 That is the core research contribution.
+
+---
+
+## 28. Extended mechanics: model-defined object types and interactions (post-MVP)
+
+The sections above describe the MVP: a fixed, closed vocabulary of object types, actions, and
+goal types (section 7), chosen deliberately so the deterministic solver can *guarantee*
+solvability rather than hope for it. This section is an explicit, intentional expansion beyond
+that MVP scope, added once the MVP was solid and verified against the real API: the harness
+should be able to represent things the fixed vocabulary doesn't cover -- "a window you can throw
+things out of," "a switch that opens a door," "a trapdoor that drops the agent to a new
+location" -- without every such idea requiring a new hand-written Python feature landing in this
+repo first.
+
+**The rule this must not break:** section 2's "do not let the LLM be the source of truth" and
+section 23's "no arbitrary code execution from model output" still apply in full. The way to let
+a model define *real, checkable behavior* per scene without letting it author code is a small
+**declarative effect system**:
+
+- A scene may declare **custom object types** (`mechanics.custom_object_types`): just an `id` and
+  a description. A custom type must be declared before any object uses it -- an object whose
+  `type` isn't built-in and isn't declared fails validation (`UNSUPPORTED_OBJECT_TYPE`), the same
+  as an unsupported type always has.
+- A scene may declare **custom interactions** (`mechanics.custom_interactions`): a new verb
+  (`trigger_action`, must not collide with a built-in action), a `target_type` it applies to, an
+  optional `must_hold_type` precondition, and an ordered list of **effects**.
+- Each effect is `{"op": ..., "target": ..., ...}` where `op` is one of a **fixed, small
+  vocabulary** implemented in `engine/interactions.py`: `remove_held_object`,
+  `drop_held_object_at_target`, `remove_object`, `unlock_target`, `set_object_property`,
+  `teleport_agent`. There is no "run this code" op. The model composes behavior out of these
+  primitives; it never writes the primitives themselves.
+- A goal type `interact(interaction_id, target_id)` is satisfied once that interaction has been
+  successfully performed against that target -- planned and executed the same deterministic way
+  as `unlock`/`deliver`/etc (path to target, satisfy `must_hold_type` by picking up a matching
+  portable object first if needed, apply the interaction, done).
+
+This means "throw a vase out a window" becomes:
+
+```json
+{
+  "objects": [
+    {"id": "vase_1", "type": "vase", "x": 4, "y": 4, "portable": true},
+    {"id": "window_1", "type": "window", "x": 9, "y": 4, "solid": false}
+  ],
+  "mechanics": {
+    "custom_object_types": [{"id": "vase"}, {"id": "window"}],
+    "custom_interactions": [{
+      "id": "throw_through_window",
+      "trigger_action": "throw",
+      "target_type": "window",
+      "must_hold_type": "vase",
+      "effects": [{"op": "remove_held_object", "target": "held"}]
+    }]
+  },
+  "goals": [{"id": "declutter", "type": "interact", "interaction_id": "throw_through_window", "target_id": "window_1"}]
+}
+```
+
+Validated, planned, executed, and replayed exactly like everything else -- `validate_scene`
+checks the mechanics block is internally consistent (no collisions with built-ins, every
+reference resolves) before ever touching reachability/solvability; `navigation/planner.py`
+plans `interact` goals the same way it plans `unlock`; `render/replay_export.py` shows the vase
+actually vanish from the animated replay when thrown.
+
+### Reuse: mechanics get cached, not reinvented per scene
+
+A model re-deriving "window"/"throw" slightly differently every time it's needed would be both
+wasteful and inconsistent. `generation/mechanics_cache.py` persists every new custom object
+type/interaction from a *validated* scene into a shared, project-local cache
+(`.infinienv_mechanics_cache.json`, gitignored -- it's a runtime cache, not project source, same
+treatment as `.infinienv_asset_cache/`). The `get_known_mechanics` tool exposes that cache back
+to `ScenePlannerAgent`/`RepairAgent`/`MutationAgent`; the prompt instructs the model to check it
+first and reuse an existing definition verbatim rather than invent a new one. First definition
+wins on a cache write (existing entries are never overwritten), so once "window" means something,
+it keeps meaning that.
+
+### What this deliberately does not do
+
+- No `eval`/`exec`, no model-authored Python, no dynamically imported code of any kind -- the
+  effect vocabulary is fixed and finite; extending it (a new `op`) is a real code change with
+  tests, same as adding a new built-in action always was.
+- No unbounded property system -- `SceneObject.properties` and `set_object_property` exist for
+  simple flags an interaction's effects can read/write, not a general scripting surface.
+- The validator, not the model, still decides whether a scene is accepted. A model can propose
+  `mechanics` that don't validate (unknown target_type, colliding trigger_action, empty effects,
+  etc.) exactly as it can propose an invalid `SceneSpec` today -- same repair loop, same fallback.

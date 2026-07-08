@@ -9,3 +9,4 @@ runs/*
 !runs/.gitkeep
 .env
 .infinienv_asset_cache/
+.infinienv_mechanics_cache.json
