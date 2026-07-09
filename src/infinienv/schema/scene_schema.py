@@ -39,7 +39,7 @@ ACTION_TYPES: set[str] = {
     "wait",
 }
 
-GOAL_TYPES: set[str] = {"reach", "pickup", "deliver", "unlock", "sequence", "interact"}
+GOAL_TYPES: set[str] = {"reach", "pickup", "deliver", "unlock", "sequence", "interact", "push"}
 
 # Fixed, safe vocabulary of effect primitives a custom interaction can compose.
 # Deliberately NOT arbitrary code: every op is interpreted by a small fixed
@@ -87,6 +87,14 @@ class SceneObject(BaseModel):
     portable: bool = False
     locked: bool = False
     key_id: str | None = None
+    # Deterministic grid-physics flags (see engine/physics.py). `pushable`: the agent can
+    # shove this object one cell by moving into it (Sokoban-style), instead of being blocked
+    # by it. `slippery`: a pushable object that, once shoved, keeps sliding in the push
+    # direction until the next cell is blocked (ice-puck momentum). Both stay integer-grid and
+    # fully simulable, so the validator's solvability guarantee still holds -- unlike the
+    # continuous physics that only --sandbox mode allows.
+    pushable: bool = False
+    slippery: bool = False
     properties: dict[str, bool | str | int] = Field(default_factory=dict)
 
 
@@ -168,6 +176,18 @@ class InteractGoal(BaseModel):
     target_id: str
 
 
+class PushGoal(BaseModel):
+    """Completed once the pushable `object_id` has been shoved onto `target_id`'s cell --
+    e.g. "push the crate onto the pressure plate". Distinct from `deliver`: the agent shoves
+    the object across the floor rather than carrying it, so it works for heavy/non-portable
+    objects, and for slippery ones the object slides until it stops (see engine/physics.py)."""
+
+    id: str
+    type: Literal["push"] = "push"
+    object_id: str
+    target_id: str
+
+
 class SequenceGoal(BaseModel):
     id: str
     type: Literal["sequence"] = "sequence"
@@ -175,12 +195,12 @@ class SequenceGoal(BaseModel):
 
 
 GoalUnion = Annotated[
-    Union[ReachGoal, PickupGoal, DeliverGoal, UnlockGoal, InteractGoal, SequenceGoal],
+    Union[ReachGoal, PickupGoal, DeliverGoal, UnlockGoal, InteractGoal, PushGoal, SequenceGoal],
     Field(discriminator="type"),
 ]
 SequenceGoal.model_rebuild()
 
-Goal = Union[ReachGoal, PickupGoal, DeliverGoal, UnlockGoal, InteractGoal, SequenceGoal]
+Goal = Union[ReachGoal, PickupGoal, DeliverGoal, UnlockGoal, InteractGoal, PushGoal, SequenceGoal]
 
 
 class SceneSpec(BaseModel):

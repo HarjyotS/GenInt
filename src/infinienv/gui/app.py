@@ -150,6 +150,10 @@ def create_app():
             except (TypeError, ValueError):
                 return jsonify({"error": "max_repair_attempts must be an integer"}), 400
 
+        # Defaults under runs/, but -- unlike the CLI -- doesn't require it: neither run_job
+        # below passes require_runs_dir, so a reviewer can point the GUI at any writable
+        # directory under cwd. The CLI's `generate` command enforces runs/ (see cli.py);
+        # deliberately not mirrored here.
         out_dir = (data.get("out") or "").strip() or f"runs/gui_{int(time.time())}"
         sandbox = bool(data.get("sandbox"))
 

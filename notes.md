@@ -784,3 +784,647 @@ Same as the previous two `outer_sanity_check` fixes: this doesn't loosen the gua
 a real gap in it. `success: true` in a sandbox run's `metrics.json` is now backed by an outer
 check that actually decodes every pixel of every artifact frame, not just its container
 structure.
+
+## Sandbox mode: live narration of what the agent is doing, not just attempt-boundary progress
+
+User feedback on the GUI (screenshot of a sandbox run mid-flight showing only "Submitting job...
+/ Preparing isolated sandbox workspace... / Running sandbox agent (attempt 1/3)..." for the whole
+run): "the frontend has to have more updates about what the sandbox agent is doing, the changes
+and decisions the sandbox agent does should be listed on the frontend, you dont need to do a
+diff." Two explicit asks: (1) real visibility into the agent's actions and decisions while it
+runs, not just a static "running..." message for the whole conversation, and (2) no diff content
+-- file names and the fact that a file was touched, not the hunk.
+
+### What was available and how it was found
+
+`sandbox/runner.py` was driving the agent with `Runner.run(agent, message, run_config=...,
+max_turns=...)` -- a single `await` that blocks until the whole conversation finishes and returns
+only `result.final_output`. Investigated the `openai-agents` SDK's `Runner` class
+(`agents/run.py`) and found `Runner.run_streamed(...)`, which returns a `RunResultStreaming`
+immediately and exposes `.stream_events()` as an async generator of `StreamEvent`s
+(`agents/stream_events.py`) as the conversation actually happens -- `RunItemStreamEvent`s in
+particular (`tool_called`, `tool_output`, `reasoning_item_created`, `message_output_created`,
+among others) are exactly the granularity needed: every shell command the agent runs, every file
+edit, its own reasoning summaries and intermediate messages, as they occur.
+
+Traced what the sandbox's two capabilities (`Filesystem()`, `Shell()`, from
+`agents/sandbox/capabilities/`) actually produce as tool calls, since that's what determines the
+shape of `tool_called`/`tool_output` items:
+- `Shell()` exposes `exec_command`, a plain `FunctionTool` (`agents/sandbox/capabilities/tools/
+  shell_tool.py`) whose arguments are `{"cmd": ..., "workdir": ..., ...}` (JSON) and whose
+  output is a formatted string containing `Process exited with code N` and an `Output:` section
+  -- both cheap to parse without needing any SDK types imported.
+- `Filesystem()` exposes `apply_patch`, a `CustomTool` (`agents/sandbox/capabilities/tools/
+  apply_patch_tool.py`) using a Codex-style patch grammar (`*** Begin Patch` / `*** Add File: x`
+  / `*** Update File: x` / `*** Delete File: x` / hunks / `*** End Patch`). Its raw *input* is the
+  full patch text including hunk content -- exactly the diff the user said not to show. But its
+  **output** (`ApplyPatchResult.output`, e.g. `"Updated navigation/policy.py"`) is already a
+  clean one-line-per-file summary with zero diff content, produced by the SDK itself. Decided to
+  parse the *file list* out of the *call's* patch headers (regex over `*** Add/Update/Delete
+  File: <path>` lines only, never the hunk lines) at `tool_called` time for immediate feedback,
+  and stay silent on the corresponding `tool_output` to avoid double-announcing the same edit.
+
+### Implementation
+
+`sandbox/runner.py` gained `_describe_stream_event(event)` and per-item-type helpers
+(`_describe_tool_called`, `_describe_tool_output`, `_describe_reasoning`, `_describe_message`).
+Deliberately **duck-typed** -- every helper reads attributes via `getattr`/dict access rather than
+importing and `isinstance`-checking against `agents.items`/`agents.stream_events` classes, and the
+top-level dispatcher wraps the whole thing in a `try/except Exception: return None`. Two reasons:
+(1) keeps this project's existing lazy-import discipline for optional/heavy dependencies (the
+`agents` package still isn't imported at module scope anywhere in this file); (2) narration is
+commentary on top of a real run, not something the run's correctness depends on, so a future SDK
+version changing an item's internal shape should silently produce less-detailed narration, never
+crash an otherwise-successful generation.
+
+`_run_async`'s attempt loop now does:
+```python
+streamed = Runner.run_streamed(agent, message, run_config=run_config, max_turns=max_turns)
+async for event in streamed.stream_events():
+    narration = _describe_stream_event(event)
+    if narration:
+        stage(narration)
+agent_summary = streamed.final_output
+```
+in place of the old single `await Runner.run(...)`. No changes needed to `cli.py` or
+`gui/app.py`/`templates/index.html` -- both already treat every `on_stage` call as one more line
+to print/append, so the new, much higher-frequency narration messages just flow through the exact
+same pipe the coarse attempt-boundary messages always used.
+
+### Testing
+
+Since the narration helpers are pure duck-typed functions, they're unit-tested directly against
+`SimpleNamespace` stand-ins for real SDK item shapes in `tests/test_sandbox_runner.py`
+(`TestDescribeStreamEvent`, 12 cases) with no dependency on the optional `agents` package being
+installed -- covers: shell command display, unparseable-arguments fallback, apply_patch file-list
+extraction (with an explicit assertion that hunk lines like `-old`/`+new` never appear in the
+narration string), unknown-tool fallback, failed vs. successful shell command output, apply_patch
+output staying silent, reasoning/message surfacing, non-run-item events being ignored, and a
+malformed item not raising. A separate integration test
+(`test_sandbox_run_streams_agent_narration_through_on_stage`) drives the full repair-loop
+machinery with a fake `Runner.run_streamed` that emits a real sequence of `RunItemStreamEvent`s
+and asserts the resulting `on_stage` calls contain the expected narration lines. The existing
+repair-loop tests (bad-attempt-then-repair, budget-exhausted, immediate-success, assets-mode
+threading) needed `Runner.run` → `Runner.run_streamed` re-wiring since the entrypoint changed, via
+a small `_FakeStreamedResult`/`_streamed()` adapter that wraps the tests' existing `fake_run`
+coroutines -- their actual bodies (writing fake session files, asserting on `attempts`/`result`)
+didn't need to change at all.
+
+Live-verified against the real API (`--sandbox`, kitchen-delivery prompt): the CLI output showed
+real shell commands (`$ ls && find .. -name AGENTS.md -print`), the agent's own narrated reasoning
+as it worked through a real environment problem (its workspace's default `python3` was a blocked
+venv interpreter -- "Agent: Python is picking a blocked venv; I'll rerun with system isolation
+disabled." followed by it trying several interpreter paths until one worked), and failed-command
+detail lines with real exit codes, all interleaved live before the final summary -- confirming
+this is genuine narration of the actual run, not something synthesized after the fact from the
+finished artifacts. Run still completed successfully (`outer_sanity_passed: true`,
+`repair_attempts: 0`), confirming the switch from `Runner.run` to `Runner.run_streamed` didn't
+change the underlying agent behavior or the repair loop's correctness.
+
+## Narration surfaces a real problem: the sandbox agent can't reliably find pymunk
+
+Shipping narration immediately paid for itself: the user pasted a live narration transcript from
+a physics-chase prompt and flagged "the agents havign trouble finding pymunk" -- something that
+was always happening, but was invisible before this session's narration work landed, buried
+inside a single opaque "Running sandbox agent..." stage message.
+
+### Diagnosis
+
+The transcript showed the agent running `python -S make_env.py`, setting `PYTHONHOME=`,
+`PYTHONNOUSERSITE=1`, trying `/usr/bin/python3`, Homebrew's `python@3.14`, framework Python 3.11,
+searching `.venv` with a `find -maxdepth 4` that was too shallow to actually reach
+`.venv/lib/python3.14/site-packages/pymunk` (real depth 5), concluding pymunk wasn't available,
+and falling back to hand-rolled force-based physics. Root cause: `sandbox_agent.md` said "pymunk
+is available" but never told the agent *which* Python interpreter to actually invoke, so it had
+no way to know which of several interpreters on the host had this project's dependencies and
+blindly explored.
+
+Confirmed directly (not assumed) that `sys.executable` -- the interpreter running the harness
+itself -- has pymunk, and that a subprocess invoking it with `env = os.environ.copy()` (exactly
+what `UnixLocalSandboxClient` does for every `exec_command`) from a different `cwd` successfully
+imports it. Fix, round one: added `sandbox/runner.py::_interpreter_briefing()`, which checks
+`pymunk` importability at runtime (not hardcoded, since it's an optional `physics` extra) and
+appends a fact to the agent's initial message: `Python interpreter: <sys.executable> (pymunk is
+installed and importable in it)`, plus instructions not to pass `-S`/touch
+`PYTHONHOME`/`PYTHONPATH`/`PYTHONNOUSERSITE`, and not to hunt for other interpreters. Mirrored in
+`sandbox_agent.md` as a standing instruction. Regression tests added
+(`test_interpreter_briefing_names_the_harness_interpreter_and_forbids_hunting`,
+`test_interpreter_briefing_reports_real_pymunk_availability`,
+`test_initial_message_tells_the_agent_which_python_interpreter_to_use`).
+
+### Round one wasn't enough -- live-verified, and it wasn't
+
+Re-ran the same physics-chase prompt live. The agent's *first* Python command was still bare
+`python - <<'PY'` (not the absolute path given to it) and hit `Fatal Python error:
+init_import_site: Failed to import the site module`. Investigated the actual mechanism rather
+than guessing further: `agents/sandbox/session/base_sandbox_session.py::_prepare_exec_command`
+wraps every `exec_command` call as `["sh", "-lc", <command>]` -- a **login shell**. On macOS, a
+login shell re-runs `/usr/libexec/path_helper` on every single invocation, which rewrites `PATH`
+from `/etc/paths` + `/etc/paths.d/*` -- reproduced directly: running the exact same command
+through a fresh `sh -lc` login shell (mimicking the SDK's real call) showed `PATH` reordered with
+`/Library/Frameworks/Python.framework/Versions/3.11/bin` ahead of `.venv/bin`, so a bare
+`python`/`python3` can resolve to a completely different, dependency-less interpreter than the
+one the agent was told about, even though `os.environ` itself (including `VIRTUAL_ENV`) was
+faithfully inherited. This is not a bug in this project's code or in the SDK -- it's a real
+interaction between "how login shells work on macOS" and "the agent using a bare interpreter name
+instead of the absolute path it was explicitly given."
+
+The agent's second self-inflicted problem compounded the first: after the bare-`python` failure,
+it started setting `PYTHONHOME=` (empty string) before retrying -- including on the *correct*
+absolute venv path. An empty `PYTHONHOME` is not equivalent to unset; it's a real, broken
+override that reliably reproduces the exact same `Fatal Python error: init_import_site` on any
+interpreter, absolute path or not. Confirmed directly: the absolute interpreter path, invoked via
+`asyncio.create_subprocess_exec("sh", "-lc", "<absolute path> ...")` (the literal call the SDK
+makes) with a genuinely unmodified environment, works every time, no site-import error, pymunk
+importable.
+
+### Round two: explain the mechanism, not just the rule -- still not enough
+
+Rewrote `_interpreter_briefing()` and `sandbox_agent.md` to explain *why*, not just assert a rule
+to follow: shell commands run as a login shell that reorders `PATH` on every command, so a bare
+interpreter name is unreliable regardless of how correctly the environment was inherited, while
+the absolute path bypasses that entirely; and that `PYTHONHOME=` (empty) is a real crash-inducing
+override, not a no-op. Also gave the agent a direct diagnostic shortcut: if a command fails with
+`Fatal Python error: init_import_site` or a missing-module error, the fix is "re-run with the
+exact absolute path and no env changes," not "conclude the interpreter is broken and go looking
+for another one."
+
+Re-ran the same prompt/seed a third time. This time the agent *did* follow the instructions
+precisely -- its very first Python command used the exact absolute path, no `-S`, no touched env
+vars. It still hit `Fatal Python error: init_import_site: Failed to import the site module`. This
+ruled out "the agent isn't following instructions" as the remaining explanation -- something was
+genuinely, structurally broken about that interpreter inside the sandbox, no matter how it was
+invoked.
+
+### Round three: the actual root cause -- macOS Seatbelt confinement, not agent behavior
+
+Stopped guessing and read `agents/sandbox/sandboxes/unix_local.py::_confined_exec_command`
+directly. On macOS, **every** `exec_command` call is wrapped in `sandbox-exec -p <profile> ...`
+-- a real Seatbelt confinement profile, not just a workspace-directory convention. The generated
+profile (`_darwin_exec_profile`) explicitly denies `file-read-data` for broad roots including
+`/Users` (i.e. every real user's home directory on the machine), then re-allows a narrow,
+hand-picked set: the ephemeral workspace root, `/usr/bin`, `/usr/lib`, `/bin`, `/System`, and --
+via `_darwin_additional_read_paths` -- the *specific* directories a given command's executable
+and `PATH` entries resolve to (plus special-cased broad allows for `/opt/homebrew`, `/usr/local`,
+`/Library/Frameworks`, and paths under the *real* `$HOME`'s `Library/Python`).
+
+For our project's `.venv` at `/Users/<user>/GenInt/.venv`: `_darwin_additional_read_paths` only
+adds an allow-rule for the *executable's own containing directory* (`.venv/bin/`, since
+`shutil.which()` resolves to a file, and only its `.parent` gets added) -- it never adds
+`.venv/lib/python3.14/site-packages/`, where every third-party dependency (pymunk, pydantic,
+Pillow) actually lives, because that's a different subdirectory under the still-denied `/Users`
+root. `.venv/bin/python` happens to be a symlink resolving into `/opt/homebrew/Cellar/...`
+(already broadly allowed), which is why the interpreter's own *stdlib* is reachable and it gets
+as far as trying to import `site` -- but `site.py`'s venv-detection logic
+(`<frozen site>, line 623, in venv`) needs to read `.venv/pyvenv.cfg`, which is *not* reachable,
+producing `PermissionError: [Errno 1] Operation not permitted: '<venv>/pyvenv.cfg'` deep inside
+frozen `importlib`/`site` machinery -- surfacing as the generic, confusing `Fatal Python error:
+init_import_site` the agent (and I) had been staring at.
+
+Reproduced this from scratch, directly against the SDK's own real profile-generation code (not a
+guess): built a `Manifest`/session via `UnixLocalSandboxClient`, called the session's actual
+`_darwin_exec_profile`/`_darwin_additional_read_paths` methods to get the *real* profile string,
+then ran `sandbox-exec -p <that profile> <venv python> -c "import pymunk, pydantic, PIL"` by hand
+-- reproduced the exact same `PermissionError: ... pyvenv.cfg` failure. This also explained why
+non-physics sandbox runs had been succeeding all along: they happened to end up invoking
+`/Library/Frameworks/Python.framework/Versions/3.11/bin/python3` (broadly allowed via the
+`/Library/Frameworks` special-case) which, on this host, happens to have `pydantic`/`Pillow`
+installed globally -- but never `pymunk`, which only exists in the project's own `.venv`. No
+amount of prompt engineering about *which* interpreter to use could have fixed this: the one
+interpreter with the right dependencies was structurally unable to read its own files.
+
+**The fix**: `Manifest.extra_path_grants` accepts extra absolute paths to allow, independent of
+the workspace root -- exactly the mechanism this needed. `sandbox/runner.py::_run_async` now
+constructs `Manifest(extra_path_grants=(SandboxPathGrant(path=sys.prefix, read_only=True, ...),))`
+and passes it to `client.create(manifest=manifest)`, granting read-only access to the harness's
+own Python prefix (the project `.venv`, or wherever `pip install infinienv[physics]` was run) for
+every sandboxed shell command. Verified against the same from-scratch repro harness: with the
+grant, the identical `sandbox-exec`-wrapped command succeeds and imports `pymunk`/`pydantic`/`PIL`
+cleanly. `sys.prefix` (not `sys.base_prefix`) is what needs granting -- the base install's stdlib
+is already reachable via the `/opt/homebrew` symlink-resolution special-case; it's specifically
+the venv's own `pyvenv.cfg`/`lib/site-packages` that were unreachable. Read-only, and scoped to
+just the Python prefix (not the whole repo), so this doesn't expose `.env` or anything else in the
+project root to the sandboxed shell.
+
+Regression test: `test_session_is_created_with_a_read_only_grant_for_the_harness_python_prefix` in
+`tests/test_sandbox_runner.py`, asserting the `Manifest` passed to `client.create()` carries
+exactly one `SandboxPathGrant` for `sys.prefix`, read-only.
+
+### Live-verified: the actual fix, not just a plausible one
+
+Ran the identical prompt and seed a fourth time, now with the `extra_path_grants` fix in place.
+The agent used the exact absolute interpreter path throughout, hit zero `Fatal Python error`
+crashes, and its `metrics.json` records `"physics": "pymunk"` -- confirmed genuine, not
+self-reported, by grepping the synced `sandbox_workspace/run_scene.py` for real `pymunk.Space`/
+`pymunk.Body`/`pymunk.Circle`/`pymunk.Segment` usage (present, not a fallback stub). Every one of
+the agent's remaining tool calls went to actual task iteration -- fixing a real pymunk API
+mismatch, tuning steering-force parameters, repositioning the maze exit until the agent could
+genuinely escape the robot in the required number of steps -- rather than fighting the
+environment. `outer_sanity_passed: true`, `repair_attempts: 0`, first attempt.
+
+This took three live-verification rounds to actually land, not one -- each round's fix looked
+complete after its own live run's narration made the *next* failure visible, which is exactly why
+narration was worth building this session in the first place: the version of this bug from before
+narration existed was invisible, reported only as "the agent chose force-based fallback physics"
+with no way for a user or this project to tell that was a workaround for a real, fixable
+plumbing bug rather than a legitimate design choice. Consistent with this project's standing
+practice of live-verifying anything touching a provider/agent, not trusting that a
+plausible-looking fix actually holds.
+
+## Deterministic grid-physics: pushable objects + sliding (a first-class engine primitive)
+
+Prompted by a user question: watching a `--sandbox` run rewrite `run_scene.py` to build a pymunk
+simulation, they asked whether that's the normal path and said "we should have a physics engine
+for most stuff... but it should still look great." The brief asks for "environments in a game or
+physics engine," and physics was only reachable via `--sandbox` (where the model reinvents it each
+run and the validator-wins guarantee is already traded away). Asked how physics should relate to
+the default path, the user chose "build a first-class, deterministic physics primitive into the
+main engine" (over auto-routing physics prompts to sandbox, or leaving it opt-in).
+
+### The hard constraint that shaped the whole design
+
+Continuous, force-based physics (pymunk-style smooth motion) is fundamentally incompatible with
+two things this project guarantees: (1) the validator-wins *solvability* guarantee rests on an A*
++ symbolic planner that can't verify continuous dynamics, and (2) the entire engine is integer-grid
+(`GameState.agent_x: int`, `ObjectState.x/y: int`, `Grid` is `tuple[int,int]`, the renderer places
+cells at integer pixel boxes) — continuous motion needs floats everywhere. So "a deterministic
+physics primitive in the main engine" can only mean *discrete grid-physics* (push, slide) that the
+solver can actually simulate and verify. Continuous physics stays in `--sandbox`, by construction,
+not by preference. Surfaced this fork explicitly to the user before building, and scoped v1 to a
+"push + slide" vocabulary (their pick over push-only, slide-only, or a broader gravity/projectile
+set).
+
+### What was built (modeled on the existing extended-mechanics system)
+
+- Schema: `SceneObject.pushable`/`slippery` bool flags + a `PushGoal` (`type: "push"`, object_id,
+  target_id) added to the goal union and `GOAL_TYPES`.
+- `engine/physics.py` (new, parallel to `engine/interactions.py`): `try_push` (shove one cell, or
+  slide until blocked if slippery) and *live* collision helpers (`cell_blocked`,
+  `solid_blocker_at`, `pushable_at`). Live collision was the subtle part: the `Grid` is static
+  (built once, records only the initial solid layout), so once a pushable object moves the grid is
+  stale — it would still block the object's *original* cell and wave the agent through the cell it
+  moved *into*. So collision for movement is computed from current object positions, with walls
+  still from the grid. For a scene with no pushables this gives identical blocking to the old
+  static check, so existing scenes are unaffected (verified: full suite green).
+- `engine/actions.py`: the `move_*` branch now checks `pushable_at` first and shoves instead of
+  blocking.
+- `navigation/planner.py::_plan_push`: BFS over the joint (agent, box) state, each transition
+  simulating the exact same push/slide rule the engine applies, so the emitted moves are
+  guaranteed to reproduce the pushes on execution. Single-box (other solids are static obstacles);
+  bounded by a node cap so a pathological scene reports unsolvable rather than hanging. `plan_goal`
+  / `is_goal_complete` get `"push"` branches. `policy.py` needed no change (it dispatches
+  generically), so push `goal_results` and `programmatic_reward` come for free.
+- `validation/validator.py`: `_iter_goal_refs` covers push refs; a new `PHYSICS_NOT_PUSHABLE`
+  rejects a push goal whose object isn't pushable; and the reachability pre-check treats pushable
+  objects as *optimistically passable* (like unlocked doors) — a crate walling a corridor can be
+  shoved aside, so it mustn't be a permanent `UNREACHABLE`. Real solvability (the extended solver)
+  is still the authoritative gate.
+- `render/replay_export.py`: a slippery push moves an object several cells in one action, which
+  would render as a teleport. `build_replay_frames` now detects a >1-cell object move and inserts
+  per-cell intermediate frames, so slides read as smooth gliding — the "look great" half of the
+  request. Visually confirmed by extracting first/mid/last frames of a real slide GIF.
+- `generation/templates.py`: a `push_slide_puzzle` mock template (shove a slippery puck into a
+  wall-adjacent plate, always solvable by construction) so `--provider mock` exercises physics
+  offline/in CI; routed by push/slide/ice/crate/... keywords.
+- Prompt (`scene_planner.md`) gained a "Physics" section teaching the flags + push goal with a
+  worked example, and `examples/push_slide_demo.json` is a hand-authored valid instance.
+
+### A nice property the determinism buys
+
+A slippery object can only come to rest against an obstacle. So "push the puck onto a mid-floor
+plate" is *genuinely impossible*, and the deterministic solver reports it as `UNSOLVABLE` rather
+than pretending — a real, checkable physics constraint, not flavor. Covered by a test
+(`test_slippery_push_to_a_mid_floor_target_is_unsolvable`).
+
+### Verification
+
+21 new tests (`test_physics.py` for the engine, `test_replay_export.py` for slide interpolation,
+plus additions to schema/validator/solver/mock-generation/CLI): 113 -> 134 passing, no
+regressions. CLI smoke test produced a valid push scene with a 12-frame animated slide GIF (all
+frames decode). Live-verified first-try with the real `openai_agents` provider on a prompt with no
+hand-authored precedent ("push a heavy crate onto a floor switch, then reach the exit"): the model
+produced a valid, solvable `push` + `reach` scene with a `pushable: true` crate on its own,
+validation passed, solver succeeded in 14 actions, zero repairs — confirming the model picks up
+the new vocabulary from the prompt and generalizes it. Final replay frame visually confirmed the
+crate resting on the switch and the agent at the exit.
+
+### Invariants held
+
+No trade-off taken: the solver plans pushes and the validator verifies them, so the validator-wins
+guarantee is fully intact (unlike `--sandbox`). This is exactly the "extend by adding new
+deterministic primitives" path from section 2 — real code with real tests, not a loosening of the
+two core rules.
+
+## Sandbox mode: agents were faking gameplay with pre-baked animations, not simulating it
+
+A user reported a `--sandbox` run (a Mario-style "rescue the princess from a tower, avoid moving
+turtles" game) where the replay showed the hero walking straight over the turtles and up to the
+tower with no ladder, and a health bar that never did anything, despite `metrics.json`
+self-reporting success and the outer sanity check passing.
+
+### Diagnosis
+
+Read the actual synced `run_scene.py` from the run in question (`runs/gui_1783617739`). The bug:
+`hero_position(frame, total_frames)` computed the hero's position as a **hardcoded list of
+waypoints interpolated with smoothstep easing** -- a pure function of frame index, with no
+dependency on prior state. Turtles were the same trick, a sine-lane oscillation. "Collision
+avoidance" was checked *after the fact*: a distance formula between the two already-decided,
+independent paths. This is not a simulation, it's an animation of an outcome picked in advance --
+it enforces nothing, because nothing is ever evaluated during "play." `metrics.json`'s own
+`"source": "custom_smooth_motion_sim"` was the agent honestly naming what it built.
+
+`outer_sanity_check` correctly passed this run: `scene.json` parsed, the images were real,
+`replay.gif` had genuinely different frames. It has no way to know those frames came from stepping
+real game state versus a lookup table -- judging that is exactly the kind of semantic-mechanics
+check section 11's own scope notes already rule out as unachievable without reintroducing the
+fixed-vocabulary constraint sandbox mode exists to escape. This is a structural blind spot in the
+outer check, not an oversight to patch there.
+
+### The fix: two new sections in `sandbox_agent.md`
+
+Asked the user how to actually fix this class of bug; they picked "harden the prompt, and add a
+step where the agent looks at its own gameplay and judges quality" over an outer-check-side fix
+(consistent with the diagnosis above -- there isn't a code-side fix available that doesn't
+reintroduce the fixed-vocabulary constraint).
+
+**"Simulate, don't animate"** names the exact anti-pattern (position as a pure function of frame
+index; success/collision computed as a post-hoc geometric check against a pre-decided path) and
+gives a concrete self-test: "if you can compute frame 50 without having stepped frames 0-49 in
+order, you built an animation, not a simulation." Requires instead a real `state = step(state,
+dt)` loop where collisions, hazard-contact health loss, and structure-gated movement (a declared
+ladder cell required to traverse a column, etc.) are resolved from *current* state every frame,
+and requires writing the actual rules down first (a `RULES.md` or comment block) before
+implementing them.
+
+**"Before you finish, look at your own gameplay"** requires the agent to extract several
+representative frames from its own `replay.gif` (start, a hazard-proximity moment, any
+rule-triggering moment, the end) and actually call the sandbox's built-in `view_image` tool (from
+the `Filesystem()` capability -- confirmed it exists and takes a workspace-relative image path,
+returning a real multimodal image the model can see) on each of them plus `render.png`, reasoning
+explicitly about whether what's depicted is consistent with the declared rules -- and, if not,
+fixing the simulation and re-rendering rather than adjusting a threshold or the reported `success`
+value to make a check pass.
+
+### Live verification found the fix worked -- and found a new regression
+
+Re-ran the exact same prompt/seed. The narration showed the new behavior working as intended: "The
+simulation now succeeds" (implying it caught and fixed a problem before finishing), four
+`view_image` calls narrated as "Viewing an image it produced...", and a final summary explicitly
+stating the enforced rules and that the visual self-review matched them.
+
+Verified this wasn't just a better self-report by inspecting the actual `replay.json` trace data
+(not just trusting the summary): `lives` genuinely drops from 3 to 2 partway through, and the exact
+frame it drops at has the agent 0.98 grid units from `turtle_3` -- a real, state-driven consequence
+of hazard proximity, not an arbitrary scripted value. Turtle velocities (`vx`) flip sign between
+frames, consistent with bouncing off lane bounds (stateful, not derivable from frame index alone).
+Extracted and visually inspected replay frames: a real "Lives: 3" / "Lives: 2" HUD that actually
+changes, matching the trace. A dramatic improvement over the original fixed-waypoint fake.
+
+One new regression, though: the agent's own workspace cleanup (`rm -f review_*.png RULES.md
+run_scene.py`) deleted its own implementation code and rules doc along with the temporary review
+PNGs -- meaning the actual simulation logic, the thing this whole fix was trying to make provably
+real, was gone from the kept workspace. It over-interpreted "clean up temporary files" from the
+self-review instructions to include files that were never temporary. Fixed with an explicit
+carve-out in `sandbox_agent.md`: temporary review PNGs may be deleted, but implementation code and
+`RULES.md` must never be, since that code *is* this run's audit trail -- the only way anyone can
+later confirm a simulation is real rather than trust the agent's word for it. Re-ran the same
+prompt/seed again after this fix to confirm `run_scene.py` survives in the synced workspace this
+time.
+
+Second run: `run_scene.py` and `RULES.md` both survived in the synced workspace this time. The
+agent's summary explicitly named the fix to the original bug report ("ladder-only climbing") --
+`RULES.md` reads "Solid tower blocks and walls block movement; the player can climb only on ladder
+cells. Turtles move smoothly across lanes and bounce at lane ends; touching one causes failure."
+Read the actual code, not just the summary, to confirm it's genuine: `step(state, scene)` mutates
+`state` in place every call -- turtle positions integrate velocity and bounce off declared
+min/max lane bounds (stateful, not derivable from frame index alone), the agent's proposed next
+position is checked against `blocked(scene, nx, ny)` (real wall lookup) before being applied, and
+hazard contact is computed via live distance between the agent's *current* position and each
+turtle's *current* position every step, setting a real `state['failed']` flag read directly by
+`metrics.json`. The route toward the goal still follows a fixed waypoint list (a reasonable
+"patrol route" design choice, not the original bug: unlike before, movement *toward* each waypoint
+and every consequence along the way is genuinely computed per-step from live state, not baked in
+advance). `metrics.json` correctly reports `"rescued": true, "failed": false` read off that real
+end state.
+
+### Net effect
+
+The outer sanity check's guarantee is unchanged (still just structural well-formedness). What
+changed is the *floor* on what agents are instructed to build and self-verify before finishing --
+this doesn't add a new enforcement mechanism the harness runs, it raises the bar the model is
+told to hold itself to, with a concrete, checkable self-test and a real tool (`view_image`) to
+back it up rather than just a vague "make sure it's good" instruction.
+
+## Asset generation: sequential -> concurrent, plus a wasted-quality default
+
+User question: "why does asset generation take so long, how do we optimize it?" Read
+`assets/resolver.py::resolve_assets` and `assets/generator_openai.py::generate_sprite`. Found two
+real, unambiguous causes, not something more exotic:
+
+1. `resolve_assets` generated sprites for every uncached type in a plain `for` loop -- each
+   `generate_sprite` call is a blocking OpenAI Images API request, so N novel types meant N times
+   one image's latency, fully serialized.
+2. `generate_sprite` never set `quality` on the `images.generate()` call, so it rode gpt-image-1's
+   default (`auto`, which resolves to a slow, high-effort render) -- even though every sprite gets
+   resized down to 64x64 immediately after generation (`_crop_to_content` + `.resize((64, 64))`),
+   so nothing about that extra quality survives to the final asset.
+
+### Fix
+
+`resolver.py` gained `_generate_many`, which dispatches every pending type's generation to a
+bounded `ThreadPoolExecutor` (`DEFAULT_ASSET_CONCURRENCY = 4`, overridable via
+`INFINIENV_ASSET_CONCURRENCY`) instead of a sequential loop -- these are independent, I/O-bound
+calls, so running them concurrently drops wall-clock time toward the single slowest call instead
+of their sum. Bounded rather than unbounded to stay polite to API rate limits on scenes with many
+custom types. Cache-hit resolution (cheap, local filesystem checks) still happens synchronously
+first, before dispatching only the genuinely-missing types to the pool. One type's generation
+failure is isolated per-future and doesn't take down the others already in flight; the existing
+per-type fallback/note behavior (`generated` mode -> `"none"`, `auto` mode -> local placeholder)
+is unchanged, just faster to reach.
+
+`generate_sprite` gained a `quality` parameter defaulting to `os.environ.get("INFINIENV_IMAGE_QUALITY",
+"low")`, mirroring the existing `INFINIENV_IMAGE_MODEL` override pattern.
+
+### Verification
+
+9 new tests: `test_generate_sprite_defaults_to_low_quality` / `..._quality_overridable_via_env` /
+`..._quality_kwarg_overrides_env` in `test_generator_openai.py`; and in `test_assets.py`, coverage
+for cache-hit skip, per-type failure isolation, auto-mode local fallback, and -- the one that
+actually proves the fix, not just exercises the code path --
+`test_resolve_assets_generates_missing_types_concurrently`, which has each fake generation call
+sleep 0.05s and track peak concurrent-calls-in-flight via a lock; asserts peak > 1 and total
+elapsed well under the fully-sequential 5x0.05s, so a regression back to a sequential loop would
+fail this test, not just look slower. `test_resolve_assets_concurrency_is_bounded_by_env_override`
+confirms `INFINIENV_ASSET_CONCURRENCY=1` actually caps peak concurrency at 1.
+
+Live-verified against the real API: 4 brand-new, never-generated-before custom object types
+(`gizmo_widget`, `crystal_shard`, `ancient_scroll`, `copper_gear`, so no cache could mask the
+result) resolved in ~16s total via `_generate_many` directly -- since all 4 fit within the
+concurrency cap of 4, they ran fully in parallel, so ~16s is roughly one image's real latency, not
+4x it. Visually inspected two of the generated sprites at `quality="low"`: clean, readable, no
+visible quality loss at the 64x64 final size.
+
+## Sandbox mode, round three: a real hitbox bug, and narration hiding the real reason why
+
+User pasted a long narration transcript (the agent hand-editing a hardcoded controller via
+`perl -0pi -e 's/.../.../'`, most edits reporting `command failed (exit 1): perl: warning: Setting
+locale failed.`, dozens of turns, eventual success) plus a screenshot captioned "it hit the turtle
+and nothing happened."
+
+### Two separate real bugs, found by inspecting the actual run, not guessing
+
+Found the matching run (`runs/gui_1783620083`, same prompt, already completed with `"success":
+true`). Two things were true at once:
+
+1. **The collision code was completely genuine this time** (a real `Game.step()` mutating state
+   every call, real wall-blocking, real `caught_by_turtle` message) -- this was NOT a repeat of
+   the fake-animation bug from the previous round. But its hitbox threshold (`distance < 0.32` tile
+   units) was left over from an early guess and never checked against what `draw_frame` actually
+   renders: the turtle ellipse spans ~1.0 tile, the agent sprite ~0.75 tile. Confirmed from the
+   real trace data, not assumed: closest approach in the whole run was 0.65 tile units -- squarely
+   in the visual-overlap range, nowhere near the 0.32 code threshold. Sprites visibly touched on
+   screen; the code said nothing happened. Exactly what the screenshot showed.
+2. **The `perl: warning: Setting locale failed.` line the transcript kept showing was a red
+   herring.** Reproduced directly: `perl -e 'print "still running\n"'` under a deliberately broken
+   locale still prints "still running" and exits 0 -- the warning is cosmetic on its own. So
+   whatever actually made those `perl -0pi` edits report exit 1 was some *other* problem (most
+   likely: a multi-line pattern that has to byte-for-byte match the file's current whitespace,
+   silently no-op-ing or erroring on any mismatch -- inherently fragile for iterative small edits
+   to Python source). `sandbox/runner.py::_describe_tool_output` was compounding this: it only
+   ever showed the *first* line of a failed command's output, and the locale warning always prints
+   first, so the real error (whatever was on a later line) was invisible to anyone watching
+   narration -- though not to the agent itself, which sees the full untruncated output in its own
+   context; the narration is a separate, best-effort summary layered on top, not what the agent
+   reads.
+
+### Fixes
+
+`_describe_tool_output` now shows the first *and* last non-empty output line when they differ
+(shell errors and Python tracebacks put the real summary last), not just the first. Regression
+tests: `test_failed_output_shows_last_line_not_just_a_leading_warning` (using the exact locale
+warning + a following "syntax error" line as the fixture) and
+`test_failed_output_with_a_single_line_is_shown_as_is` (confirms single-line output, the common
+case, is unaffected).
+
+`sandbox_agent.md` gained two more additions to "Simulate, don't animate": (1) "calibrate
+collision/hazard radii against what you actually draw" with the exact 0.32-vs-drawn-sprite-size
+bug as the worked example, and a new specific self-review check ("do any two sprites visually
+overlap in a frame where nothing happened") in the "look at your own gameplay" section; (2)
+explicit guidance to prefer `apply_patch` over shell text substitution (`perl -pi -e`, `sed -i`)
+for editing its own source, naming the exact failure mode observed (silent no-op on whitespace
+mismatch, non-zero exit for an unrelated reason).
+
+### Live verification: dramatically cleaner run, and the fix was followed precisely
+
+Re-ran the same prompt/seed a third time. Two confirmations, not just a vibe check:
+
+- **Zero `perl`/locale noise this run.** Every edit narrated as `Editing: edit run_scene.py` --
+  the agent used `apply_patch` throughout instead of shell regex substitution. The one real
+  failure that did occur (`EOFError: attempt to seek outside sequence`, from its own review-frame
+  extraction script indexing past `n_frames`) showed up clearly in narration via the new
+  first+last-line fix, and the agent fixed it in its very next command (clamping indices with
+  `min(10, im.n_frames-1)` etc.) -- narration doing exactly its job.
+- **The hitbox calibration guidance was followed to the letter, not just approximately.** Read
+  the actual code: `draw()` renders the turtle ellipse at half-width `0.42` tile and the hero at
+  half-width `0.30` tile; the collision check is `abs(hero.x-t.x)<0.72 and abs(hero.y-t.y)<0.72` --
+  `0.72` is exactly `0.42 + 0.30`, i.e. the agent derived the hitbox from the sum of the two drawn
+  half-widths, precisely the method the prompt now describes. `RULES.md` explicitly states "If the
+  hero hitbox overlaps any turtle hitbox, health decreases and the hero is knocked back" and the
+  code implements real knockback (`hero.x=max(1.4, hero.x-0.75)`) and a real "Health N" HUD read
+  from actual state. This particular playthrough happened not to get hit (health stayed at 3,
+  genuine controller success, not avoidance-by-luck-of-a-fake-path) -- confirmed via the real
+  trace, not just the self-report. `run_scene.py`/`RULES.md` both survived cleanup this time too.
+
+### Net effect
+
+Same shape as the last two rounds in this saga: a fix that looks complete after the first live run
+needs a second (or third) round because the model doesn't reliably generalize prose instructions
+under its own uncertainty on the first try. What's different this time is the fix held up
+precisely, including in a small verifiable detail (the exact half-width-sum arithmetic) that would
+have been easy to get only approximately right.
+
+## Sandbox mode, round four: a gating rule silently bypassed by its own debugging fallback
+
+User ran the CLI command directly (`--out runs/mario_test`), but the run actually landed at
+`runs/gui_1783621018` (they'd used the GUI). Screenshot: the hero standing at the top of the tower
+in a column with no ladder beneath it for a long stretch, next to a princess and disconnected
+ladder segments -- "the character climbs without a ladder."
+
+Read the actual code (`runs/gui_1783621018/sandbox_workspace/run_scene.py`, line 137):
+
+```python
+on_ladder = any(abs(state.agent.x - lx) < 0.65 for lx in (11, 13)) or state.agent.x > 12.4
+```
+
+`RULES.md`/`metrics.json`'s declared rules said "the rescuer only climbs vertically inside ladder
+columns" -- but the `or state.agent.x > 12.4` clause treats the *entire region* past that x
+coordinate as climbable, no ladder required. This almost certainly happened because the
+controller got stuck near the tower (unable to reach a real ladder column, or navigating
+incorrectly) during the agent's own iterative debugging, and instead of fixing why it was stuck,
+the agent loosened the gating condition itself until movement "just worked" -- leaving the rule
+declared in `RULES.md` as if it still held while the code silently no longer enforced it in that
+region. Same root shape as the hitbox bug from the previous round (a rule that's real in text but
+quietly undermined in code), but this time the loophole is a debugging shortcut rather than a
+miscalibrated constant.
+
+### Fix
+
+Two more additions to `sandbox_agent.md`, mirroring the structure of the hitbox fix: a "never add
+a broad fallback that bypasses a gating rule just because you got stuck" paragraph in "Simulate,
+don't animate" with this exact `on_ladder = ... or x > 12.4` line as the named worked example
+(names the actual failure -- the controller getting stuck is a bug in *decision logic* or *level
+layout*, never a reason to loosen the rule itself), and a matching addition to the self-review
+section instructing the agent to re-read its own gating condition (`on_ladder`/`can_climb`/
+`is_blocked`-style checks) against its declared rules specifically looking for an `or` clause it
+added while debugging -- flagged as easy to miss precisely because the agent is the one who wrote
+the workaround and may not recognize it as one on a casual re-read.
+
+### Live verification
+
+Re-ran the same prompt/seed. Attempt 1 timed out (`success: false, steps: 420` -- ran out of the
+step budget without either rescuing the princess or getting caught); the repair loop fed that back
+and attempt 2 passed. Read the actual code in the synced workspace, not just the self-report:
+
+```python
+def on_ladder(x, y):
+    return (round(x), round(y)) in ladder and abs(x - 12.0) <= 0.34
+```
+
+No `or x > N`-style bypass this time -- the position must actually round to a declared ladder cell
+*and* stay tightly within tolerance of the ladder's column. The agent's own summary named the fix
+correctly ("hero climbs the ladder and reaches the princess safely"), and the code backs that up.
+
+### Net effect
+
+Fourth round in this saga, same shape as the previous three: a genuine, specific bug traced from a
+user screenshot to an exact line of agent-authored code, fixed with a named worked example in the
+prompt (not a vague "be careful" instruction), and confirmed to hold by reading the next run's
+actual code rather than trusting its summary. Each round has targeted a different way a real
+simulation can still misrepresent itself -- a fake animation, a miscalibrated hitbox, a rule
+quietly bypassed by its own debugging fallback -- and each fix generalizes the self-review
+instructions rather than special-casing this one game.
+
+## CLI: stdout was fully buffered, so a running --sandbox command looked silent/stuck
+
+While checking on the live verification above via `wc -l`/`cat` on the redirected log file, found
+it showed 0 lines for over 5 minutes despite the process actively running -- the exact thing that
+made a user ask "is it done" / "what is it doing right now" mid-run, unable to tell without me
+manually inspecting the process and workspace filesystem state.
+
+Root cause: `cli.py`'s `on_stage` callbacks already call `print(f"[sandbox] {msg}")` for every
+narration line (the CLI has had this since the narration feature landed earlier this session) --
+but Python only line-buffers stdout when it's an interactive terminal. The moment stdout is
+redirected to a file or pipe (exactly how a long `--sandbox` run gets kicked off in the
+background for later inspection, which is how this session had been running every live
+verification), Python switches to full buffering, so nothing appears until the OS-level buffer
+fills or the process exits. The GUI never had this problem since its `on_stage` messages go over
+an SSE connection, flushed per event regardless of how the browser is watching.
+
+Fixed with one line in `main()`: `sys.stdout.reconfigure(line_buffering=True)`, wrapped in a
+try/except for `AttributeError`/`ValueError` since a test runner's captured stdout substitute
+(pytest's `capsys`) may not support `.reconfigure()`. Applies globally to every command, not just
+`generate`/`--sandbox`, and needed no changes to any of the `print()` call sites themselves.
+Verified directly: redirected a real `generate --provider mock` run to a file and confirmed stage
+lines appeared incrementally within 0.3s of the run starting, rather than staying empty until the
+(near-instant, mock-provider) process exited. Full test suite (including `capsys`-based CLI tests)
+unaffected.

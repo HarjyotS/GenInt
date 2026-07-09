@@ -132,7 +132,8 @@ GenInt/                            # repo root
 │   │   ├── grid.py                # static occupancy from a SceneSpec
 │   │   ├── state.py                # GameState/ObjectState (mutable runtime state)
 │   │   ├── actions.py               # apply_action: move/pick_up/drop/unlock/wait + routes to...
-│   │   └── interactions.py          # ...the custom-interaction effect interpreter
+│   │   ├── interactions.py          # ...the custom-interaction effect interpreter
+│   │   └── physics.py               # deterministic grid-physics: push + slide (section 5b)
 │   ├── validation/
 │   │   ├── errors.py                # ValidationIssue/ValidationResult
 │   │   ├── reachability.py          # BFS reachability pre-check
@@ -216,15 +217,17 @@ Rules:
 
 ```text
 Object types:  wall, floor, table, can, box, key, door, package, sink, exit, hazard, distractor
+Object flags:  solid, portable, locked, key_id, pushable, slippery   (all default false/null)
 Actions:       move_up, move_down, move_left, move_right, pick_up(object_id), drop(object_id),
                unlock(door_id, key_id), wait
 Goal types:    reach(target_id), pickup(object_id), deliver(object_id, target_id),
-               unlock(door_id), interact(interaction_id, target_id), sequence([...subgoals])
+               unlock(door_id), interact(interaction_id, target_id), push(object_id, target_id),
+               sequence([...subgoals])
 ```
 
 This vocabulary is closed by design — closed enough that the solver can *guarantee* solvability
 rather than hope for it. It is not, however, the ceiling on what a scene can express; that's what
-section 6 is for.
+sections 5 and 5b are for.
 
 ### Locked doors
 
@@ -232,6 +235,13 @@ A door needs `"solid": true, "locked": true, "key_id": "<a portable key object's
 a key/door task are two ordered top-level entries in `scene.goals` (not a `sequence` wrapper):
 `unlock` for the door, then whatever needs what's behind it. The planner auto-fetches the key
 (paths to it, picks it up) the first time `unlock` needs it.
+
+### Deterministic grid-physics (pushable / slippery + the `push` goal)
+
+Physics is a first-class part of the base vocabulary, not a bolt-on: `pushable`/`slippery` object
+flags and a `push` goal, interpreted by `engine/physics.py`. See section 5b for the full design;
+the one-line summary is that it stays integer-grid and fully simulable, so the solver plans and
+the validator verifies pushes exactly like any other goal — the solvability guarantee holds.
 
 ---
 
@@ -324,6 +334,81 @@ this pattern rather than echoing one canned example.
 
 ---
 
+## 5b. Deterministic grid-physics: pushable objects and sliding
+
+Section 5's declarative effects let the model define *what an interaction does*; this section is
+about *movement dynamics* the base action set couldn't express — shoving a crate, a puck sliding
+across ice — delivered as a first-class, **deterministic** engine primitive rather than punted to
+`--sandbox`. It exists because "produce environments in a game or physics engine" wants physics to
+be normal, not exotic, and the user asked for physics in the default path. The whole design is
+built around one constraint: **it must not cost the validator-wins solvability guarantee.**
+Continuous, force-based physics (pymunk-style smooth motion) fundamentally can't — an A* solver
+can't verify it, and it needs float coordinates the whole engine doesn't have — so that stays
+confined to section 11's sandbox mode. What lives here instead is *discrete grid-physics*: still
+integer cells, still fully simulable, so the deterministic solver plans it and the validator
+verifies it exactly like any other goal.
+
+### The vocabulary (two object flags + one goal type)
+
+- **`SceneObject.pushable`** (`bool`, default false): the agent shoves the object one cell by
+  moving into it (Sokoban-style) instead of being blocked by it. Pushable objects should also be
+  `solid` (that's what makes shoving them meaningful).
+- **`SceneObject.slippery`** (`bool`, default false): a *pushable* object that, once shoved, keeps
+  sliding in the push direction until the next cell is blocked (ice-puck momentum). Still integer
+  cells — just several per push. A slippery object can therefore only come to rest against an
+  obstacle, which the solver enforces: a mid-floor target for a slippery object is genuinely
+  `UNSOLVABLE`, and that's reported, not hidden.
+- **`push` goal** (`{"type": "push", "object_id": ..., "target_id": ...}`): satisfied once the
+  pushable `object_id` rests on `target_id`'s cell. Distinct from `deliver` — the agent shoves the
+  object across the floor rather than picking it up and carrying it, so `push` works for
+  heavy/non-portable objects.
+
+### Where it lives (parallel to the interaction system)
+
+- `engine/physics.py` — the deterministic interpreter: `pushable_at` (live lookup),
+  `try_push` (shove one cell, or slide until blocked if slippery), and `cell_blocked` /
+  `solid_blocker_at` (**live** collision — computed from current object positions, not the static
+  `Grid`, since the Grid records only the initial solid layout and would be stale once a pushable
+  moves). For a scene with no pushables these yield the same blocking decisions the old static
+  check did, so existing scenes are unaffected.
+- `engine/actions.py::apply_action` — the `move_*` branch now checks `pushable_at` first: moving
+  into a pushable object shoves it (raising `ActionError` if it can't move) instead of blocking.
+- `navigation/planner.py::_plan_push` — plans a push via **BFS over the joint (agent, box)
+  state**, simulating the exact same push/slide rule the engine applies, so the emitted moves are
+  guaranteed to reproduce the pushes on execution. Single-box: every *other* solid object is a
+  static obstacle (multi-box coordination is out of scope and not guaranteed). Bounded by
+  `_PUSH_SEARCH_NODE_CAP`; exceeding it is reported as unsolvable, never a hang. `plan_goal` /
+  `is_goal_complete` get a `"push"` branch.
+- `validation/validator.py` — `_iter_goal_refs` includes a push goal's `object_id`/`target_id`;
+  a new `PHYSICS_NOT_PUSHABLE` check rejects a push goal whose object isn't `pushable`; and the
+  reachability pre-check treats pushable objects as *optimistically passable* (like unlocked
+  doors — a crate walling a corridor can be shoved aside, so it isn't a permanent `UNREACHABLE`
+  block). Real solvability is still the authoritative gate via the extended solver.
+- `render/replay_export.py` — `build_replay_frames` detects an object that moved more than one
+  cell in a single action (a slide) and inserts per-cell intermediate frames, so a slippery slide
+  reads as smooth gliding motion instead of a teleport. This is what makes physics runs *look
+  good*, especially with `--assets`.
+- `generation/templates.py` — a `push_slide_puzzle` mock template (agent shoves a slippery puck
+  into a wall-adjacent plate), always solvable by construction, so `--provider mock` (the offline
+  path) exercises physics too. Routed by `push`/`slide`/`ice`/`crate`/… keywords.
+
+### What it deliberately does not do
+
+- No continuous/float motion, no forces, no `pymunk` — those can't preserve the solvability
+  guarantee and stay in section 11's sandbox mode. This is integer-cell physics only.
+- No multi-box coordinated push planning (single-box is the guaranteed case).
+- The `Grid` stays static; only the *live* collision in `engine/physics.py` reflects moved
+  objects. A* navigation for *non-push* goals still assumes pushables at their initial cells, so a
+  scene shouldn't require the agent to walk through where it earlier pushed a box away (the
+  push-goal path itself is fine — it's planned via the live-simulating joint BFS, not A*).
+
+Live-verified first-try with the real `openai_agents` provider on a prompt with no hand-authored
+precedent ("push a heavy crate onto a floor switch, then reach the exit"): the model produced a
+valid, solvable `push` + `reach` scene, `pushable: true` crate and all — confirming the model
+picks up the new vocabulary from the prompt and generalizes it. See `notes.md`.
+
+---
+
 ## 6. Validation
 
 `validation/validator.py::validate_scene` is the single source of truth; every provider's output
@@ -347,15 +432,16 @@ broken enough makes reachability/solvability meaningless to even attempt):
 3. Mechanics internal consistency: `MECHANICS_TYPE_COLLISION`, `MECHANICS_ACTION_COLLISION`,
    `MECHANICS_UNKNOWN_TYPE` (an interaction's `target_type`/`must_hold_type` isn't known/declared),
    `MECHANICS_NO_EFFECTS`, `UNSUPPORTED_OBJECT_TYPE`, `MECHANICS_UNKNOWN_INTERACTION` (a goal
-   references an undeclared interaction).
+   references an undeclared interaction), `PHYSICS_NOT_PUSHABLE` (a `push` goal targets an object
+   that isn't `pushable` — see section 5b).
 4. `OUT_OF_BOUNDS` for the agent, every object, every wall.
 5. `ILLEGAL_OVERLAP` — two solid occupants (walls, solid objects, the agent) on one cell.
-6. `MISSING_GOAL_OBJECT` — every goal's referenced object/target/door/interaction-target id must
-   exist.
+6. `MISSING_GOAL_OBJECT` — every goal's referenced object/target/door/interaction-target/push id
+   must exist.
 7. `NO_GOALS` if the scene has none.
-8. `UNREACHABLE_OBJECT` — a cheap BFS pre-check from spawn, with doors treated as *optimistically
-   unlocked* (this is "is it walled off entirely by permanent walls," not a real lock/key
-   simulation — that's next).
+8. `UNREACHABLE_OBJECT` — a cheap BFS pre-check from spawn, with doors *and pushable objects*
+   treated as *optimistically passable* (this is "is it walled off entirely by permanent walls,"
+   not a real lock/key or push-order simulation — that's next).
 9. `UNSOLVABLE` — the real gate: `validation/solvability.py` actually runs `solve_scene()` (the
    full deterministic planner) and requires every goal to be genuinely completable in order,
    respecting real lock state as it evolves through the scene.
@@ -417,16 +503,21 @@ Deterministic, always — no LLM in this loop, ever (section 2).
 
 - `engine/grid.py` — static occupancy (walls, solid objects) built once from a `SceneSpec`.
 - `engine/state.py` — `GameState`/`ObjectState`: mutable runtime state (agent position,
-  inventory, per-object `properties`, `unlocked_doors`, `completed_interactions`).
+  inventory, per-object `properties`/`pushable`/`slippery`, `unlocked_doors`,
+  `completed_interactions`).
 - `engine/actions.py::apply_action` — the primitive executor for
-  move/pick_up/drop/unlock/wait, with legality checks (adjacency, portability, held-state). An
+  move/pick_up/drop/unlock/wait, with legality checks (adjacency, portability, held-state). A
+  `move_*` into a `pushable` object shoves it via `engine/physics.py` (section 5b). An
   unrecognized verb routes to `engine/interactions.py::apply_custom_interaction` when the scene
   defines a matching `custom_interactions` entry; otherwise it's a hard `ActionError`.
+- `engine/physics.py` — deterministic grid-physics: `try_push` (push one cell / slide until
+  blocked) and *live* collision helpers. See section 5b.
 - `navigation/astar.py` — plain A* pathfinding over the grid.
 - `navigation/planner.py::plan_goal` — the symbolic task planner: expands one goal
-  (reach/pickup/deliver/unlock/interact/sequence) into a primitive action sequence, applying each
-  action to `state` immediately as it's planned (via `_emit`) so later planning steps see
-  up-to-date state. If a `trace` list is passed in, `_emit` also records a step snapshot *at the
+  (reach/pickup/deliver/unlock/interact/push/sequence) into a primitive action sequence, applying
+  each action to `state` immediately as it's planned (via `_emit`) so later planning steps see
+  up-to-date state. `push` is planned by a joint (agent, box) BFS (`_plan_push`, section 5b); all
+  others by A*. If a `trace` list is passed in, `_emit` also records a step snapshot *at the
   moment the action is applied* — this must stay true; see `notes.md` for the bug that happened
   when a caller tried to reconstruct per-step trace data after the fact instead.
 - `navigation/policy.py::solve_scene` — the top-level solver: runs every top-level goal in
@@ -437,7 +528,8 @@ Deterministic, always — no LLM in this loop, ever (section 2).
 For a `deliver` goal: path to object, pick up, path to target, drop, verify. For a locked door:
 path to key, pick up, path to door, unlock, path to what's behind it. For `interact`: path to a
 `must_hold_type` match if not already held and pick it up, path to the interaction's target,
-apply the interaction.
+apply the interaction. For `push`: BFS over the joint (agent, box) state, simulating the exact
+push/slide rule the engine applies, until the box rests on the target cell (section 5b).
 
 ---
 
@@ -489,6 +581,23 @@ the repo root (gitignored) — generating "table" once means every future scene 
 it; `generated`/`auto` only ever calls out for types not already cached. `asset_manifest.json`
 records exactly where each sprite came from (`local`/`generated`/`none`) so a run never silently
 claims a generated asset that wasn't actually generated.
+
+**Generation is concurrent, not sequential, and defaults to low quality.**
+`assets/resolver.py::resolve_assets` used to call `generate_sprite` for every uncached type in a
+plain `for` loop — for a scene with N novel object types, wall-clock time was N times one image's
+latency, since each call blocked the next. `_generate_many` now dispatches every pending type's
+generation to a small bounded thread pool (`DEFAULT_ASSET_CONCURRENCY = 4`, overridable via
+`INFINIENV_ASSET_CONCURRENCY`) — these are independent, I/O-bound API calls, so running them
+concurrently drops wall-clock time to roughly the single slowest call instead of the sum of all of
+them (live-verified: 4 novel sprites in ~16s concurrently, vs. an expected ~4x that sequentially).
+Bounded, not unbounded, to stay polite to API rate limits on scenes with many custom types. One
+type's generation failure is isolated (caught per-future) and doesn't take down the others already
+in flight — `resolve_assets`'s existing per-type fallback/note behavior is unchanged, just faster.
+Separately, `generate_sprite` now passes `quality="low"` by default (overridable via
+`INFINIENV_IMAGE_QUALITY`) — gpt-image-1's generation latency scales heavily with `quality`, and
+every sprite gets resized down to 64x64 immediately after generation regardless, so paying for the
+API default (`auto`, a slow high-effort render) bought nothing visible at that resolution.
+Live-verified sprites at `quality="low"` are still clean and usable at 64x64.
 
 ---
 
@@ -631,6 +740,126 @@ precedent as sandbox-authored mechanics below).
   real package during test collection. See `notes.md` for the full account, including a first
   version of the rewrite regex that missed indented/lazy imports (e.g. `resolve_assets()`'s
   function-body import of `generator_openai`).
+- **On macOS, the SDK confines every `exec_command` with a real `sandbox-exec` (Seatbelt)
+  profile**, not just a workspace-directory convention — it denies filesystem reads under broad
+  roots including the entire `/Users` tree, then narrowly re-allows the ephemeral workspace root
+  plus a small, hand-picked system allowlist. This is a real, previously-undiscovered
+  consequence: a harness-local Python environment living under a user's home directory (e.g. a
+  project `.venv`, the normal case) is reachable by *name* (its executable's containing
+  directory gets auto-allowed) but not by *content* — its `lib/site-packages` stays denied, so
+  the interpreter crashes during its own startup trying to read `pyvenv.cfg`
+  (`Fatal Python error: init_import_site`, root cause a `PermissionError`), regardless of which
+  absolute path the agent is told to invoke. `sandbox/runner.py::_run_async` now constructs the
+  session's `Manifest` with `extra_path_grants=(SandboxPathGrant(path=sys.prefix,
+  read_only=True, ...),)`, granting read-only access to the harness's own Python prefix so its
+  interpreter (and everything installed in it, `pymunk` included if the `physics` extra is
+  present) actually works inside the confinement. Reproduced and fixed against the SDK's real
+  profile-generation code, not guessed — see `notes.md` for the full three-round diagnosis
+  (prompt-only fixes were necessary but insufficient; the actual blocker was structural, not
+  agent behavior).
+- **`sandbox/runner.py::_interpreter_briefing()` tells the agent exactly which Python
+  interpreter to use** (`sys.executable`, the same one running the harness) and whether
+  `pymunk` is importable in it, checked at runtime. Without this, an agent has no way to know
+  which of several interpreters on the host has this project's dependencies and burns turns
+  hunting through `which -a python`, other interpreters, and `-S` (which disables site-packages
+  on *any* interpreter) — observed live before this fix landed. The briefing also explains that
+  shell commands run through a login shell that reorders `PATH` on every command (so a bare
+  `python`/`python3` name is unreliable even with a correctly inherited environment — always use
+  the absolute path), and that `PYTHONHOME=` (empty) is a real crash-inducing override, not a
+  no-op.
+
+### Live narration made this bug visible in the first place
+
+Both bugs above (import isolation, pymunk access) were found *because* of section 11's live
+narration feature (below), not despite it. Before narration existed, an agent quietly giving up
+on `pymunk` and falling back to hand-rolled force-based physics looked identical to an agent
+*choosing* hand-rolled physics as a legitimate design decision — there was no way for a run's
+output, or a user watching a run, to tell the difference. A user pasted a live narration
+transcript showing the agent's actual `which -a python`/`-S`/`PYTHONHOME=` flailing and asked why
+— that transcript is what made this fixable at all.
+
+### A failure class the outer check structurally cannot catch: a real-looking fake simulation
+
+A user reported a sandbox run ("Italian man rescues a princess from a tower, avoiding turtles")
+where the replay showed the hero walking straight over the turtles and up to the tower with no
+ladder, and a health bar that never did anything, despite `metrics.json` self-reporting
+`"success": true` and the outer sanity check passing. Reading the synced `run_scene.py` found the
+actual bug: the agent had computed the hero's and turtles' positions as **fixed functions of the
+frame index alone** — a hardcoded list of waypoints interpolated with easing for the hero, a
+sine-lane oscillation for each turtle — then checked "collision avoided" *after the fact* as a
+distance formula between those two already-decided paths. This is not a simulation; it's an
+animation of an outcome chosen in advance. It can't enforce any rule, because no rule was ever
+evaluated during "play" — the character glides through walls and past hazards because the curve
+was drawn far enough away, not because anything blocked it. `outer_sanity_check` correctly passed
+this run: `scene.json` parsed, the images were real, `replay.gif` had 96 genuinely different
+frames. It has no way to know those frames came from stepping real game state versus a lookup
+table — judging that is exactly the kind of semantic mechanics check section 11's own scope notes
+already rule out ("not achievable without reintroducing the fixed-vocabulary constraint this mode
+exists to escape"). This is a structural blind spot, not an oversight to patch in the checker.
+
+The fix is therefore in `sandbox_agent.md`, not the outer check: two new sections. **"Simulate,
+don't animate"** names the exact anti-pattern (position as a pure function of frame index,
+success/collision computed as a post-hoc geometric check against a pre-decided path) and gives a
+concrete self-test ("if you can compute frame 50 without having stepped frames 0–49 in order, you
+built an animation, not a simulation"), requiring instead a real `state = step(state, dt)` loop
+where collisions, hazard-contact health loss, and structure-gated movement (a ladder cell required
+to traverse a column, etc.) are resolved from *current* state every frame. **"Before you finish,
+look at your own gameplay"** requires the agent to extract several representative frames from its
+own `replay.gif` (start, a hazard-proximity moment, any rule-triggering moment, the end) and
+actually call the sandbox's built-in `view_image` tool (from the `Filesystem()` capability) on
+them plus `render.png`, reasoning explicitly about whether what's depicted is consistent with the
+rules it wrote down — and, if not, fixing the simulation and re-rendering rather than adjusting a
+threshold or the reported `success` value to make a check pass. The closing "keep iterating" note
+makes explicit that clearing the outer check is necessary but not sufficient — a run that passes
+it but fails the agent's own honest visual review is still a failure, and the point of the
+existing repair loop (below) is to keep trying until a real one lands, not to stop at the first
+attempt that merely doesn't crash.
+
+### Follow-on findings from watching the fix in production
+
+Live narration of subsequent runs (same "rescue the princess" prompt) surfaced three more real
+problems — one in this project's own narration code, two in what agents commonly get wrong even
+with a genuine simulation:
+
+- **A user-reported screenshot ("it hit the turtle and nothing happened") traced to a real hitbox
+  bug, not a repeat of the fake-animation problem.** That run's `step()` function was completely
+  genuine — real per-frame collision resolution against live positions — but its contact check
+  used `distance < 0.32` tile units while the sprites it drew (`draw_frame`) spanned roughly
+  0.5–0.875 tile units each. Confirmed from the actual trace data: the closest approach in the
+  whole run was 0.65 units — squarely inside the visual-overlap range but outside the code's
+  threshold, so sprites visibly touched on screen with no consequence. `sandbox_agent.md` gained
+  an explicit "calibrate collision/hazard radii against what you actually draw" section with this
+  exact bug as the worked example, plus a specific self-review check: "do any two sprites visually
+  overlap in a frame where nothing happened."
+- **The narration transcript for that run showed the agent stuck in a long, unproductive
+  trial-and-error loop**, repeatedly hand-editing constants via `perl -pi -e 's/.../.../'` and
+  re-running, with most edits reporting `command failed (exit 1): perl: warning: Setting locale
+  failed.` Reproduced directly: that locale warning is cosmetic on its own (`perl` still exits 0
+  when only that warning fires) — so something else was the real failure, and
+  `_describe_stream_event`'s `_describe_tool_output` was showing only the *first* output line,
+  which is exactly where an incidental warning like this sits, hiding whatever the real error
+  actually was from anyone watching the narration (the agent's own context isn't affected by this
+  — narration is a separate, best-effort summary of the same conversation, not what the agent
+  itself reads). Fixed by showing the first *and* last non-empty output line when they differ
+  (shell errors and Python tracebacks put the real summary last); also added guidance in
+  `sandbox_agent.md` to prefer `apply_patch` over shell text substitution for editing the agent's
+  own source, since a multi-line pattern silently no-ops on any whitespace mismatch while the
+  command can still exit non-zero for an unrelated reason — exactly the trap this run fell into.
+- **A third: a declared gating rule silently bypassed by its own debugging fallback.** A follow-up
+  screenshot ("the character climbs without a ladder") traced to `on_ladder = any(abs(x - lx) <
+  0.65 for lx in (11, 13)) or x > 12.4` — the `or` clause treats an entire region past that x
+  coordinate as climbable regardless of ladder presence, almost certainly added while the
+  controller was stuck near the tower during the agent's own debugging, loosening the rule instead
+  of fixing why it was stuck. `sandbox_agent.md` gained a "never add a broad fallback that bypasses
+  a gating rule just because you got stuck" paragraph naming this exact line as the worked example,
+  plus a self-review instruction to re-read gating conditions specifically for an `or` clause added
+  mid-debugging — flagged as easy to miss since the agent that wrote the workaround is the one
+  reviewing it. Live-verified: the next run's `on_ladder` check required both an exact ladder-cell
+  match and tight column tolerance, no broad bypass.
+
+Each of these three targets a different way a *genuine* simulation can still misrepresent itself —
+a fake animation, a miscalibrated hitbox, a rule quietly bypassed by its own fix — and each fix
+generalizes the self-review instructions rather than special-casing one game.
 
 ### Self-repair against the outer sanity check
 
@@ -649,6 +878,39 @@ between attempts, not just the final verdict. This does not weaken the outer san
 its failure less real — it's still the harness deciding pass/fail, not the model; the model simply
 gets more chances against the same real check, the same way the non-sandbox path gets more chances
 against the same real validator.
+
+### Live narration of what the agent is actually doing
+
+`--sandbox` runs used to report only coarse attempt-boundary progress ("Running sandbox agent
+(attempt 1/3)...") for the entire agent conversation, then dump the final summary at the end — a
+reviewer watching the CLI or GUI live had no visibility into what the agent was actually doing in
+between. `sandbox/runner.py` now drives the agent via `Runner.run_streamed` instead of the
+single-shot `Runner.run`, consuming `stream_events()` as the conversation happens and turning each
+event into a short line through the same `on_stage` callback everything else already uses — no
+new plumbing needed on either the CLI or the GUI, since both already render every `on_stage`
+message as its own line. `sandbox/runner.py::_describe_stream_event` maps:
+
+- a shell command the agent runs (`exec_command` tool call) → `$ <command>`
+- files the agent edits via `apply_patch` → `Editing: edit <path>, add <path>, ...` — the file
+  list only, parsed from the patch's own `*** Add/Update/Delete File:` headers, **never the hunk
+  content itself** (the user explicitly didn't want a diff surfaced, just the decision)
+- a failed shell command's exit code and first line of output (successful commands and every
+  `apply_patch` result stay silent, since the intent was already announced and a `0` exit isn't
+  informative)
+- the model's own reasoning summary and any intermediate message text, when the model produces
+  one (`Thinking: ...` / `Agent: ...`) — this is what actually surfaces the agent's *decisions*
+  ("Python is picking a blocked venv; I'll rerun with system isolation disabled."), not just its
+  actions
+
+This is deliberately duck-typed against the stream event/item shapes (no `agents` import, no
+`isinstance` checks against SDK classes, wrapped in a `try/except` that swallows and silences any
+per-event failure) so it degrades gracefully rather than crashing a real run if a future SDK
+version changes an item's internal shape — narration is best-effort commentary layered on top of
+a real run, never something a run's correctness depends on. Live-verified: a real sandbox run
+against a kitchen-delivery prompt showed the actual shell commands the agent ran, its own stated
+reasoning as it worked around a blocked default Python interpreter in its workspace, and failed
+attempts with their exit codes, before its final summary — all pure narration, not synthesized
+after the fact from the finished artifacts.
 
 ### What a run's `metrics.json` looks like
 
@@ -752,7 +1014,12 @@ python -m infinienv gui [--host 127.0.0.1] [--port 5050] [--no-browser]  # local
 
 Every `generate` writes stage-by-stage progress to stdout (`[n/total] ...`) ending in a clear
 `Result: SUCCESS`/`FAILED (see report.md)`. Design all CLI output for a reviewer skimming a
-terminal, not just for a human who already knows what happened. `gui` is a thin Flask frontend on
+terminal, not just for a human who already knows what happened. `main()` calls
+`sys.stdout.reconfigure(line_buffering=True)` once at startup — Python only line-buffers stdout for
+an interactive terminal by default, so a long `generate`/`--sandbox` run whose output is redirected
+to a file/pipe (the normal way to kick one off in the background) would otherwise show nothing
+until the process exits, even though real progress is happening — a real, user-reported "is it
+stuck?" moment. `gui` is a thin Flask frontend on
 the exact same `run_generation` pipeline, streaming that same stage-by-stage progress live over
 SSE instead of stdout — see `gui/app.py`. It requires `pip install infinienv[gui]`; nothing else
 in the project depends on `flask`. The GUI also has a `--sandbox` toggle that calls
@@ -838,12 +1105,20 @@ test_solver.py           - pickup/deliver/locked-door succeed; impossible task f
                             bug in notes.md)
 test_interactions.py      - the effect interpreter: precondition enforcement, each effect op,
                              routing from apply_action for an unrecognized verb
+test_physics.py            - push/slide engine (section 5b): shove one cell, slide-until-blocked,
+                             blocked push raises, live collision (walk through a vacated cell)
+test_replay_export.py       - per-action frames + smooth interpolation of a multi-cell slide
 test_mechanics_cache.py    - persist/reload, no duplication or overwrite on repeated calls
 test_mock_generation.py     - mock provider is deterministic and always valid
-test_assets.py               - scene_asset_types includes wall+agent; none/local resolution modes
+test_assets.py               - scene_asset_types includes wall+agent; none/local/generated
+                                 resolution modes; concurrent generation actually overlaps in
+                                 time (not just faster-looking sequential calls) and respects
+                                 INFINIENV_ASSET_CONCURRENCY; one type's generation failure is
+                                 isolated and doesn't block the rest; auto-mode local fallback
 test_generator_openai.py      - mocked OpenAI client (no network): texture vs. discrete-object
                                  branching (background param, prompt template, crop applied only
-                                 for discrete types)
+                                 for discrete types); quality defaults to "low", overridable via
+                                 INFINIENV_IMAGE_QUALITY env var or the quality= kwarg
 test_mutation.py               - mutations valid+distinct; LLM-proposed path used and validated;
                                   LLM failure degrades gracefully
 test_curriculum.py              - level templates easy->hard; --run executes and writes artifacts

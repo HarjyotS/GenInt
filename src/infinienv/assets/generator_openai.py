@@ -80,7 +80,7 @@ def _crop_to_content(img, *, pad_ratio: float = 0.03):
     return square
 
 
-def generate_sprite(object_type: str, cache_dir: str, *, model: str | None = None) -> str:
+def generate_sprite(object_type: str, cache_dir: str, *, model: str | None = None, quality: str | None = None) -> str:
     """Generate (or reuse a cached) sprite for `object_type`. Returns the PNG path."""
     if not os.environ.get("OPENAI_API_KEY"):
         raise ProviderError("OPENAI_API_KEY is not set; cannot generate sprites")
@@ -94,6 +94,12 @@ def generate_sprite(object_type: str, cache_dir: str, *, model: str | None = Non
     # aren't supported for this model"); gpt-image-1/1.5/1-mini do. Overridable via
     # INFINIENV_IMAGE_MODEL, but transparency will silently stop working on gpt-image-2.
     model = model or os.environ.get("INFINIENV_IMAGE_MODEL", "gpt-image-1")
+    # gpt-image-1's generation latency scales heavily with `quality` (low/medium/high/auto);
+    # every sprite gets resized down to 64x64 immediately after (see below), so paying for
+    # "auto" (which resolves to a slow, high-effort render) buys nothing visible. Default to
+    # "low" -- overridable via INFINIENV_IMAGE_QUALITY for anyone who wants higher-fidelity
+    # source images (e.g. if the render resolution is ever raised well above 64px).
+    quality = quality or os.environ.get("INFINIENV_IMAGE_QUALITY", "low")
     desc = OBJECT_DESCRIPTIONS.get(object_type, object_type.replace("_", " "))
     is_texture = object_type in TEXTURE_TILE_TYPES
     prompt = (TEXTURE_PROMPT_TEMPLATE if is_texture else SPRITE_PROMPT_TEMPLATE).format(desc=desc)
@@ -104,6 +110,7 @@ def generate_sprite(object_type: str, cache_dir: str, *, model: str | None = Non
             model=model,
             prompt=prompt,
             size="1024x1024",
+            quality=quality,
             background="opaque" if is_texture else "transparent",
             output_format="png",
             n=1,

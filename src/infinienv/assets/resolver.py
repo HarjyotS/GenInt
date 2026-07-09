@@ -27,6 +27,14 @@ def scene_asset_types(scene: SceneSpec) -> list[str]:
     return sorted(types)
 
 
+# Sprite generation calls are independent, I/O-bound (network) requests to the OpenAI Images
+# API -- running them one at a time serializes their full latency (N types == N x per-image
+# latency). A small bounded thread pool overlaps them instead, so wall-clock time is closer to
+# the single slowest call. Bounded (not "one thread per type") to stay polite to API rate limits
+# on scenes with many novel object types. Overridable via INFINIENV_ASSET_CONCURRENCY.
+DEFAULT_ASSET_CONCURRENCY = 4
+
+
 def resolve_assets(scene: SceneSpec, mode: str, cache_dir: str) -> tuple[dict[str, AssetEntry], list[str]]:
     if mode not in ASSET_MODES:
         raise ValueError(f"unknown asset mode {mode!r}; expected one of {ASSET_MODES}")
@@ -42,33 +50,36 @@ def resolve_assets(scene: SceneSpec, mode: str, cache_dir: str) -> tuple[dict[st
 
     local_dir = base_assets_dir()
 
-    for t in types:
-        local_path = os.path.join(local_dir, f"{t}.png")
-        has_local = os.path.exists(local_path)
-
-        if mode == "local":
+    if mode == "local":
+        for t in types:
+            local_path = os.path.join(local_dir, f"{t}.png")
             manifest[t] = (
                 AssetEntry(t, "local", local_path)
-                if has_local
+                if os.path.exists(local_path)
                 else AssetEntry(t, "none", None, note="no local placeholder for this type")
             )
-            continue
+        return manifest, notes
 
-        # mode in ("generated", "auto")
+    # mode in ("generated", "auto") -- resolve cache hits synchronously (cheap, local
+    # filesystem check), then generate every remaining type concurrently.
+    pending: list[str] = []
+    for t in types:
         cached_path = os.path.join(cache_dir, f"{t}.png")
         if os.path.exists(cached_path):
             manifest[t] = AssetEntry(t, "generated", cached_path, note="cache hit")
+        else:
+            pending.append(t)
+
+    generated_paths, generation_errors = _generate_many(pending, cache_dir)
+
+    for t in pending:
+        if t in generated_paths:
+            manifest[t] = AssetEntry(t, "generated", generated_paths[t])
             continue
-
-        try:
-            from infinienv.assets.generator_openai import generate_sprite
-
-            path = generate_sprite(t, cache_dir)
-            manifest[t] = AssetEntry(t, "generated", path)
-            continue
-        except ProviderError as exc:
-            notes.append(f"image generation unavailable for {t!r}: {exc}")
-
+        exc = generation_errors[t]
+        notes.append(f"image generation unavailable for {t!r}: {exc}")
+        local_path = os.path.join(local_dir, f"{t}.png")
+        has_local = os.path.exists(local_path)
         if mode == "generated":
             manifest[t] = AssetEntry(t, "none", None, note="generation failed and fallback not requested")
         elif has_local:
@@ -77,3 +88,28 @@ def resolve_assets(scene: SceneSpec, mode: str, cache_dir: str) -> tuple[dict[st
             manifest[t] = AssetEntry(t, "none", None, note="no asset available")
 
     return manifest, notes
+
+
+def _generate_many(types: list[str], cache_dir: str) -> tuple[dict[str, str], dict[str, ProviderError]]:
+    """Generate sprites for every type in `types` concurrently. Returns (type -> path for
+    successes, type -> the raised ProviderError for failures) -- never raises itself, so one
+    type's generation failure doesn't take down the others already in flight."""
+    if not types:
+        return {}, {}
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    from infinienv.assets.generator_openai import generate_sprite
+
+    max_workers = min(len(types), int(os.environ.get("INFINIENV_ASSET_CONCURRENCY", str(DEFAULT_ASSET_CONCURRENCY))))
+    paths: dict[str, str] = {}
+    errors: dict[str, ProviderError] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        future_to_type = {pool.submit(generate_sprite, t, cache_dir): t for t in types}
+        for future in future_to_type:
+            t = future_to_type[future]
+            try:
+                paths[t] = future.result()
+            except ProviderError as exc:
+                errors[t] = exc
+    return paths, errors

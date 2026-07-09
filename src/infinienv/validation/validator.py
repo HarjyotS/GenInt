@@ -46,6 +46,8 @@ def _iter_goal_refs(goal) -> list[str]:
         return [goal.door_id]
     if kind == "interact":
         return [goal.target_id]
+    if kind == "push":
+        return [goal.object_id, goal.target_id]
     if kind == "sequence":
         refs: list[str] = []
         for sub in goal.subgoals:
@@ -143,6 +145,7 @@ def validate_scene(scene: SceneSpec) -> ValidationResult:
                 )
             )
 
+    objects_by_id = {obj.id: obj for obj in scene.objects}
     for goal in _flatten_goals(scene.goals):
         if goal.type == "interact" and goal.interaction_id not in interaction_ids:
             issues.append(
@@ -152,6 +155,19 @@ def validate_scene(scene: SceneSpec) -> ValidationResult:
                     goal.interaction_id,
                 )
             )
+        if goal.type == "push":
+            pushed = objects_by_id.get(goal.object_id)
+            # (a missing object_id is caught later by MISSING_GOAL_OBJECT; only flag a real,
+            # non-pushable object here so the two errors don't double up on a typo'd id.)
+            if pushed is not None and not pushed.pushable:
+                issues.append(
+                    ValidationIssue(
+                        "PHYSICS_NOT_PUSHABLE",
+                        f"Push goal {goal.id!r} targets object {goal.object_id!r}, which is not "
+                        "marked pushable.",
+                        goal.object_id,
+                    )
+                )
 
     # -- agent exists exactly once & is in bounds --
     grid_w, grid_h = scene.grid.width, scene.grid.height
@@ -224,11 +240,16 @@ def validate_scene(scene: SceneSpec) -> ValidationResult:
         return ValidationResult(valid=False, errors=issues)
 
     # -- reachability: every referenced object must be reachable from spawn.
-    # Doors are treated as optimistically unlocked here: this is a cheap "is it walled off
-    # entirely" pre-check, not a full key/lock/order simulation (that's solvability, below).
+    # Doors are treated as optimistically unlocked here, and pushable objects as optimistically
+    # movable (they can be shoved out of the way): this is a cheap "is it walled off entirely by
+    # permanent walls" pre-check, not a full key/lock/push-order simulation (that's solvability,
+    # below). `is_reachable`'s `unlocked_doors` set is really "solid objects that don't block", so
+    # both door ids and pushable ids belong in it.
     grid = Grid(scene)
     start = (scene.agent.x, scene.agent.y)
-    door_ids = frozenset(o.id for o in scene.objects if o.type == "door")
+    passable_solids = frozenset(
+        o.id for o in scene.objects if o.type == "door" or o.pushable
+    )
     for goal in flat_goals:
         for ref in _iter_goal_refs(goal):
             if ref == scene.agent.id:
@@ -236,7 +257,7 @@ def validate_scene(scene: SceneSpec) -> ValidationResult:
             obj = scene.object_by_id(ref)
             if obj is None:
                 continue
-            if not is_reachable(grid, start, (obj.x, obj.y), unlocked_doors=door_ids):
+            if not is_reachable(grid, start, (obj.x, obj.y), unlocked_doors=passable_solids):
                 issues.append(
                     ValidationIssue(
                         "UNREACHABLE_OBJECT",

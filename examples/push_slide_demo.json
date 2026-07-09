@@ -1,0 +1,212 @@
+{
+  "version": "0.1",
+  "seed": 1,
+  "metadata": {
+    "name": "push_slide_demo",
+    "prompt": "push a crate onto the plate and slide a puck into the goal",
+    "theme": "ice"
+  },
+  "grid": {
+    "width": 12,
+    "height": 8,
+    "tile_size": 32
+  },
+  "agent": {
+    "id": "agent",
+    "x": 2,
+    "y": 5
+  },
+  "objects": [
+    {
+      "id": "crate_1",
+      "type": "box",
+      "x": 4,
+      "y": 5,
+      "solid": true,
+      "pushable": true
+    },
+    {
+      "id": "plate_1",
+      "type": "sink",
+      "x": 7,
+      "y": 5,
+      "solid": false
+    },
+    {
+      "id": "puck_1",
+      "type": "box",
+      "x": 4,
+      "y": 2,
+      "solid": true,
+      "pushable": true,
+      "slippery": true
+    },
+    {
+      "id": "goal_1",
+      "type": "exit",
+      "x": 10,
+      "y": 2,
+      "solid": false
+    }
+  ],
+  "walls": [
+    {
+      "x": 0,
+      "y": 0
+    },
+    {
+      "x": 1,
+      "y": 0
+    },
+    {
+      "x": 2,
+      "y": 0
+    },
+    {
+      "x": 3,
+      "y": 0
+    },
+    {
+      "x": 4,
+      "y": 0
+    },
+    {
+      "x": 5,
+      "y": 0
+    },
+    {
+      "x": 6,
+      "y": 0
+    },
+    {
+      "x": 7,
+      "y": 0
+    },
+    {
+      "x": 8,
+      "y": 0
+    },
+    {
+      "x": 9,
+      "y": 0
+    },
+    {
+      "x": 10,
+      "y": 0
+    },
+    {
+      "x": 11,
+      "y": 0
+    },
+    {
+      "x": 0,
+      "y": 7
+    },
+    {
+      "x": 1,
+      "y": 7
+    },
+    {
+      "x": 2,
+      "y": 7
+    },
+    {
+      "x": 3,
+      "y": 7
+    },
+    {
+      "x": 4,
+      "y": 7
+    },
+    {
+      "x": 5,
+      "y": 7
+    },
+    {
+      "x": 6,
+      "y": 7
+    },
+    {
+      "x": 7,
+      "y": 7
+    },
+    {
+      "x": 8,
+      "y": 7
+    },
+    {
+      "x": 9,
+      "y": 7
+    },
+    {
+      "x": 10,
+      "y": 7
+    },
+    {
+      "x": 11,
+      "y": 7
+    },
+    {
+      "x": 0,
+      "y": 1
+    },
+    {
+      "x": 0,
+      "y": 2
+    },
+    {
+      "x": 0,
+      "y": 3
+    },
+    {
+      "x": 0,
+      "y": 4
+    },
+    {
+      "x": 0,
+      "y": 5
+    },
+    {
+      "x": 0,
+      "y": 6
+    },
+    {
+      "x": 11,
+      "y": 1
+    },
+    {
+      "x": 11,
+      "y": 2
+    },
+    {
+      "x": 11,
+      "y": 3
+    },
+    {
+      "x": 11,
+      "y": 4
+    },
+    {
+      "x": 11,
+      "y": 5
+    },
+    {
+      "x": 11,
+      "y": 6
+    }
+  ],
+  "goals": [
+    {
+      "id": "push_crate",
+      "type": "push",
+      "object_id": "crate_1",
+      "target_id": "plate_1"
+    },
+    {
+      "id": "slide_puck",
+      "type": "push",
+      "object_id": "puck_1",
+      "target_id": "goal_1"
+    }
+  ]
+}

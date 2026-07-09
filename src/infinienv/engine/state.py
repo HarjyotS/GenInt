@@ -18,6 +18,8 @@ class ObjectState:
     portable: bool
     locked: bool
     key_id: str | None
+    pushable: bool = False
+    slippery: bool = False
     held: bool = False
     properties: dict[str, Any] = field(default_factory=dict)
 
@@ -32,6 +34,8 @@ class ObjectState:
             portable=obj.portable,
             locked=obj.locked,
             key_id=obj.key_id,
+            pushable=obj.pushable,
+            slippery=obj.slippery,
             properties=dict(obj.properties),
         )
 

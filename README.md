@@ -134,6 +134,33 @@ every new custom object type/interaction from a validated scene into
 and the prompt instructs it to reuse an existing definition verbatim before inventing a new one
 — so "window" keeps meaning the same thing across a session instead of drifting scene to scene.
 
+## Deterministic physics: pushable objects and sliding
+
+Physics is a first-class, **deterministic** part of the engine — not something the model has to
+reinvent. Objects can be `"pushable": true` (the agent shoves them one cell, Sokoban-style,
+instead of being blocked) and `"slippery": true` (once shoved, they slide until they hit
+something — ice-puck momentum), and a `push` goal is satisfied when a pushable object rests on its
+target cell:
+
+```json
+{
+  "objects": [
+    {"id": "crate_1", "type": "box", "x": 4, "y": 4, "solid": true, "pushable": true},
+    {"id": "switch_1", "type": "sink", "x": 7, "y": 4, "solid": false}
+  ],
+  "goals": [{"id": "shove", "type": "push", "object_id": "crate_1", "target_id": "switch_1"}]
+}
+```
+
+This stays integer-grid and fully simulable, so the deterministic solver plans it (a joint
+agent/box BFS) and the validator *verifies* it — the solvability guarantee holds. A slippery
+object can only stop against an obstacle, so a mid-floor target for one is correctly reported
+`UNSOLVABLE`, not hoped over. Continuous, force-based physics (pymunk-style) can't preserve that
+guarantee and lives in `--sandbox` instead (below). Slides render as smooth gliding motion (the
+replay inserts per-cell frames), so it looks good, especially with `--assets`. Live-verified
+first-try against the real API on "push a heavy crate onto a floor switch, then reach the exit."
+See `examples/push_slide_demo.json`.
+
 ## Sandbox agents: model-authored engine code, per-run isolated
 
 The extended-mechanics system above is still a fixed, validated vocabulary -- the model composes
@@ -223,6 +250,12 @@ for types not already cached. `asset_manifest.json` records exactly where each s
 (`local` / `generated` / `none`) so a run never silently claims a generated asset that wasn't
 actually generated.
 
+Generation for every still-uncached type in a scene runs **concurrently** (a small bounded thread
+pool, `INFINIENV_ASSET_CONCURRENCY`, default 4) rather than one type at a time, and defaults to
+`quality="low"` (`INFINIENV_IMAGE_QUALITY` to override) since every sprite gets resized to 64x64
+regardless of source quality — live-verified: 4 novel sprites in ~16s concurrently vs. the ~4x
+that sequentially, with no visible loss of quality at 64x64.
+
 ## Creativity: mutation + curriculum + dataset export
 
 `infinienv mutate` takes one valid scene and produces N *validated* variants — five deterministic
@@ -248,7 +281,7 @@ per-goal completion signal (`{"deliver_package": 1, "unlock_door": 1, "total": 2
 |---|---|
 | Creativity | Mutation engine (5 deterministic strategies + LLM-proposed) + curriculum generator + asset pipeline + model-definable object types/interactions produce infinite validated, visually and mechanically distinct variants from one seed scene, not a single text-to-grid demo. |
 | Clarity | Narrow P0 scope, one schema (`SceneSpec`) as the shared contract, `report.md` per run, this README. |
-| Working output | `--provider mock` runs with zero setup; `pytest` covers schema/validator/reachability/solver/mock/CLI/assets/mutation/curriculum/dataset export/mechanics; `metrics.json` reports truthfully (`success` is only `true` if both validation and the solver actually succeeded). |
+| Working output | `--provider mock` runs with zero setup; `pytest` covers schema/validator/reachability/solver/mock/CLI/assets/mutation/curriculum/dataset export/mechanics/physics; `metrics.json` reports truthfully (`success` is only `true` if both validation and the solver actually succeeded). |
 
 ## Project layout
 

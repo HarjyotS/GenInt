@@ -15,6 +15,19 @@ def _object_positions(state: GameState) -> dict[str, tuple[int, int] | None]:
     return {oid: (None if o.held else (o.x, o.y)) for oid, o in state.objects.items()}
 
 
+def _slide_cells(start: tuple[int, int], end: tuple[int, int]) -> list[tuple[int, int]]:
+    """The intermediate cells strictly between `start` and `end` along their shared axis
+    (empty for a one-cell or diagonal/zero move). Physics slides are always axis-aligned."""
+    (sx, sy), (ex, ey) = start, end
+    if sx == ex:
+        step = 1 if ey > sy else -1
+        return [(sx, y) for y in range(sy + step, ey, step)]
+    if sy == ey:
+        step = 1 if ex > sx else -1
+        return [(x, sy) for x in range(sx + step, ex, step)]
+    return []
+
+
 def build_replay_frames(
     scene: SceneSpec, actions: list[dict], *, asset_paths: dict[str, str] | None = None
 ) -> list[Image.Image]:
@@ -32,13 +45,42 @@ def build_replay_frames(
         )
     ]
     for i, action in enumerate(actions, start=1):
+        before = _object_positions(state)
         apply_action(state, grid, action, scene)
+        after = _object_positions(state)
+
+        # A slippery push moves an object several cells in a single action. Render the object
+        # gliding through each intermediate cell (with the agent already at its final cell) so
+        # the slide reads as smooth motion, not a teleport -- otherwise the replay would show a
+        # multi-cell jump in one frame. Objects that moved only one cell need no interpolation.
+        slides = {
+            oid: _slide_cells(before[oid], after[oid])
+            for oid in after
+            if before.get(oid) is not None and after[oid] is not None and _slide_cells(before[oid], after[oid])
+        }
+        if slides:
+            span = max(len(cells) for cells in slides.values())
+            for k in range(span):
+                mid = dict(after)
+                for oid, cells in slides.items():
+                    mid[oid] = cells[k] if k < len(cells) else after[oid]
+                frames.append(
+                    render_scene_image(
+                        scene,
+                        agent_pos=state.agent_pos(),
+                        inventory=list(state.inventory),
+                        object_positions=mid,
+                        title=f"t={i} {action['action']} (slide)",
+                        asset_paths=asset_paths,
+                    )
+                )
+
         frames.append(
             render_scene_image(
                 scene,
                 agent_pos=state.agent_pos(),
                 inventory=list(state.inventory),
-                object_positions=_object_positions(state),
+                object_positions=after,
                 title=f"t={i} {action['action']}",
                 asset_paths=asset_paths,
             )

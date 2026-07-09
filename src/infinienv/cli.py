@@ -46,16 +46,21 @@ def cmd_generate(args: argparse.Namespace) -> int:
         stage_num[0] += 1
         print(f"[{stage_num[0]}/{total_stages}] {msg}")
 
-    result = run_generation(
-        provider,
-        args.prompt,
-        args.seed,
-        args.out,
-        max_repair_attempts=args.max_repair_attempts,
-        allow_fallback=not args.no_fallback,
-        assets_mode=args.assets,
-        on_stage=on_stage,
-    )
+    try:
+        result = run_generation(
+            provider,
+            args.prompt,
+            args.seed,
+            args.out,
+            max_repair_attempts=args.max_repair_attempts,
+            allow_fallback=not args.no_fallback,
+            assets_mode=args.assets,
+            require_runs_dir=True,
+            on_stage=on_stage,
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        return 1
     print()
     ok = result.metrics["success"]
     print("Result: SUCCESS" if ok else "Result: FAILED (see report.md)")
@@ -79,14 +84,19 @@ def _cmd_generate_sandbox(args: argparse.Namespace) -> int:
     def on_stage(msg: str) -> None:
         print(f"[sandbox] {msg}")
 
-    result = run_sandbox_generation(
-        args.prompt,
-        args.seed,
-        args.out,
-        max_repair_attempts=args.max_repair_attempts,
-        assets_mode=args.assets,
-        on_stage=on_stage,
-    )
+    try:
+        result = run_sandbox_generation(
+            args.prompt,
+            args.seed,
+            args.out,
+            max_repair_attempts=args.max_repair_attempts,
+            assets_mode=args.assets,
+            require_runs_dir=True,
+            on_stage=on_stage,
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        return 1
     print()
     if result["repair_attempts"]:
         print(f"Repaired over {result['repair_attempts']} additional attempt(s) after the first.")
@@ -274,7 +284,14 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--prompt", required=True)
     g.add_argument("--provider", default="mock", choices=["mock", "openai_agents", "openai_responses", "anthropic"])
     g.add_argument("--seed", type=int, default=42)
-    g.add_argument("--out", required=True)
+    g.add_argument(
+        "--out",
+        required=True,
+        help="Output directory -- must be runs/ or a subdirectory of it (e.g. runs/my_run). "
+        "Every generate run's artifacts live under runs/ by convention; the GUI is the one "
+        "place that doesn't enforce this, since a reviewer may legitimately want a run "
+        "written elsewhere.",
+    )
     g.add_argument(
         "--max-repair-attempts",
         type=int,
@@ -375,6 +392,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Python fully buffers stdout (instead of flushing per line) whenever it isn't a live
+    # terminal -- e.g. redirected to a file/pipe, exactly the case when a run is kicked off in
+    # the background for later inspection. Without this, every `on_stage`/progress print for a
+    # long-running `generate`/`--sandbox` command sits in the buffer and only appears once the
+    # process exits, making a run look silent/stuck while it's actually making real progress.
+    # Reconfigure once here so every command's output streams live regardless of destination.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass  # stdout doesn't support reconfigure (e.g. captured by a test runner) -- harmless
+
     _load_dotenv()
     parser = build_parser()
     args = parser.parse_args(argv)

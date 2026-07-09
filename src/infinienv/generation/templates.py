@@ -13,6 +13,7 @@ from infinienv.schema.scene_schema import (
     AgentSpec,
     DeliverGoal,
     Grid,
+    PushGoal,
     ReachGoal,
     SceneMetadata,
     SceneObject,
@@ -140,15 +141,45 @@ def obstacle_course(prompt: str, seed: int, *, theme: str = "obstacle_course") -
     return scene
 
 
+def push_slide_puzzle(prompt: str, seed: int, *, theme: str = "ice") -> SceneSpec:
+    """Deterministic grid-physics puzzle: the agent shoves a slippery puck that slides across
+    the floor until it hits the right wall, landing on a target plate. Always solvable by
+    construction -- the plate sits in the last interior cell of the puck's row, so a single push
+    slides the puck exactly onto it. Exercises the push + slide vocabulary (engine/physics.py)."""
+    rng = random.Random(seed)
+    width, height = DEFAULT_W, DEFAULT_H
+    row = rng.randint(2, height - 3)
+
+    puck_x = 4
+    plate_x = width - 2  # last interior cell before the right border wall at (width-1, row)
+
+    scene = SceneSpec(
+        seed=seed,
+        metadata=SceneMetadata(name="push_slide_puzzle", prompt=prompt, theme=theme),
+        grid=Grid(width=width, height=height, tile_size=32),
+        agent=AgentSpec(id="agent", x=2, y=row),
+        objects=[
+            SceneObject(id="puck_1", type="box", x=puck_x, y=row, solid=True, pushable=True, slippery=True),
+            SceneObject(id="goal_plate_1", type="sink", x=plate_x, y=row, solid=False),
+        ],
+        walls=_border_walls(width, height),
+        goals=[PushGoal(id="push_puck_to_plate", object_id="puck_1", target_id="goal_plate_1")],
+    )
+    return scene
+
+
 TEMPLATES = {
     "kitchen": kitchen_delivery,
     "warehouse": warehouse_key_door,
     "obstacle_course": obstacle_course,
+    "push": push_slide_puzzle,
 }
 
 
 def pick_template_name(prompt: str) -> str:
     p = prompt.lower()
+    if any(kw in p for kw in ("push", "shove", "crate", "boulder", "block", "slide", "slippery", "ice", "momentum", "physics")):
+        return "push"
     if any(kw in p for kw in ("key", "door", "lock", "unlock")):
         return "warehouse"
     if any(kw in p for kw in ("maze", "obstacle", "hazard", "navigate", "avoid")):

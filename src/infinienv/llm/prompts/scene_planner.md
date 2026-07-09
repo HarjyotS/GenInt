@@ -39,7 +39,7 @@ Worked example (locked door, note the two ordered top-level goals):
 ## Custom mechanics: object types and interactions beyond the base vocabulary
 
 The base object types (table/can/box/key/door/package/sink/exit/hazard/distractor/wall/floor) and
-goal types (reach/pickup/deliver/unlock/sequence) don't cover everything a task might need -- e.g.
+goal types (reach/pickup/deliver/unlock/push/sequence) don't cover everything a task might need -- e.g.
 "a window you can throw things out of." For that, declare a **custom object type** and a **custom
 interaction** in the top-level `mechanics` field, then reference the interaction with a `type:
 "interact"` goal. This is real, checkable behavior -- not flavor text -- interpreted by a fixed,
@@ -75,6 +75,59 @@ Worked example (throw a vase out a window):
 }
 ```
 
+## Physics: pushable and sliding objects
+
+The engine has real, deterministic grid-physics -- use it when a task involves shoving, sliding,
+crates, boulders, pucks, or ice, instead of forcing everything into `deliver`. Two object flags
+drive it, and one new goal type uses them:
+
+- `"pushable": true` on an object: the agent shoves it one cell by walking into it (Sokoban-style)
+  instead of being blocked. Pushable objects should also be `"solid": true` (that's what makes
+  shoving them meaningful).
+- `"slippery": true` on a pushable object: once shoved, it keeps sliding in the push direction
+  until the next cell is blocked (a wall or another solid object) -- ice-puck momentum. A slippery
+  object can therefore only come to rest against an obstacle, so its target must be a cell right
+  next to a wall/obstacle (a mid-floor target for a slippery object is unsolvable).
+- A `{"type": "push", "object_id": ..., "target_id": ...}` goal is satisfied once the pushable
+  `object_id` rests on `target_id`'s cell. Unlike `deliver`, the agent does not pick the object
+  up and carry it -- it shoves it across the floor, so `push` works for heavy/non-portable objects.
+
+Worked example (push a crate onto a pressure plate, and slide a puck into a goal against the wall):
+
+```json
+{
+  "grid": {"width": 12, "height": 8, "tile_size": 32},
+  "agent": {"id": "agent", "x": 2, "y": 4},
+  "objects": [
+    {"id": "crate_1", "type": "box", "x": 4, "y": 4, "solid": true, "pushable": true},
+    {"id": "plate_1", "type": "sink", "x": 7, "y": 4, "solid": false},
+    {"id": "puck_1", "type": "box", "x": 4, "y": 2, "solid": true, "pushable": true, "slippery": true},
+    {"id": "goal_1", "type": "exit", "x": 10, "y": 2, "solid": false}
+  ],
+  "walls": [{"x": 11, "y": 2}],
+  "goals": [
+    {"id": "push_crate", "type": "push", "object_id": "crate_1", "target_id": "plate_1"},
+    {"id": "slide_puck", "type": "push", "object_id": "puck_1", "target_id": "goal_1"}
+  ]
+}
+```
+
+(The non-slippery `crate_1` stops exactly where it's shoved, so its plate can be any reachable
+cell. The slippery `puck_1` slides until it hits the wall at x=11, so its goal sits at x=10, the
+last open cell before that wall -- put a slippery object's target against a wall, never mid-floor.)
+
+Physics rules:
+- A `push` goal's `object_id` MUST be a `"pushable": true` object, or validation rejects it
+  (`PHYSICS_NOT_PUSHABLE`). Make pushable objects `"solid": true`.
+- For a `"slippery": true` object, place its target cell directly against a wall or a solid
+  object -- it cannot stop in open floor. For a non-slippery pushable, the target can be any cell.
+- Leave the push corridor clear: the agent must be able to get to the side of the object opposite
+  the target (to push toward it), and the object's slide/push path to the target must not be
+  blocked by walls or other solids. The deterministic solver verifies this, so an unpushable
+  layout is rejected as `UNSOLVABLE` -- keep the geometry simple and open.
+- `push` is a real goal type alongside reach/pickup/deliver/unlock/interact/sequence. Do not
+  invent other physics verbs; compose with these.
+
 Mechanics rules:
 - Call `get_known_mechanics` first. If an existing cached object type or interaction already
   covers what you need (e.g. someone already defined "window"/"throw_through_window"), reuse its
@@ -104,8 +157,9 @@ Notes:
   (defaults: solid=false, portable=false, locked=false, key_id=null). A door needs
   `"solid": true, "locked": true, "key_id": "<a key object's id>"`.
 - Every goal needs an `id` and a `type`. The only valid goal `type` values are `reach`, `pickup`,
-  `deliver`, `unlock`, `interact`, `sequence`. There is no `drop`, `move`, or `collect` goal type
-  -- express "pick up and drop somewhere" as a single `deliver` goal instead.
+  `deliver`, `unlock`, `interact`, `push`, `sequence`. There is no `drop`, `move`, or `collect`
+  goal type -- express "pick up and carry somewhere" as `deliver`, and "shove across the floor" as
+  `push`.
 - `walls` entries are `{"x": int, "y": int}` single cells, not line segments.
 - Call `get_supported_mechanics` and `get_scene_schema` if you need the full field list, call
   `get_known_mechanics` before inventing a custom object type/interaction, and call

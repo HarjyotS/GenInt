@@ -151,3 +151,84 @@ def test_throw_object_through_window_end_to_end():
     scene = scene_spec_from_dict(data)
     result = validate_scene(scene)
     assert result.valid, result.errors
+
+
+def _physics_scene(objects, goals, w=8, h=8, agent=(1, 3)):
+    cells = set()
+    for i in range(h):
+        cells.add((0, i))
+        cells.add((w - 1, i))
+    for i in range(w):
+        cells.add((i, 0))
+        cells.add((i, h - 1))
+    return {
+        "version": "0.1",
+        "seed": 1,
+        "metadata": {"name": "t", "prompt": "p"},
+        "grid": {"width": w, "height": h, "tile_size": 32},
+        "agent": {"id": "agent", "x": agent[0], "y": agent[1]},
+        "objects": objects,
+        "walls": [{"x": x, "y": y} for x, y in sorted(cells)],
+        "goals": goals,
+    }
+
+
+def test_valid_push_scene_passes():
+    from infinienv.validation.validator import validate_scene_dict
+
+    r = validate_scene_dict(
+        _physics_scene(
+            [
+                {"id": "crate", "type": "box", "x": 3, "y": 3, "solid": True, "pushable": True},
+                {"id": "plate", "type": "sink", "x": 5, "y": 3},
+            ],
+            [{"id": "g", "type": "push", "object_id": "crate", "target_id": "plate"}],
+        )
+    )
+    assert r.valid, [e.code for e in r.errors]
+
+
+def test_push_goal_on_non_pushable_object_is_rejected():
+    from infinienv.validation.validator import validate_scene_dict
+
+    r = validate_scene_dict(
+        _physics_scene(
+            [
+                {"id": "crate", "type": "box", "x": 3, "y": 3, "solid": True},
+                {"id": "plate", "type": "sink", "x": 5, "y": 3},
+            ],
+            [{"id": "g", "type": "push", "object_id": "crate", "target_id": "plate"}],
+        )
+    )
+    assert not r.valid
+    assert "PHYSICS_NOT_PUSHABLE" in [e.code for e in r.errors]
+
+
+def test_push_goal_missing_target_reports_missing_goal_object():
+    from infinienv.validation.validator import validate_scene_dict
+
+    r = validate_scene_dict(
+        _physics_scene(
+            [{"id": "crate", "type": "box", "x": 3, "y": 3, "solid": True, "pushable": True}],
+            [{"id": "g", "type": "push", "object_id": "crate", "target_id": "nope"}],
+        )
+    )
+    assert not r.valid
+    assert "MISSING_GOAL_OBJECT" in [e.code for e in r.errors]
+
+
+def test_pushable_object_does_not_falsely_trip_unreachable_precheck():
+    # a pushable crate walling off the only corridor to the plate must NOT be treated as a
+    # permanent obstacle by the reachability pre-check -- it can be shoved aside.
+    from infinienv.validation.validator import validate_scene_dict
+
+    scene = _physics_scene(
+        [
+            {"id": "crate", "type": "box", "x": 4, "y": 3, "solid": True, "pushable": True},
+            {"id": "plate", "type": "sink", "x": 6, "y": 3},
+        ],
+        [{"id": "g", "type": "push", "object_id": "crate", "target_id": "plate"}],
+        w=8,
+    )
+    r = validate_scene_dict(scene)
+    assert "UNREACHABLE_OBJECT" not in [e.code for e in r.errors]

@@ -89,3 +89,42 @@ def test_sequence_goal_nests():
     scene = scene_spec_from_dict(data)
     assert scene.goals[0].type == "sequence"
     assert len(scene.goals[0].subgoals) == 2
+
+
+def test_pushable_and_slippery_flags_and_push_goal_parse():
+    from infinienv.schema.scene_schema import GOAL_TYPES, scene_spec_from_dict
+
+    assert "push" in GOAL_TYPES
+    scene = scene_spec_from_dict(
+        {
+            "metadata": {"name": "t"},
+            "grid": {"width": 8, "height": 8},
+            "agent": {"x": 1, "y": 1},
+            "objects": [{"id": "crate", "type": "box", "x": 3, "y": 1, "solid": True, "pushable": True, "slippery": True}],
+            "walls": [],
+            "goals": [{"id": "g", "type": "push", "object_id": "crate", "target_id": "plate"}],
+        }
+    )
+    assert scene.objects[0].pushable is True
+    assert scene.objects[0].slippery is True
+    assert scene.objects[0].__class__.__name__ == "SceneObject"
+    goal = scene.goals[0]
+    assert goal.type == "push"
+    assert goal.object_id == "crate" and goal.target_id == "plate"
+
+
+def test_object_flags_default_to_false():
+    from infinienv.schema.scene_schema import scene_spec_from_dict
+
+    scene = scene_spec_from_dict(
+        {
+            "metadata": {"name": "t"},
+            "grid": {"width": 8, "height": 8},
+            "agent": {"x": 1, "y": 1},
+            "objects": [{"id": "can", "type": "can", "x": 3, "y": 1}],
+            "walls": [],
+            "goals": [{"id": "g", "type": "reach", "target_id": "can"}],
+        }
+    )
+    assert scene.objects[0].pushable is False
+    assert scene.objects[0].slippery is False

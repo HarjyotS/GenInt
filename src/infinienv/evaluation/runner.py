@@ -51,13 +51,14 @@ def run_generation(
     allow_fallback: bool = True,
     assets_mode: str = "none",
     asset_cache_dir: str | None = None,
+    require_runs_dir: bool = False,
     on_stage: StageCallback | None = None,
 ) -> RunResult:
     def stage(msg: str) -> None:
         if on_stage:
             on_stage(msg)
 
-    resolved_out = resolve_out_dir(out_dir)
+    resolved_out = resolve_out_dir(out_dir, require_runs_dir=require_runs_dir)
 
     t0 = time.perf_counter()
     generation = generate_and_validate(

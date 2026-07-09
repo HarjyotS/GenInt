@@ -86,3 +86,26 @@ def test_generate_sprite_caches_to_object_type_named_file(tmp_path, monkeypatch)
     _install_fake_openai(monkeypatch, with_alpha_border=False)
     path = generate_sprite("hazard", str(tmp_path))
     assert path.endswith("hazard.png")
+
+
+def test_generate_sprite_defaults_to_low_quality(tmp_path, monkeypatch):
+    # Every sprite is resized to 64x64 immediately after generation, so paying for
+    # gpt-image-1's default ("auto", a slow high-effort render) buys nothing visible --
+    # "low" should be the default unless overridden.
+    calls = _install_fake_openai(monkeypatch, with_alpha_border=False)
+    generate_sprite("key", str(tmp_path))
+    assert calls[0]["quality"] == "low"
+
+
+def test_generate_sprite_quality_overridable_via_env(tmp_path, monkeypatch):
+    calls = _install_fake_openai(monkeypatch, with_alpha_border=False)
+    monkeypatch.setenv("INFINIENV_IMAGE_QUALITY", "high")
+    generate_sprite("key", str(tmp_path))
+    assert calls[0]["quality"] == "high"
+
+
+def test_generate_sprite_quality_kwarg_overrides_env(tmp_path, monkeypatch):
+    calls = _install_fake_openai(monkeypatch, with_alpha_border=False)
+    monkeypatch.setenv("INFINIENV_IMAGE_QUALITY", "high")
+    generate_sprite("key", str(tmp_path), quality="medium")
+    assert calls[0]["quality"] == "medium"

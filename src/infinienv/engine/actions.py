@@ -27,9 +27,20 @@ def apply_action(state: GameState, grid: Grid, action: dict, scene: "SceneSpec |
     kind = action.get("action")
 
     if kind in MOVE_DELTAS:
+        from infinienv.engine.physics import cell_blocked, pushable_at, try_push
+
         dx, dy = MOVE_DELTAS[kind]
         nx, ny = state.agent_x + dx, state.agent_y + dy
-        if grid.is_blocked(nx, ny, unlocked_doors=frozenset(state.unlocked_doors)):
+        # Moving into a pushable object shoves it (one cell, or sliding until blocked if it's
+        # slippery) instead of being blocked. Collision is computed from live state, not the
+        # static grid, so it stays correct after objects have moved -- see engine/physics.py.
+        pushable = pushable_at(state, nx, ny)
+        if pushable is not None:
+            if not try_push(state, grid, pushable, dx, dy):
+                raise ActionError(f"push blocked: {pushable.id!r} cannot move ({dx}, {dy})")
+            state.agent_x, state.agent_y = nx, ny  # the object vacated (nx, ny)
+            return state
+        if cell_blocked(state, grid, nx, ny):
             raise ActionError(f"move blocked at ({nx}, {ny})")
         state.agent_x, state.agent_y = nx, ny
         return state
