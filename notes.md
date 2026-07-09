@@ -1428,3 +1428,318 @@ Verified directly: redirected a real `generate --provider mock` run to a file an
 lines appeared incrementally within 0.3s of the run starting, rather than staying empty until the
 (near-instant, mock-provider) process exited. Full test suite (including `capsys`-based CLI tests)
 unaffected.
+
+## Sandbox mode, round five: hazards that can never actually reach the agent's path
+
+User pasted a screenshot from a run in an untracked `llol/` directory (their own test, left alone
+per this session's "don't touch files you didn't create" practice) with a clear complaint: the
+turtles are supposed to be in the way, but "the agent just made it so that it does nothing to stop
+our character from its goal... here it just decides another row."
+
+Read the actual code (`llol/sandbox_workspace/run_scene.py`). Two compounding problems, both real:
+
+1. `ROUTE = [(8.5, 9.5), (12.5, 9.5), (14.5, 9.5), (14.5, 3.5), (15.5, 3.5)]` -- the entire
+   ground-level path is a single fixed row, `y=9.5`, for its whole horizontal traversal. The three
+   declared turtles started at `y=9`, `y=8`, `y=7` and moved only along `x` (`turtle.x += turtle.vx
+   * DT`, no `y` update anywhere). Since the hero's route never leaves `y=9.5`, only the one turtle
+   near that row could ever geometrically reach the hero -- the other two were decorative by
+   construction, incapable of ever interacting with the agent no matter how the run played out.
+2. The one turtle that *could* interact was "avoided" by `choose_target` freezing the hero in
+   place (`target = [hero.x, hero.y]`, i.e. stop and wait) whenever it approached in-lane -- not
+   any active dodge. Technically satisfies "no collision," the same shape of technically-true-but-
+   not-what-was-asked-for result as the very first bug in this saga (a fake animation that
+   technically never showed a collision because the path was drawn to avoid it).
+
+Note: the original prompt said turtles "go across the screen," which reads as horizontal motion
+and is what got built -- the user's "moving up and down" is their own clarification of intent, not
+a violation of the literal original prompt. The real, unambiguous bug is the route being
+pre-planned to structurally avoid the hazards existing at all, independent of which axis they
+patrol.
+
+### Fix
+
+Two more `sandbox_agent.md` additions, same structure as every round in this saga -- name the
+concrete anti-pattern with the actual observed code, then a matching self-review check: "don't
+route around your own hazards" (the route/controller must pass through space a hazard could
+plausibly reach, avoidance must be a real-time reaction to current hazard positions, not a
+pre-planned safe corridor, and "stop and wait" alone doesn't count as active avoidance), plus a
+smaller nudge to implement whatever specific movement pattern a task actually describes rather than
+defaulting to whatever's easiest. Self-review gained: "did each hazard ever come close enough to
+plausibly threaten the agent, or did the route just never go near some of them" as an explicit
+check alongside the existing hitbox-overlap and gating-fallback ones.
+
+### Live verification
+
+Re-ran the same prompt/seed (attempt 1 failed the outer check, attempt 2 passed -- the repair
+loop working as designed). Read the actual code, not just the summary. The new run has no fixed
+`ROUTE` list at all: `control(st, turtles)` generates several candidate moves each step (including
+explicit vertical-dodge options -- the code comment literally says "actively dodge to adjacent
+vertical lanes while still advancing through turtle lanes"), scores each by a `danger` term
+computed from *live* turtle positions plus progress toward the goal, and picks the best-scoring
+one fresh every frame -- genuine real-time reaction, not a pre-decided path. Turtle patrol ranges
+are wide (e.g. `turtle_a` spans `x=2` to `x=14`) and sit directly in the agent's vertical traversal
+band, so they're structurally capable of interacting with the route this time.
+
+Confirmed from the real trace, not the self-report: `lives` genuinely dropped `5 -> 4 -> 3` at two
+separate points during the run (frames 17 and 112), each at a moment the agent was close to
+`turtle_a`. The run still succeeded afterward (`success: true`) -- a real "take some hits, keep
+going, win" outcome, not a hazard-free walkthrough. Visually confirmed a mid-run frame showing the
+hero navigating directly alongside a turtle in the same field, with a real "lives: 4" HUD matching
+the trace.
+
+### Net effect
+
+Fifth round in this saga. Each round has targeted a structurally different way a *genuinely real*
+simulation can still fail to deliver the requested gameplay: a fake animation, a miscalibrated
+hitbox, a rule bypassed by its own debugging fallback, and now a route/hazard layout that
+technically obeys every rule while never actually testing the player. All five fixes share the
+same shape -- name the exact anti-pattern from real observed code, pair it with a concrete
+self-review question, and verify the next run's actual code (not its summary) reflects the fix.
+
+## Sprite generation used generic/wrong descriptions instead of the scene's own
+
+User, mid-way through scoping a different feature (post-run agent follow-up requests in the GUI):
+"the generated graphics for our italian friend are a little poor... fix that before going on" with
+a screenshot showing the hero as a tan circle + colored rectangles and turtles as plain green
+ellipses -- programmer-art primitives, not real sprites.
+
+### Diagnosis
+
+Two compounding causes, both real:
+
+1. Every sandbox run this session used the default `--assets none` -- none of my live-verification
+   commands passed `--assets`, so the agent was always hand-drawing primitives via PIL, never
+   attempting real sprite generation at all. Not itself a bug, just an untested combination.
+2. **Even with real sprite generation enabled, the descriptions were wrong.** `generate_sprite`'s
+   prompt basis was `OBJECT_DESCRIPTIONS.get(object_type, object_type.replace("_", " "))` --
+   for the "agent" asset key specifically, this is *always* `"a small friendly robot character"`,
+   a hardcoded global default with no connection to what any given scene actually needs. For a
+   custom type like "turtle", it fell back to the bare type name ("turtle"), discarding the much
+   richer description the model had already written in `mechanics.custom_object_types` (e.g. "a
+   smooth-moving turtle hazard") -- a real quality gap independent of sandbox mode, affecting the
+   non-sandbox path too. And even if the sandbox agent DID resolve real sprites, `sandbox_agent.md`
+   only said to "keep the asset-resolution step" for a custom continuous-position draw loop without
+   showing how to actually load and paste a sprite at a floating-point position -- there was a real
+   gap between "resolve assets" and "use them," and every observed custom draw loop fell back to
+   primitives instead.
+
+### Fix
+
+`generate_sprite` gained an optional `description` override parameter. `resolver.py` gained
+`_scene_descriptions(scene)`, which builds a `{type: description}` map from two real sources
+already present in every scene: (a) `mechanics.custom_object_types[].description`, verbatim --
+whatever the model already wrote to describe its own custom types, and (b) for the `"agent"` key
+specifically (not itself a declared object type -- it's the top-level `SceneSpec.agent`), the
+scene's own `metadata.prompt`, since the original task description almost always describes the
+intended protagonist far better than any static default ("An Italian man in green clothing..." IS
+a sprite description, once framed as one). `_generate_many`/`resolve_assets` thread this through
+automatically -- no new parameters for callers, it's derived entirely from the scene already being
+passed in.
+
+`sandbox_agent.md` gained a concrete `paste_sprite`-shaped code example for custom draw loops
+(load once, cache, paste at a computed pixel position, fall back to a primitive only when no
+sprite was resolved for that key) plus an explicit statement that primitive shapes are the
+fallback of last resort when real assets were requested, not the default -- naming this exact
+user-reported complaint as the reason.
+
+### Verification
+
+6 new tests (`test_generate_sprite_description_override_replaces_default` and its "no override"
+counterpart in `test_generator_openai.py`; `test_scene_descriptions_uses_custom_object_type_description`,
+`test_scene_descriptions_derives_agent_description_from_scene_prompt`,
+`test_scene_descriptions_omits_agent_when_scene_has_no_prompt`, and
+`test_resolve_assets_generated_mode_passes_scene_description_to_generate_sprite` in
+`test_assets.py`): 145 -> 151 passing.
+
+Live-verified directly against the real API, isolated from sandbox-agent behavior: called
+`resolve_assets` on a scene with the exact "Italian man in green clothing... avoiding turtles"
+prompt and a `turtle` custom type description. The resulting `agent.png` is a genuinely
+recognizable mustached, capped, green-clothed character sprite -- not a generic robot, not a
+primitive shape. The resulting `turtle.png` is a real turtle with a proper shell pattern, not a
+plain ellipse.
+
+Full end-to-end confirmation: ran `--sandbox --assets generated` on the same prompt (`runs/
+mario_sprites_test`, kept on disk). The agent's own first stated plan already said "with generated
+sprite support," reflecting the new draw-loop guidance. One real bug surfaced and self-repaired
+along the way (`AttributeError: 'list' object has no attribute 'save'` in its own GIF-saving code,
+diagnosed correctly from the new dual-line narration and fixed in the very next command). Final
+`render.png` and extracted `replay.gif` frames show genuine, detailed turtle sprites (proper shell
+pattern) scattered through the level and a real, recognizable capped hero sprite -- a dramatic,
+confirmed improvement over the crude primitive circles/rectangles every prior run in this session
+used (since none of them had passed `--assets` at all).
+
+### Net effect
+
+Two independent, compounding fixes landed together: scenes now ask sprite generation for what
+they actually need (their own declared descriptions, or the task prompt for the protagonist)
+instead of a generic/wrong default, and sandbox agents now have a concrete way to actually use
+resolved sprites in a hand-rolled continuous-position draw loop instead of silently falling back
+to primitives. Both apply beyond this one game -- any scene with custom object types or a
+non-generic player character benefits, sandbox or not.
+
+## Sandbox mode, round six: dodging implemented as floating, not jumping
+
+Immediately after the sprite-quality fix, user on the same run (`runs/mario_sprites_test`): "this
+run cheats the ground system, it jumps mid air multiple times check it out."
+
+### Diagnosis
+
+Read the actual code and trace. `choose_velocity`'s dodge branch:
+```python
+options=[max(4,state.y-1), min(10,state.y+1), state.y]
+safe=min(options, key=lambda yy: sum(max(0,1.8-abs(t.x-state.x)) for t in turtles if abs(t.y-yy)<0.7))
+vy=max(-1,min(1,safe-state.y))*2.6
+```
+An instant vertical velocity toward whichever nearby row is currently safest -- no ground plane,
+no gravity, no jump state, reapplied every step near a hazard. Confirmed from the real trace, not
+assumed: the hero's `y` drifted continuously from the ground row (`10`) to `4.4` over the course
+of the run, entirely before ever reaching the ladder gate at `x>=13.6`. A sampled frame showed it
+plainly hovering in open air with no jump animation, arc, or platform underneath -- exactly the
+complaint. This is a direct, newly-exposed consequence of round five's "actively dodge into
+contested space, including vertically" guidance: it correctly stopped the agent from routing
+around hazards, but never said dodging at a different height has to be a *real* jump (or a
+sideways move) for a grounded character, so the agent's cheapest way to satisfy "dodge vertically"
+was continuous free-floating instead of gravity-bound movement.
+
+### Fix
+
+Two more `sandbox_agent.md` additions, same structure as every round: "a grounded character dodges
+by jumping (a real arc) or moving sideways, not by floating" with the exact `vy = ... * 2.6` line
+as the named anti-pattern, explaining what a real jump requires (a one-time upward impulse that
+gravity pulls back into a parabola, landing on the ground or a platform -- never a velocity
+reapplied mid-air to hover/climb indefinitely) and that dodging a different-height hazard should
+usually mean moving sideways to clear its path, not levitating to a safe altitude. Paired with a
+self-review check: sample the character's height across consecutive frames and confirm it's never
+airborne longer than one real jump arc with no grounded state on either side, unless the task
+explicitly describes a flying/swimming/floating character.
+
+### Live verification
+
+Re-ran the same prompt/seed. `state` now includes real `grounded`/`vy` fields, gravity-style
+clamping to `GROUND`, and a genuine one-time jump impulse (`vy=-6.6` on jump, integrated over
+subsequent frames, clamped back to `GROUND` when landing) instead of the free-float dodge. Result:
+success on the first attempt.
+
+Immediately after this, the user made a broader point: patching the prompt one specific bug at a
+time doesn't scale, and what's actually needed is a small set of general principles the agent can
+reason from -- plus their own framing of the core one: "the solving agent can only do stuff
+allowed in the game rules and any other actions should not be allowed." That triggered a
+consolidation of this and the previous four rounds' additions into general principles -- see the
+next entry.
+
+## Sandbox mode: consolidating five rounds of bug-specific patches into general principles
+
+The user's point, verbatim: "adding stuff to the prompt for every bug we encounter is not
+efficient, there need to be some principles in game development that we have that make it so our
+agent reasons through these, finds these issues itself and fixes them or never makes them.
+Remember the solving agent can only do stuff allowed in the game rules and any other actions
+should not be allowed." Correct, and `sandbox_agent.md` had grown five separate "**A real,
+previously observed bug: ...**" paragraphs (fake animation, gating-rule bypass, decorative
+hazards, floating dodge, hitbox calibration) -- each fixed the specific bug it was written for, but
+the pattern itself (patch after the fact, one incident at a time) doesn't scale and doesn't give
+the agent anything to reason from on a genuinely new mistake outside the five already covered.
+
+### The organizing idea
+
+The user's own framing -- "the solving agent can only do stuff allowed in the game rules and any
+other actions should not be allowed" -- is exactly this project's own "validator wins" principle
+(section 2: a fixed action vocabulary, deterministic code decides what's legal) applied to
+sandbox-authored physics, which has no external validator checking it the way the real engine
+does. Every one of the five specific bugs, re-examined, was actually the same root defect wearing
+a different costume: some code path mutated position/health/state *outside* whatever the agent's
+own control logic was supposed to be limited to -- a hardcoded animation curve bypassing the whole
+step function, a fallback `or` clause bypassing a gating check, a route pre-planned to bypass
+hazards entirely, a dodge velocity bypassing gravity/grounding, a hitbox constant disconnected from
+the geometry it was supposed to represent. None of these are separate problems; they're the same
+problem (state changing outside a closed, declared action space) recurring in different code
+shapes.
+
+### The rewrite
+
+Replaced the five "**A real, previously observed bug...**" paragraphs in `sandbox_agent.md` with
+five *general* numbered principles under one heading ("Design principles: a closed action space is
+what makes a simulation real"), explicitly framed as principles to reason from, not a checklist of
+past incidents:
+
+1. Write the rules down, then build a small, fixed set of action/physics functions that are the
+   *only* code path allowed to change state -- decision logic may only select among them, never
+   assign state directly. (This is the actual mechanism that prevents the other four -- a bug
+   becomes "picked a bad action," not "some code path did something unauthorized.")
+2. A rule with exceptions isn't a rule -- gravity/collision/gating/contact apply unconditionally;
+   a stuck controller means fix the decision logic or the level, never loosen the rule.
+3. Every declared hazard/structure must be reachable by what the action space can actually do, and
+   grounded characters only leave the ground via climbing or a real jump arc -- never a free
+   vertical velocity.
+4. Size contact/collision against what's actually drawn.
+5. The general self-test: for any state change in the trace, can you name the declared action that
+   produced it? If not, that's the root defect, whatever form it takes.
+
+Also rewrote the self-review section to lead with a **programmatic invariant check over the whole
+trace** (write a script asserting the rules actually hold -- every position change attributable to
+a declared action, health loss coincides with a real contact event, etc.) *before* the qualitative
+visual sampling that was already there -- exhaustive and precise where sampling a few frames is
+neither, and a more literal answer to "the agent should find these issues itself" than asking it to
+eyeball GIF frames ever was.
+
+### Verification
+
+Re-ran the same prompt/seed against the consolidated prompt. The result was genuinely different in
+kind, not just in degree, from every previous round: the agent's summary said "Rewrote run_scene.py
+with closed actions: walk_right, wait, and climb_up" and "trace invariants passed" -- language
+that echoes the new principles directly, not a coincidence. Read the actual code, not the summary:
+
+- **Principle 1 (closed action space): real.** Exactly three action functions
+  (`move_horizontal`/`wait`/`climb`, each returning its own name), declared explicitly as
+  `RULES["actions"] = ["walk_right", "wait", "climb_up"]`. The per-step decision logic in
+  `simulate()` only ever calls one of these three; no code path outside them touches `a.x`/`a.y`.
+- **Self-review step 1 (programmatic invariant check): real, and actually run.** A `check_trace()`
+  function asserts every action is in the declared set, position stays in bounds, hazard distance
+  never drops below the contact threshold in *any* recorded frame, and that `walk_right`/
+  `climb_up` each only move along their one legal axis -- and `main()` genuinely calls
+  `check_trace(trace)` before writing any output files, not just claims to have checked.
+- **Grounding: correctly *not* forced into a jump this time.** The task is a tower rescue with a
+  literal ladder, so climbing (not jumping) is the right vertical-movement action -- the principle
+  is "the only declared actions that move the character vertically are climbing or a real jump,"
+  and the agent correctly picked the one the level actually has, gated on `a.y > 2.7*TILE` inside
+  the tower region only.
+- **Principle 3 (hazard reachability): a real, partial gap.** Computed the actual patrol ranges
+  against the actual walk row and climb-zone threshold: `turtle_a` (same row as the agent's
+  constant walking `y`, patrol range genuinely overlapping the walk path) is a real, live threat --
+  confirmed by the reactive `wait` check computing live turtle position every step. `turtle_b`
+  and `turtle_c` patrol different rows and never reach the climb-zone `x` threshold either --
+  structurally unreachable, same shape of gap as the original round-three bug, just to a lesser
+  degree (1 of 3 hazards real instead of 0 of 3). Root cause: principle 3 covers this, but the
+  self-review section's example invariant list never explicitly named "every hazard came within
+  threat range at some point" as one of the things to check in code -- "every action taken was
+  legal" doesn't imply "every hazard mattered," and the agent's own `check_trace()` only checked
+  the former. Fixed by adding that as an explicit example invariant in the programmatic-check step.
+
+### Net effect
+
+The honest framing: this is not a clean sweep, and reporting it as one would undercut exactly the
+verification discipline this whole session has run on. The consolidation's core claim -- general
+principles, reasoned from, produce a genuinely different and better code shape (closed actions,
+real programmatic self-checking) rather than another one-off patch -- held up under direct code
+inspection for four of five concerns. The fifth (hazard reachability) needed one small, precise
+addition to the self-review example list, not a new principle or a reversion to per-bug patching:
+principle 3 already said hazards must be reachable, the gap was that the *invariant-check example
+list* didn't yet include a concrete check for it, so the agent's own automated verification never
+looked. That's a narrower, more defensible kind of fix than the previous five rounds' "name this
+exact bug" additions -- it fills out an enumeration under a principle that already existed, rather
+than introducing a new one.
+
+### Closing the loop: re-verified after the reachability example was added
+
+Re-ran the same prompt/seed once more. Confirmed in the agent's own generated code, not the
+summary: a per-hazard `near[i] = near[i] or d < 115` tracked live inside the simulation loop, and
+`check(trace, success, lost, near): assert all(near)` as a hard precondition for reporting success
+-- the agent's own self-check would now fail the run if any declared hazard never came within
+threat range, closing exactly the gap found above. Also present in this same run: a genuine closed
+action space (`assert b['action'] in ('walk', 'jump', 'climb')`), real integrated gravity
+(`vy += GRAVITY*DT` every frame), and a real one-time jump impulse (`vy=JUMP`, never reapplied
+mid-air) landing back on real platform/ground collision -- correctly using jump this time (task
+allowed it, unlike the ladder-only tower run) rather than defaulting to one or the other. Real,
+recognizable generated sprites throughout (hero on the ladder, princess at the top, turtles
+patrolling below). This closes the loop cleanly: the gap found in live verification was itself
+small enough to fix by extending an existing principle's example list, and the very next run
+enforced it correctly, in code, without needing a sixth named incident.

@@ -47,7 +47,7 @@ Requirements, non-negotiable regardless of how you implement the mechanic:
   environment's objective was actually achieved when you ran it -- do not report success if the
   run failed, crashed, or you didn't actually execute it. This also means the objective must have
   been achieved by a real, rule-enforcing simulation, not by an animation that merely looks like
-  it was -- see "Simulate, don't animate" below.
+  it was -- see "Design principles" below.
 - `render.png` and `replay.gif` must be real images produced by actually running your code, not
   placeholders. `replay.gif` specifically must be a genuine multi-frame animation showing the
   scene actually play out (agent/NPCs/objects moving across frames) -- a single-frame or static
@@ -55,89 +55,105 @@ Requirements, non-negotiable regardless of how you implement the mechanic:
 - Run whatever you build (via the shell) before finishing, and fix errors you encounter -- don't
   hand back code you haven't executed.
 
-## Simulate, don't animate -- rules must be real, enforced state, not a picture that looks right
+## Design principles: a closed action space is what makes a simulation real
 
-A game that merely *looks* plausible when you play the GIF back is a failure, even if every file
-exists and every image decodes. Before writing any movement code, write down the actual rules for
-this task in plain language (a comment block or a short `RULES.md` in your workspace is fine) --
-what the win condition is, what the lose/failure conditions are (health, lives, a hazard touch,
-running out of time), what blocks movement, and what requires a specific structure to traverse
-(a ladder, a door, a switch) if the task implies verticality or gating. Then implement those rules
-as code that actually runs them, and only then does the animation follow from the simulation --
-never the other way around.
+These are general principles for building ANY environment here, not a list of specific bugs to
+avoid -- reason from them for whatever this task actually needs, rather than treating them as a
+checklist of past mistakes. Everything below follows from one idea: **state may only change
+through a small, explicitly declared set of actions/physical rules -- never anything else.** This
+is the same "validator wins" boundary InfiniEnv's own deterministic engine uses (a fixed action
+vocabulary, deterministic code deciding what's legal), applied to the physics/rules you author
+yourself, since nothing external is checking your simulation the way the real engine's validator
+checks a grid scene.
 
-**The concrete failure mode to avoid**: computing a character's or enemy's position as a fixed
-function of the frame index alone -- e.g. a hardcoded list of waypoints interpolated with easing,
-a sine/cosine lane, a pre-baked spline from start to goal -- and then checking "success" or
-"collision" *after the fact* by measuring distances along those already-decided paths. That is not
-a simulation, it is an animation of an outcome you picked in advance, and it will not enforce any
-rule you wrote down: the character will glide through walls, "avoid" hazards only because the path
-happened to be drawn far enough away, and never actually fail. **A concrete self-test**: if you can
-compute frame 50's positions without having stepped frames 0 through 49 in order -- i.e. your
-position function takes only `frame`/`total_frames` as input, not the *previous state* -- you have
-built exactly this failure mode, no matter how good the render looks.
+**1. Write the rules down, then build a closed action/physics API that is the only way to enact
+them.** Before writing movement code, state the actual rules in plain language (`RULES.md` is
+fine): win/lose conditions, what blocks movement, what requires a specific structure to traverse
+(ladder, door, switch), how each hazard behaves, whether the character walks, flies, or swims.
+Then implement a small, fixed set of functions that are the *only* code path allowed to change
+position, velocity, health, or any other state -- e.g. `apply_gravity`, `move_horizontal`, `jump`,
+`climb`, `resolve_hazard_contact`. Your per-frame decision/control logic (whatever picks what to
+do each step) may only *select* among these; it must never assign position/velocity/health
+directly. If there's no declared action for "teleport to a safe height" or "climb without being on
+a ladder," your code must be structurally unable to do that -- not just avoid it by convention.
+This single discipline is what prevents nearly everything below, because a bug becomes "the
+controller picked a bad action" (visible, fixable) instead of "some code path did something the
+rules never allowed" (invisible until someone notices the output looks wrong).
 
-Build a real step function instead: `state = step(state, dt)` (or driven by whatever
-decision/control logic the task needs), called once per frame, where each call actually resolves
-collisions against the current positions of walls/hazards/other entities, decrements health/lives
-on a genuine hazard touch, and blocks movement between areas that require a declared structure
-(e.g. only allow moving up through a column if the agent is on a cell you've declared as a ladder)
-instead of letting a smoothed path glide through solid geometry. The win/lose condition your
-`metrics.json`/`replay.json` reports must be read directly off this real, evolving state -- not
-computed separately from the positions after the fact.
+**2. A rule that has exceptions isn't a rule.** Gravity, collision, structure-gating, and hazard
+contact must apply the same way every step, to everything they're declared to apply to -- never
+skipped, loosened, or exempted for one region/entity as a shortcut out of a bug. If enforcing a
+rule causes your controller to get stuck, the bug is in the *decision logic* (it's choosing an
+illegal or unreachable target) or the *level layout* (a structure genuinely doesn't reach where it
+needs to) -- fix one of those. Never add a condition that widens what a rule allows just to make
+something work; that's the rule failing, not a fix. Extend the self-test in principle 5 to your
+own gating/contact code specifically when you're debugging it, since it's the easiest rule to
+quietly punch a hole in while chasing a stuck controller.
 
-**Never add a broad fallback that bypasses a gating rule just because you got stuck.** A real,
-previously observed bug: a hero was blocked from climbing a tower except on declared ladder
-columns (`x` in `(11, 13)`), the controller got stuck near the tower unable to progress, and the
-"fix" was `on_ladder = any(abs(x - lx) < 0.65 for lx in (11, 13)) or x > 12.4` -- an `or` clause
-that treats *any* position past `x > 12.4` as climbable, ladder or not. That doesn't fix the
-controller, it deletes the rule for an entire region while leaving it declared in `RULES.md` as if
-it still applied -- exactly the kind of gap the self-review below exists to catch. If enforcing a
-rule causes the agent to get stuck, the bug is almost always in the *controller's* decision logic
-(it's trying to move somewhere it shouldn't, or isn't finding the correct path to a real ladder
-cell) -- fix that, or fix the level layout if the ladder genuinely doesn't reach where it needs to.
-Never loosen the gating condition itself as the fix; that's the rule failing to hold, not a
-controller bug being resolved.
+**3. Every declared element must be reachable by what the action space can actually do, and must
+matter.** A hazard the character's real actions can never bring it near is decorative, not an
+obstacle -- if the task describes something the character is meant to actively avoid, your control
+logic has to move it *through* space that hazard can reach, reacting to current hazard state each
+step, not pre-planned to dodge the hazard's existence entirely, and not "stop and wait" as the only
+response to danger. Build the specific behavior the task actually describes (a hazard that moves
+side to side, up and down, chases, patrols a fixed lane) rather than whatever's easiest to code.
+Likewise, if the character is grounded (walks/runs, not flies/swims), the *only* declared actions
+that move it vertically should be climbing a real structure or a genuine jump -- a one-time
+upward impulse that gravity integrates back down into a parabola, landing on ground/a platform --
+never a velocity that can be reapplied mid-air to hover or climb indefinitely; dodging something
+at a different height should usually mean moving sideways or timing one real jump, not levitating
+to whichever height is safest this frame.
 
-**Calibrate collision/hazard radii against what you actually draw, not an arbitrary constant.**
-A real, previously observed bug: `draw_frame` renders a hazard sprite spanning most of a tile and
-the agent sprite spanning most of a tile, but the contact check uses a tiny distance threshold
-(e.g. `< 0.32` tile units) left over from an early guess -- so on screen the sprites visibly
-overlap while the code insists nothing touched. If a viewer can see two sprites overlapping in a
-frame, your hitbox math has to agree something happened there. Derive the contact threshold from
-the actual pixel/tile dimensions you draw each entity at (roughly the sum of their half-widths in
-the same units your positions use), not a number picked without reference to the art.
+**4. Size contact/collision against what you actually draw.** A hitbox distance chosen without
+reference to the sprites you render will disagree with what a viewer sees -- if two sprites
+visually overlap in a frame and nothing happened, or nothing overlaps and something did, the math
+is wrong. Derive contact thresholds from the actual pixel/tile dimensions each entity is drawn at
+(roughly the sum of their half-widths, in the same units your positions use).
 
-If you're hand-tuning numeric constants like this through many small edits, use `apply_patch` for
-each change, not repeated shell text substitution (`perl -pi -e`, `sed -i`) against your own
-source -- a multi-line pattern has to match your file's exact current whitespace byte-for-byte, so
-a single indentation mismatch makes the substitution silently do nothing while the command can
-still exit non-zero for an unrelated reason (e.g. a locale warning), and you'll keep re-running
-code you never actually changed. `apply_patch` shows you exactly what it changed and fails loudly
-if it can't find the context, instead of failing silently.
+**5. The general self-test: can you name the declared action that produced any given state
+change?** Pick any transition in your trace (a position change, a health loss, a win/lose flip)
+and ask which of your small set of declared actions caused it. If the answer is "none, some other
+code path did it directly," that's the root defect this whole section exists to prevent, whatever
+form it happens to take in this particular game -- go find that code path and route it through a
+real action instead of patching the specific symptom.
 
-## Before you finish: look at your own gameplay, don't just trust that it ran
+If you're hand-tuning numeric constants through many small edits, use `apply_patch` for each
+change, not repeated shell text substitution (`perl -pi -e`, `sed -i`) against your own source --
+a multi-line pattern has to match your file's exact current whitespace byte-for-byte, so a single
+indentation mismatch makes the substitution silently do nothing while the command can still exit
+non-zero for an unrelated reason (e.g. a locale warning), and you'll keep re-running code you
+never actually changed. `apply_patch` shows you exactly what it changed and fails loudly if it
+can't find the context, instead of failing silently.
 
-Running without crashing is not the same as being correct. Before writing `metrics.json`'s
-`success` field, actually look at what you built: extract several representative frames from your
-`replay.gif` as separate PNG files (the start, a moment where a hazard/enemy is close to the
-agent, any moment a rule you wrote should trigger, and the end), and call the `view_image` tool on
-each of them plus on `render.png`. For each one, reason explicitly about whether what's depicted
-is consistent with the rules you wrote down -- does the agent's position make sense given the
-state at that point, is a hazard-proximity moment actually reflected in health/success state, does
-anything look like it clipped through geometry it shouldn't have, and -- specifically -- **do any
-two sprites visually overlap or nearly touch in a frame where nothing happened**; if so, your
-contact/hitbox math almost certainly doesn't match what you drew (see the calibration note above)
-and needs fixing, not the frame you happened to sample. Also re-read your own gating logic (any
-`on_ladder`/`can_climb`/`is_blocked`-style condition) against `RULES.md` one more time here,
-specifically looking for a clause you added while debugging that widens it beyond the declared
-structure (an `or` that admits a whole coordinate range, a distance check loosened until movement
-"just worked") -- that's the fallback-bypass anti-pattern above, and it's easy to miss in your own
-code after you're the one who wrote the workaround. If this self-review finds a problem, fix
-the *simulation logic* and re-render -- do not paper over it by tweaking a numeric threshold, a
+## Before you finish: verify your own rules hold, don't just trust that it ran
+
+Running without crashing is not the same as being correct. Do two passes before writing
+`metrics.json`'s `success` field, in this order:
+
+**1. Check your own trace programmatically first.** You already have the full state history
+(`replay.json` or equivalent) and the rules you wrote down. Write a short script that checks the
+trace against those rules directly -- e.g. every position change is attributable to a declared
+action (principle 5), a health/lives change only ever coincides with a real hazard distance below
+your declared contact threshold, a grounded character's vertical position never moves outside a
+climb or a real jump arc, structure-gated cells were never entered from outside the declared
+structure, and -- covering principle 3 specifically, since "every action is legal" doesn't imply
+"every declared hazard mattered" -- **every declared hazard's position came within some plausible
+threat distance of the agent at least once across the trace**; one that never did is decorative,
+whatever the rest of the invariant check says. This is exhaustive over the whole run and precise in
+a way eyeballing frames can't be -- if you can't state the check precisely enough to write it, you
+don't actually know whether the rule holds. Fix anything it finds before moving on.
+
+**2. Then look at the actual gameplay.** Extract several representative frames from your
+`replay.gif` as separate PNG files (the start, a moment near a hazard, any moment a rule should
+trigger, the end) and call the `view_image` tool on each plus on `render.png`. This catches what
+step 1 can't: does this actually *look* right -- sprites overlapping with no consequence (or
+registering contact with no visible overlap), anything clipped through geometry, motion that looks
+implausible frame to frame even though no invariant check caught it.
+
+If either pass finds a problem, fix the *simulation logic* (find which action/rule broke, per the
+principles above) and re-render -- do not paper over it by tweaking a numeric threshold, a
 waypoint coordinate, or the reported `success` value so the check happens to pass. Only report
-success once your own visual review of the actual gameplay holds up, not once the code merely
-executes.
+success once both passes hold up, not once the code merely executes.
 
 If you extract temporary frame images for this self-review, you may delete those specific files
 afterward -- but **never delete or overwrite your own implementation code** (`run_scene.py`, any
@@ -178,9 +194,38 @@ into `render/image_export.py::save_render_png` and `render/replay_export.py::sav
 `run_scene.py` in your workspace already does this for you if you don't rewrite it. `generated`
 and `auto` make real OpenAI Images API calls (one per new object type, cached in
 `./asset_cache/` for the rest of this run) and cost real time -- don't request them yourself by
-switching modes; use whatever `ASSETS_MODE` already says. If you rewrite `run_scene.py` for a
-custom simulation loop, keep this same asset-resolution step so your own `render.png`/`replay.gif`
-still honor the requested assets mode.
+switching modes; use whatever `ASSETS_MODE` already says. `resolve_assets` already reads the
+scene's own `mechanics.custom_object_types` descriptions and its `prompt` (for the player
+character specifically) to ask for art that matches what THIS task actually needs, instead of a
+generic default -- you don't need to do anything extra to get that; it happens automatically from
+what you already put in `scene.json`.
+
+**If you rewrite `run_scene.py` for a custom simulation loop (continuous positions, not the grid),
+you must still actually load and paste the resolved sprite images at your computed positions**
+when `ASSETS_MODE` isn't `none` -- resolving assets and then drawing hand-rolled primitive shapes
+anyway (circles for heads, rectangles for bodies) defeats the point and was a real, user-reported
+problem: "the generated graphics... are a little poor" on a run whose custom draw loop never
+loaded a single resolved sprite. Concretely, in your own `draw_frame`-equivalent:
+
+```python
+from PIL import Image
+_sprite_cache = {}
+def paste_sprite(img, asset_paths, key, cx, cy, size):
+    path = asset_paths.get(key)
+    if not path:
+        return False  # no sprite resolved for this key -- fall back to a primitive shape
+    if path not in _sprite_cache:
+        _sprite_cache[path] = Image.open(path).convert("RGBA").resize((size, size))
+    sprite = _sprite_cache[path]
+    img.paste(sprite, (int(cx - size / 2), int(cy - size / 2)), sprite)
+    return True
+```
+
+Call this once per entity per frame with its current continuous position (converted to pixels),
+and only fall back to drawing an ellipse/rectangle when it returns `False` (no sprite for that
+key -- e.g. `ASSETS_MODE` is `none`, or generation failed and no local fallback existed). Primitive
+shapes are the fallback of last resort, not the default rendering path, whenever real sprites were
+requested.
 
 If you are told a previous attempt in this same workspace failed an independent outer check,
 your existing files from that attempt are still on disk -- inspect them (`ls`, `cat`), find and

@@ -599,6 +599,28 @@ every sprite gets resized down to 64x64 immediately after generation regardless,
 API default (`auto`, a slow high-effort render) bought nothing visible at that resolution.
 Live-verified sprites at `quality="low"` are still clean and usable at 64x64.
 
+**Sprite descriptions come from the scene itself, not a generic default.** `generate_sprite` used
+to prompt from `OBJECT_DESCRIPTIONS.get(object_type, object_type.replace("_", " "))` — for the
+`"agent"` asset key this was *always* `"a small friendly robot character"` regardless of what any
+given scene actually needed, and custom types fell back to their bare type name, discarding the
+description the model had already written in `mechanics.custom_object_types`. A real,
+user-reported quality complaint ("the generated graphics for our italian friend are a little
+poor") traced to exactly this. `resolver.py::_scene_descriptions(scene)` now derives a
+`{type: description}` map from the scene itself — verbatim `custom_object_types[].description`
+for declared types, and `scene.metadata.prompt` for the `"agent"` key specifically (not a declared
+object type — the top-level `SceneSpec.agent` — but the original task prompt almost always
+describes the intended protagonist far better than any static default). `generate_sprite` gained a
+`description` override parameter that `resolve_assets`/`_generate_many` pass through automatically
+— no new parameters for callers. Separately, `sandbox_agent.md` gained a concrete `paste_sprite`
+code example for custom continuous-position draw loops (load once, cache, paste at a computed
+pixel position, fall back to a primitive shape only when no sprite was resolved), since a hand-
+rolled simulation loop resolving assets and then drawing primitives anyway defeats the point — the
+gap between "resolve assets" and "actually use them" was real and previously undetected because no
+sandbox run that session had ever passed `--assets` at all. Live-verified end to end with
+`--sandbox --assets generated` on the same prompt: a real, recognizable capped hero sprite and
+turtle sprites with an actual shell pattern, replacing the crude hand-drawn circles/rectangles
+every prior run had used.
+
 ---
 
 ## 10. Creativity systems: mutation, curriculum, dataset export
@@ -815,51 +837,65 @@ it but fails the agent's own honest visual review is still a failure, and the po
 existing repair loop (below) is to keep trying until a real one lands, not to stop at the first
 attempt that merely doesn't crash.
 
-### Follow-on findings from watching the fix in production
+### Follow-on findings from watching the fix in production, and why the prompt no longer lists them one by one
 
-Live narration of subsequent runs (same "rescue the princess" prompt) surfaced three more real
-problems — one in this project's own narration code, two in what agents commonly get wrong even
-with a genuine simulation:
+Live narration of five subsequent runs (same "rescue the princess" prompt) surfaced five more real
+bugs, each traced from a user report to an exact line of agent-authored code and fixed with a
+prompt addition naming that exact case: a miscalibrated hitbox (contact math using `< 0.32` tile
+units against sprites drawn ~0.5–0.875 tiles wide, so sprites visibly touched with no consequence);
+a gating rule silently punched open by its own debugging fallback (`on_ladder = ... or x > 12.4`);
+hazards that technically obeyed every rule but could never geometrically reach the agent's
+hardcoded route; and a "dodge" implemented as unconstrained vertical velocity — the character
+hovering at whatever height was safest, no gravity, no jump arc. (A fifth, separate finding in this
+project's own code rather than agent-authored code: narration's `_describe_tool_output` showed only
+a failed command's *first* output line, which hid the real error behind incidental noise like
+`perl`'s cosmetic locale warning — fixed by showing first and last line when they differ; see
+`notes.md` for the full account of all five, including exact code and live-verification transcripts
+for each.)
 
-- **A user-reported screenshot ("it hit the turtle and nothing happened") traced to a real hitbox
-  bug, not a repeat of the fake-animation problem.** That run's `step()` function was completely
-  genuine — real per-frame collision resolution against live positions — but its contact check
-  used `distance < 0.32` tile units while the sprites it drew (`draw_frame`) spanned roughly
-  0.5–0.875 tile units each. Confirmed from the actual trace data: the closest approach in the
-  whole run was 0.65 units — squarely inside the visual-overlap range but outside the code's
-  threshold, so sprites visibly touched on screen with no consequence. `sandbox_agent.md` gained
-  an explicit "calibrate collision/hazard radii against what you actually draw" section with this
-  exact bug as the worked example, plus a specific self-review check: "do any two sprites visually
-  overlap in a frame where nothing happened."
-- **The narration transcript for that run showed the agent stuck in a long, unproductive
-  trial-and-error loop**, repeatedly hand-editing constants via `perl -pi -e 's/.../.../'` and
-  re-running, with most edits reporting `command failed (exit 1): perl: warning: Setting locale
-  failed.` Reproduced directly: that locale warning is cosmetic on its own (`perl` still exits 0
-  when only that warning fires) — so something else was the real failure, and
-  `_describe_stream_event`'s `_describe_tool_output` was showing only the *first* output line,
-  which is exactly where an incidental warning like this sits, hiding whatever the real error
-  actually was from anyone watching the narration (the agent's own context isn't affected by this
-  — narration is a separate, best-effort summary of the same conversation, not what the agent
-  itself reads). Fixed by showing the first *and* last non-empty output line when they differ
-  (shell errors and Python tracebacks put the real summary last); also added guidance in
-  `sandbox_agent.md` to prefer `apply_patch` over shell text substitution for editing the agent's
-  own source, since a multi-line pattern silently no-ops on any whitespace mismatch while the
-  command can still exit non-zero for an unrelated reason — exactly the trap this run fell into.
-- **A third: a declared gating rule silently bypassed by its own debugging fallback.** A follow-up
-  screenshot ("the character climbs without a ladder") traced to `on_ladder = any(abs(x - lx) <
-  0.65 for lx in (11, 13)) or x > 12.4` — the `or` clause treats an entire region past that x
-  coordinate as climbable regardless of ladder presence, almost certainly added while the
-  controller was stuck near the tower during the agent's own debugging, loosening the rule instead
-  of fixing why it was stuck. `sandbox_agent.md` gained a "never add a broad fallback that bypasses
-  a gating rule just because you got stuck" paragraph naming this exact line as the worked example,
-  plus a self-review instruction to re-read gating conditions specifically for an `or` clause added
-  mid-debugging — flagged as easy to miss since the agent that wrote the workaround is the one
-  reviewing it. Live-verified: the next run's `on_ladder` check required both an exact ladder-cell
-  match and tight column tolerance, no broad bypass.
+After the fifth round, the user made the correct structural objection: patching the prompt with a
+new named worked example for every incident doesn't scale, and re-framed the actual requirement --
+"the solving agent can only do stuff allowed in the game rules and any other actions should not be
+allowed." That's this project's own "validator wins" principle (section 2: a fixed vocabulary,
+deterministic code decides what's legal), which every one of the five bugs was actually a
+violation of in agent-authored physics with no external validator: some code path mutated
+position/health/state *outside* whatever the control logic was meant to be limited to. Re-examined
+that way, five separate incidents collapsed into one recurring root defect wearing different
+costumes. `sandbox_agent.md`'s five separate "a real, previously observed bug" paragraphs were
+replaced with five *general*, numbered principles under "Design principles: a closed action space
+is what makes a simulation real":
 
-Each of these three targets a different way a *genuine* simulation can still misrepresent itself —
-a fake animation, a miscalibrated hitbox, a rule quietly bypassed by its own fix — and each fix
-generalizes the self-review instructions rather than special-casing one game.
+1. Write the rules down, then build a small, fixed set of action/physics functions that are the
+   *only* code path allowed to change state. Decision logic may only select among them, never
+   assign state directly.
+2. A rule with exceptions isn't a rule — gravity/collision/gating/contact apply unconditionally; a
+   stuck controller means fix the decision logic or the level, never loosen the rule.
+3. Every declared hazard/structure must be reachable by what the action space can actually do, and
+   grounded characters only move vertically via climbing or a real jump arc, never a free velocity.
+4. Size contact/collision against what's actually drawn.
+5. The general self-test: for any state change in the trace, can you name the declared action that
+   produced it? If not, that's the root defect, whatever form it takes.
+
+The self-review section was also rewritten to lead with a **programmatic invariant check over the
+whole trace** (a short script asserting the rules actually hold — every action in the declared set,
+every hazard came within threat range at some point, a grounded character's height only changes via
+climb/jump) *before* the pre-existing qualitative frame-sampling pass — exhaustive and precise
+where sampling a few frames is neither, and a much more literal way to make "the agent finds these
+issues itself" true.
+
+Live-verified the rewrite is a genuine structural change, not just reworded prose: the next run
+produced exactly three action functions (`walk_right`/`wait`/`climb_up`, declared explicitly and
+enforced — no other code path touched position), a `check_trace()` function that actually asserted
+those invariants and was actually called before writing output, and correctly chose climbing over
+jumping since this task has a real ladder (the principle is "climb or jump," not "always jump").
+One real, partial gap surfaced even so: two of three turtles turned out to patrol rows the agent's
+path never reached — principle 3 already covers this, but the self-review's example invariant list
+never named "every hazard came within threat range at some point" as a concrete check, so the
+agent's own `check_trace()` didn't verify it. Fixed by adding that as an explicit example under the
+existing invariant-check step — filling out an enumeration under a principle that already existed,
+not adding a sixth named incident. See `notes.md` for the full, honest verification transcript,
+including the gap — reported as found, not glossed over, consistent with this project's standing
+practice of verifying against real output rather than a self-report.
 
 ### Self-repair against the outer sanity check
 

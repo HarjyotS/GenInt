@@ -109,3 +109,16 @@ def test_generate_sprite_quality_kwarg_overrides_env(tmp_path, monkeypatch):
     monkeypatch.setenv("INFINIENV_IMAGE_QUALITY", "high")
     generate_sprite("key", str(tmp_path), quality="medium")
     assert calls[0]["quality"] == "medium"
+
+
+def test_generate_sprite_description_override_replaces_default(tmp_path, monkeypatch):
+    calls = _install_fake_openai(monkeypatch, with_alpha_border=False)
+    generate_sprite("agent", str(tmp_path), description="a green-clothed Italian rescuer with a mustache")
+    assert "small friendly robot" not in calls[0]["prompt"]
+    assert "green-clothed Italian rescuer" in calls[0]["prompt"]
+
+
+def test_generate_sprite_without_description_uses_object_descriptions_default(tmp_path, monkeypatch):
+    calls = _install_fake_openai(monkeypatch, with_alpha_border=False)
+    generate_sprite("agent", str(tmp_path))
+    assert "small friendly robot" in calls[0]["prompt"]

@@ -27,6 +27,39 @@ def scene_asset_types(scene: SceneSpec) -> list[str]:
     return sorted(types)
 
 
+_AGENT_DESCRIPTION_MAX_CHARS = 220
+
+
+def _scene_descriptions(scene: SceneSpec) -> dict[str, str]:
+    """A best-effort {asset_type: description} map sourced from the scene itself, so sprite
+    generation asks for what THIS scene actually needs instead of a generic, possibly-wrong
+    default. Two sources:
+
+    - `mechanics.custom_object_types`: the model already writes a description for every custom
+      type it declares (e.g. "a green-clothed Italian rescuer", "a smooth-moving turtle hazard")
+      -- reuse it verbatim instead of falling back to the bare type name.
+    - The player character (asset key "agent", not itself a declared object type -- it's the
+      top-level `SceneSpec.agent`, not a `SceneObject`): `OBJECT_DESCRIPTIONS["agent"]` is a
+      generic "a small friendly robot character" that's wrong for most scenes with a specific
+      protagonist (an Italian plumber-style rescuer, a knight, etc.). The scene's own `prompt`
+      almost always describes the intended player character better than any generic default, so
+      use it -- this was a real, user-reported quality gap: every sandbox run's hand-drawn or
+      generated hero looked generic/wrong because nothing ever told the sprite generator what
+      the scene actually wanted the player to look like.
+    """
+    descriptions: dict[str, str] = {
+        t.id: t.description for t in scene.mechanics.custom_object_types if t.description
+    }
+    prompt = (scene.metadata.prompt or "").strip()
+    if prompt:
+        descriptions.setdefault(
+            "agent",
+            f"the player character described here, drawn as a single clear character sprite "
+            f"(not a scene or other objects): {prompt[:_AGENT_DESCRIPTION_MAX_CHARS]}",
+        )
+    return descriptions
+
+
 # Sprite generation calls are independent, I/O-bound (network) requests to the OpenAI Images
 # API -- running them one at a time serializes their full latency (N types == N x per-image
 # latency). A small bounded thread pool overlaps them instead, so wall-clock time is closer to
@@ -70,7 +103,7 @@ def resolve_assets(scene: SceneSpec, mode: str, cache_dir: str) -> tuple[dict[st
         else:
             pending.append(t)
 
-    generated_paths, generation_errors = _generate_many(pending, cache_dir)
+    generated_paths, generation_errors = _generate_many(pending, cache_dir, _scene_descriptions(scene))
 
     for t in pending:
         if t in generated_paths:
@@ -90,7 +123,9 @@ def resolve_assets(scene: SceneSpec, mode: str, cache_dir: str) -> tuple[dict[st
     return manifest, notes
 
 
-def _generate_many(types: list[str], cache_dir: str) -> tuple[dict[str, str], dict[str, ProviderError]]:
+def _generate_many(
+    types: list[str], cache_dir: str, descriptions: dict[str, str] | None = None
+) -> tuple[dict[str, str], dict[str, ProviderError]]:
     """Generate sprites for every type in `types` concurrently. Returns (type -> path for
     successes, type -> the raised ProviderError for failures) -- never raises itself, so one
     type's generation failure doesn't take down the others already in flight."""
@@ -101,11 +136,14 @@ def _generate_many(types: list[str], cache_dir: str) -> tuple[dict[str, str], di
 
     from infinienv.assets.generator_openai import generate_sprite
 
+    descriptions = descriptions or {}
     max_workers = min(len(types), int(os.environ.get("INFINIENV_ASSET_CONCURRENCY", str(DEFAULT_ASSET_CONCURRENCY))))
     paths: dict[str, str] = {}
     errors: dict[str, ProviderError] = {}
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        future_to_type = {pool.submit(generate_sprite, t, cache_dir): t for t in types}
+        future_to_type = {
+            pool.submit(generate_sprite, t, cache_dir, description=descriptions.get(t)): t for t in types
+        }
         for future in future_to_type:
             t = future_to_type[future]
             try:

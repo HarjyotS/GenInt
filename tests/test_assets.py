@@ -3,9 +3,10 @@ import threading
 import time
 
 import infinienv.assets.generator_openai as generator_openai
-from infinienv.assets.resolver import resolve_assets, scene_asset_types
+from infinienv.assets.resolver import _scene_descriptions, resolve_assets, scene_asset_types
 from infinienv.generation.templates import kitchen_delivery
 from infinienv.llm.base import ProviderError
+from infinienv.schema.scene_schema import scene_spec_from_dict
 
 
 def test_scene_asset_types_includes_agent_and_wall():
@@ -163,3 +164,64 @@ def test_resolve_assets_auto_mode_falls_back_to_local_on_generation_failure(tmp_
     for t, entry in entries.items():
         assert entry.source == "local", (t, entry)
         assert entry.note == "fallback: generated unavailable"
+
+
+def _mario_scene():
+    return scene_spec_from_dict(
+        {
+            "version": "0.1",
+            "seed": 1,
+            "metadata": {
+                "name": "t",
+                "prompt": "An Italian man in green clothing rescues a princess from a tower while avoiding turtles.",
+            },
+            "grid": {"width": 8, "height": 8, "tile_size": 32},
+            "agent": {"id": "hero", "x": 1, "y": 1},
+            "objects": [{"id": "turtle_1", "type": "turtle", "x": 3, "y": 3}],
+            "walls": [],
+            "goals": [{"id": "g", "type": "reach", "target_id": "turtle_1"}],
+            "mechanics": {
+                "custom_object_types": [
+                    {"id": "turtle", "description": "a smooth-moving green turtle hazard"},
+                ]
+            },
+        }
+    )
+
+
+def test_scene_descriptions_uses_custom_object_type_description():
+    descriptions = _scene_descriptions(_mario_scene())
+    assert descriptions["turtle"] == "a smooth-moving green turtle hazard"
+
+
+def test_scene_descriptions_derives_agent_description_from_scene_prompt():
+    # Regression test for a real, user-reported quality gap: the "agent" sprite always used a
+    # generic "a small friendly robot character" description regardless of what the scene
+    # actually needed, so every custom protagonist (an Italian rescuer, a knight, ...) got a
+    # mismatched or (when hand-drawn) crude generic sprite. The scene's own prompt almost always
+    # describes the intended player character far better than any static default.
+    descriptions = _scene_descriptions(_mario_scene())
+    assert "Italian man in green clothing" in descriptions["agent"]
+    assert "small friendly robot" not in descriptions["agent"]
+
+
+def test_scene_descriptions_omits_agent_when_scene_has_no_prompt():
+    scene = kitchen_delivery("kitchen task", seed=1)
+    scene.metadata.prompt = ""
+    descriptions = _scene_descriptions(scene)
+    assert "agent" not in descriptions
+
+
+def test_resolve_assets_generated_mode_passes_scene_description_to_generate_sprite(tmp_path, monkeypatch):
+    scene = _mario_scene()
+    calls = {}
+
+    def fake_generate(object_type, cache_dir, **kwargs):
+        calls[object_type] = kwargs.get("description")
+        return _write_fake_sprite(cache_dir, object_type)
+
+    monkeypatch.setattr(generator_openai, "generate_sprite", fake_generate)
+    resolve_assets(scene, "generated", str(tmp_path))
+
+    assert calls["turtle"] == "a smooth-moving green turtle hazard"
+    assert "Italian man in green clothing" in calls["agent"]

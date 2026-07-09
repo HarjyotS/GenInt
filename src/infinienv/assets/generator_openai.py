@@ -80,8 +80,23 @@ def _crop_to_content(img, *, pad_ratio: float = 0.03):
     return square
 
 
-def generate_sprite(object_type: str, cache_dir: str, *, model: str | None = None, quality: str | None = None) -> str:
-    """Generate (or reuse a cached) sprite for `object_type`. Returns the PNG path."""
+def generate_sprite(
+    object_type: str,
+    cache_dir: str,
+    *,
+    model: str | None = None,
+    quality: str | None = None,
+    description: str | None = None,
+) -> str:
+    """Generate (or reuse a cached) sprite for `object_type`. Returns the PNG path.
+
+    `description`, if given, overrides the generic `OBJECT_DESCRIPTIONS`/bare-type-name prompt
+    basis -- callers should pass a scene-specific description when one is available (a declared
+    `mechanics.custom_object_types` entry's own description, or the scene's prompt for the
+    player character) rather than letting an unrelated custom type or "a small friendly robot
+    character" (the generic default for "agent") drive what gets generated. See
+    `resolver.py::resolve_assets`, which is the only real caller and always supplies this.
+    """
     if not os.environ.get("OPENAI_API_KEY"):
         raise ProviderError("OPENAI_API_KEY is not set; cannot generate sprites")
     try:
@@ -100,7 +115,7 @@ def generate_sprite(object_type: str, cache_dir: str, *, model: str | None = Non
     # "low" -- overridable via INFINIENV_IMAGE_QUALITY for anyone who wants higher-fidelity
     # source images (e.g. if the render resolution is ever raised well above 64px).
     quality = quality or os.environ.get("INFINIENV_IMAGE_QUALITY", "low")
-    desc = OBJECT_DESCRIPTIONS.get(object_type, object_type.replace("_", " "))
+    desc = description or OBJECT_DESCRIPTIONS.get(object_type, object_type.replace("_", " "))
     is_texture = object_type in TEXTURE_TILE_TYPES
     prompt = (TEXTURE_PROMPT_TEMPLATE if is_texture else SPRITE_PROMPT_TEMPLATE).format(desc=desc)
 
