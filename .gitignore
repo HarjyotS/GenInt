@@ -11,3 +11,4 @@ runs/*
 .infinienv_asset_cache/
 .infinienv_mechanics_cache.json
 .DS_Store
+.gstack/

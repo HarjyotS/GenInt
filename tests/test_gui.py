@@ -86,8 +86,12 @@ def test_runs_listing_reflects_completed_run(client):
     assert runs[0]["success"] is True
 
 
-def _fake_run_sandbox_generation(prompt, seed, out_dir, *, max_repair_attempts=None, on_stage=None, **_):
+def _fake_run_sandbox_generation(
+    prompt, seed, out_dir, *, max_repair_attempts=None, assets_mode="none", on_stage=None, **_
+):
     import os
+
+    _fake_run_sandbox_generation.last_assets_mode = assets_mode
 
     if on_stage is not None:
         on_stage("Running sandbox agent (attempt 1/1)...")
@@ -141,6 +145,23 @@ def test_sandbox_generate_flow_streams_stage_and_done_events(client, monkeypatch
     assert done["agent_summary"] == "built a fake sandbox scene"
     assert done["metrics"]["outer_sanity_passed"] is True
     assert "scene" not in done  # sandbox path doesn't re-validate/re-parse a SceneSpec itself
+    assert _fake_run_sandbox_generation.last_assets_mode == "none"
 
     runs = client.get("/api/runs").get_json()["runs"]
     assert any(r["sandbox"] is True for r in runs)
+
+
+def test_sandbox_generate_flow_threads_assets_mode_through(client, monkeypatch):
+    import infinienv.sandbox.runner as sandbox_runner
+
+    monkeypatch.setattr(sandbox_runner, "run_sandbox_generation", _fake_run_sandbox_generation)
+
+    res = client.post(
+        "/api/generate",
+        json={"prompt": "a chase task", "sandbox": True, "seed": 3, "assets": "local"},
+    )
+    assert res.status_code == 202
+    job_id = res.get_json()["job_id"]
+    _consume_sse(client.get(f"/api/stream/{job_id}"))
+
+    assert _fake_run_sandbox_generation.last_assets_mode == "local"

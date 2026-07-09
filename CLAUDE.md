@@ -555,16 +555,26 @@ as plainly as the guarantee it trades away, not quietly bolted on.
 `infinienv generate --sandbox --prompt "..." --seed N --out runs/id` hands the scene prompt to a
 `SandboxAgent` (OpenAI Agents SDK, `agents.sandbox`, `UnixLocalSandboxClient` — a local backend,
 no Docker/cloud requirement) running inside a **fresh, isolated per-run copy** of this project's
-`schema/`, `engine/`, `navigation/`, `validation/`, and `render/` packages, plus a reference
-`run_scene.py` entrypoint (`sandbox/workspace.py::build_workspace_dir`). The agent may read, edit,
-or add any file in that copy — including rewriting the engine itself — to implement a mechanic the
-base vocabulary doesn't support (a chasing NPC, a physics-based interaction, a custom win/lose
-condition), then must run what it built and leave behind the same five standard artifacts every
-other run produces: `scene.json`, `metrics.json`, `replay.json`, `render.png`, `replay.gif`.
-`pymunk` (a `physics` extra in `pyproject.toml`) is available inside the sandbox if a mechanic
-needs real physics simulation, but nothing requires the agent to use it — reusing the existing
-`SceneSpec` schema and extending `navigation/policy.py` in place has worked just as well in live
-verification (see below).
+`schema/`, `engine/`, `navigation/`, `validation/`, `render/`, and `assets/` packages (plus a
+partial copy of `llm/base.py`, just for `ProviderError`, which `assets/generator_openai.py` and
+`assets/resolver.py` need), plus a reference `run_scene.py` entrypoint
+(`sandbox/workspace.py::build_workspace_dir`). The agent may read, edit, or add any file in that
+copy — including rewriting the engine itself — to implement a mechanic the base vocabulary doesn't
+support (a chasing NPC, a physics-based interaction, a custom win/lose condition), then must run
+what it built and leave behind the same five standard artifacts every other run produces:
+`scene.json`, `metrics.json`, `replay.json`, `render.png`, `replay.gif`. `pymunk` (a `physics`
+extra in `pyproject.toml`) is available inside the sandbox if a mechanic needs real physics
+simulation, but nothing requires the agent to use it — reusing the existing `SceneSpec` schema and
+extending `navigation/policy.py` in place has worked just as well in live verification (see
+below).
+
+`--assets {none,local,generated,auto}` applies to sandbox runs exactly as it does everywhere else
+(it used to be silently ignored — see "Asset generation inside the sandbox" below): a plain-text
+`ASSETS_MODE` file at the workspace root tells the agent's `run_scene.py` which mode was
+requested, and the default template resolves real sprites via the copied `assets/resolver.py`
+before rendering, caching them in a per-run `./asset_cache/` inside the workspace (not shared with
+the repo's real `.infinienv_asset_cache/` or across sandbox runs, same "no cross-run reuse"
+precedent as sandbox-authored mechanics below).
 
 ### The isolation boundary, and why it's real
 
@@ -587,16 +597,40 @@ verification (see below).
   that `replay.gif` is an actual multi-frame animation (`outer_sanity_check`). This is explicitly
   **not** a solvability guarantee — it can't be, that's the nature of the trade-off — just a floor
   against a malformed or fabricated success being reported. It exists because live verification
-  found two real cases of exactly that: a sandbox run that self-reported `"success": true` with a
-  43-byte, header-only `replay.gif` it never actually checked itself, and later a run that
-  self-reported success with a technically-valid, correctly-sized `replay.gif` that was just one
-  static frame — a real image file, but not a replay of anything happening. Both are now caught
-  before `success` can be `true`.
+  found real cases of exactly that: a sandbox run that self-reported `"success": true` with a
+  43-byte, header-only `replay.gif` it never actually checked itself; a run that self-reported
+  success with a technically-valid, correctly-sized `replay.gif` that was just one static frame —
+  a real image file, but not a replay of anything happening; and, found from a user report on a
+  run's replay ("gui_1783609484 run failed replay"), a `replay.gif` with a correct header/trailer
+  and well-formed frame descriptors — passing both `Image.verify()` and the frame-count check —
+  but malformed LZW-compressed pixel data in every single frame, because `Image.verify()`
+  validates GIF *container* structure, not that the pixel data inside actually decodes. All three
+  are now caught before `success` can be `true`: the check forces a real per-frame `.load()` on
+  both `render.png` and every frame of `replay.gif`, not just `verify()` plus a frame count.
 - **An agent conversation that doesn't finish cleanly (e.g. hits its turn budget) still gets a
   full, honest report.** `sandbox/runner.py` captures that failure as `run_error` rather than
   letting it propagate past artifact extraction, workspace sync, and the sanity check — whatever
   the agent produced up to that point is still extracted, sanity-checked, and recorded as one
   attempt in the repair loop below, instead of being reported as a bare crash.
+- **Copied modules import each other from the sandboxed copy, not the real installed package.**
+  `infinienv` is installed editable (`pip install -e .`), so it's importable from any process on
+  this venv regardless of `cwd`. The files `build_workspace_dir` copies use this project's normal
+  `from infinienv.engine.grid import Grid`-style absolute imports, which — uncorrected — resolve
+  to the real installed `infinienv` package, not the sandboxed copy sitting next to them. That
+  meant an agent's edit to its copy of `engine/grid.py` could be silently ignored by any other
+  copied module that still imported `infinienv.engine.grid`, directly contradicting this section's
+  claim that the agent can edit anything "including rewriting the engine itself." This was a real,
+  previously-undetected gap, not a security issue (the sandbox still can't write back to this
+  repo's actual files) — a correctness gap between what the mode promises and what it delivered.
+  Fixed by `_rewrite_internal_imports()`: after copying, every `.py` file in the workspace has its
+  `infinienv.X` imports rewritten to bare `X` so cross-module references resolve locally. Covered
+  by `test_build_workspace_dir_copy_is_actually_self_contained`, which runs a real subprocess with
+  `cwd` set to the built workspace and asserts `engine.grid.Grid`'s `__file__` points at the
+  sandboxed copy, not site-packages — the only way to actually catch this class of bug, since an
+  in-process assertion would share `sys.path`/`sys.modules` with whatever already imported the
+  real package during test collection. See `notes.md` for the full account, including a first
+  version of the rewrite regex that missed indented/lazy imports (e.g. `resolve_assets()`'s
+  function-body import of `generator_openai`).
 
 ### Self-repair against the outer sanity check
 
@@ -689,9 +723,12 @@ python -m infinienv generate --prompt "..." --provider {mock,openai_agents,opena
   --seed 42 --out runs/demo [--max-repair-attempts N] [--no-fallback] \
   [--assets {none,local,generated,auto}]
 
-python -m infinienv generate --sandbox --prompt "..." --seed 42 --out runs/demo [--max-repair-attempts N]
+python -m infinienv generate --sandbox --prompt "..." --seed 42 --out runs/demo [--max-repair-attempts N] \
+  [--assets {none,local,generated,auto}]
   # opt-in, section 11: model-authored engine code in an isolated per-run workspace copy.
-  # ignores --provider/--assets/--no-fallback; --max-repair-attempts here means repair
+  # ignores --provider/--no-fallback (no LLM-repair-agent path or fallback-template path to
+  # apply them to); --assets applies the same as any other run, resolved inside the sandbox
+  # workspace via a copy of assets/resolver.py; --max-repair-attempts here means repair
   # attempts against the outer sanity check (default 2), not the LLM repair agent; trades
   # away the validator-guaranteed solvability check every other run has -- see metrics.json's
   # outer_sanity_* fields.
@@ -720,8 +757,10 @@ the exact same `run_generation` pipeline, streaming that same stage-by-stage pro
 SSE instead of stdout — see `gui/app.py`. It requires `pip install infinienv[gui]`; nothing else
 in the project depends on `flask`. The GUI also has a `--sandbox` toggle that calls
 `sandbox/runner.py::run_sandbox_generation` the same way the CLI does (not a second
-implementation) — checking it disables the provider/assets/`--no-fallback` fields (ignored by
-sandbox mode, same as the CLI), streams the same per-attempt `on_stage` progress messages
+implementation) — checking it disables the provider/`--no-fallback` fields (ignored by sandbox
+mode, same as the CLI); the Assets field stays enabled and applies to sandbox runs exactly as it
+does to non-sandbox ones, same as the CLI's `--assets`. Streams the same per-attempt `on_stage`
+progress messages
 (`sandbox/runner.py`'s repair loop now takes an `on_stage` callback mirroring
 `evaluation/runner.py`'s), and renders results distinctly: both verdicts side by side
 (`sandbox_self_reported_success`/`outer_sanity_passed`), the agent's own summary text, and a

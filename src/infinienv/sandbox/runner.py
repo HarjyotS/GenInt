@@ -60,6 +60,7 @@ async def _run_async(
     model: str,
     max_turns: int,
     max_repair_attempts: int,
+    assets_mode: str = "none",
     on_stage: Callable[[str], None] | None = None,
 ) -> dict:
     def stage(msg: str) -> None:
@@ -78,8 +79,8 @@ async def _run_async(
             "Install it with `pip install infinienv[openai]`."
         ) from exc
 
-    stage("Preparing isolated sandbox workspace (copy of schema/engine/navigation/validation/render)...")
-    workspace_dir = build_workspace_dir(out_dir)
+    stage("Preparing isolated sandbox workspace (copy of schema/engine/navigation/validation/render/assets)...")
+    workspace_dir = build_workspace_dir(out_dir, assets_mode=assets_mode)
 
     client = UnixLocalSandboxClient()
     session = await client.create()
@@ -103,7 +104,7 @@ async def _run_async(
     sanity_error: str | None = None
     missing: list[str] = list(ARTIFACT_FILES)
     repair_history: list[dict] = []
-    message = f"Seed: {seed}\nTask: {prompt}"
+    message = f"Seed: {seed}\nTask: {prompt}\nAssets mode: {assets_mode}"
 
     try:
         for attempt in range(max_repair_attempts + 1):
@@ -219,13 +220,16 @@ def run_sandbox_generation(
     model: str | None = None,
     max_turns: int = 40,
     max_repair_attempts: int | None = None,
+    assets_mode: str = "none",
     on_stage: Callable[[str], None] | None = None,
 ) -> dict:
     """Sync entrypoint: run a sandboxed generation end to end, repairing via the same agent
     against the real outer sanity check until it passes or the repair budget runs out. See
     module docstring. `on_stage`, if given, is called with a short progress message at each
     attempt boundary -- mirrors `evaluation.runner.run_generation`'s `on_stage` so the CLI and
-    GUI can show live progress the same way for both paths.
+    GUI can show live progress the same way for both paths. `assets_mode` mirrors the non-sandbox
+    `--assets` flag ({none,local,generated,auto}) -- passed through to the workspace so the
+    agent's reference run_scene.py resolves real sprites instead of flat colored cells.
     """
     model = model or os.environ.get("INFINIENV_SANDBOX_MODEL", DEFAULT_SANDBOX_MODEL)
     attempts = (
@@ -239,6 +243,7 @@ def run_sandbox_generation(
             model=model,
             max_turns=max_turns,
             max_repair_attempts=attempts,
+            assets_mode=assets_mode,
             on_stage=on_stage,
         )
     )

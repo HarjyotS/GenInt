@@ -617,3 +617,170 @@ more real failure classes than before (truncated file, now also non-animated fil
 repair loop still requires that check to genuinely pass, it just gives the same agent more
 chances against the same real bar. `success: true` in a sandbox run's `metrics.json` is a
 strictly stronger claim after this round than before it, not a weaker one.
+
+## Sandbox mode gets real asset generation, plus a real import-isolation bug found and fixed along the way
+
+The user asked for sandbox runs to be able to use `--assets` (`local`/`generated`/`auto`) like
+every other run, instead of `--sandbox` silently ignoring it and always rendering flat colored
+cells. Straightforward on its face -- copy `assets/` into the workspace, pass a mode through --
+but investigating how to wire it up surfaced a real, previously-undetected correctness gap in the
+isolation boundary section 11 claims.
+
+### The bug: sandboxed modules were silently resolving imports to the real installed package
+
+`infinienv` is installed editable (`pip install -e .`), so it's importable from any Python process
+using this venv, regardless of `cwd`. Every file `build_workspace_dir` copies into
+`sandbox_workspace/` (`engine/grid.py`, `validation/validator.py`, etc.) used the project's normal
+absolute-import style, `from infinienv.engine.grid import Grid`. Inside the sandbox that import
+doesn't fail or get redirected to the sandboxed copy sitting right next to it -- it silently
+resolves to the *real installed* `infinienv.engine.grid`, because that module is on `sys.path`
+regardless of what directory the sandboxed process runs from.
+
+Concretely: if an agent edited its copy of `engine/grid.py` to change how walls are treated, and a
+*different* copied module (say `navigation/astar.py`) still imported `from infinienv.engine.grid
+import Grid`, that second module would keep using the real repo's unedited `Grid`, not the
+agent's edit -- even though both files are sitting in the same `sandbox_workspace/` directory and
+look, to a human inspecting the workspace, like a self-contained edited copy. This directly
+contradicts CLAUDE.md section 11's claim that the agent "may read, edit, or add any file in that
+copy -- including rewriting the engine itself." It's a correctness gap in what the mode delivers,
+not a security/isolation-boundary breach -- the sandboxed process still can't write back to the
+real repo's files, it just wasn't reliably reading its own.
+
+Fixed with `_rewrite_internal_imports()` in `sandbox/workspace.py`: after copying files, walk
+every `.py` file in the workspace and regex-rewrite `from infinienv.X import ...` /
+`import infinienv.X` to `from X import ...` / `import X`, so cross-module references inside the
+workspace resolve to the sandboxed copy next to them rather than the installed package. First
+version of the regex only matched at column 0 (`^from infinienv\.`), which missed indented/lazy
+imports -- e.g. `assets/resolver.py`'s `resolve_assets()` does `from assets.generator_openai import
+generate_sprite` inside the function body, not at module level, to keep `generated`/`auto`'s
+OpenAI dependency lazy. Fixed by allowing leading whitespace in the pattern
+(`^(\s*)(from|import)\s+infinienv\.`).
+
+Regression coverage added, not just a manual check: `test_build_workspace_dir_copy_is_actually_self_contained`
+in `tests/test_sandbox_workspace.py` runs a real subprocess with `cwd` set to the built workspace
+and asserts `engine.grid.Grid.__module__`'s `__file__` actually points at the sandboxed copy, not
+site-packages -- the only way to catch this class of bug is to actually run a fresh process from
+the workspace directory, since running the assertion in-process from the test itself would
+share `sys.path`/`sys.modules` state with whatever already imported the real `infinienv` package
+during test collection. Also added `test_build_workspace_dir_rewrites_internal_infinienv_imports`
+covering the indented-import case specifically.
+
+### The feature itself
+
+- `_COPIED_PACKAGES` now includes `assets`; a new `_PARTIAL_COPIES` mechanism copies just
+  `llm/base.py` (for `ProviderError`, which `assets/generator_openai.py` and `assets/resolver.py`
+  both depend on) into a new `llm/` package inside the workspace, without pulling in the whole
+  `llm` package (providers, prompts, the OpenAI Agents SDK dependency) that the sandbox has no use
+  for.
+- `build_workspace_dir(out_dir, assets_mode=...)` writes a plain-text `ASSETS_MODE` file at the
+  workspace root. The reference `run_scene.py` template reads it and, if not `"none"`, calls
+  `assets.resolver.resolve_assets(scene, assets_mode, os.path.abspath("asset_cache"))` and passes
+  the resulting `asset_paths` into `save_render_png`/`save_replay_gif` -- the same pattern
+  `evaluation/runner.py` already uses for the non-sandbox path. Asset cache is per-run
+  (`./asset_cache` inside the workspace), not shared with the repo's real
+  `.infinienv_asset_cache/` or across sandbox runs, consistent with the "no cross-run reuse in
+  sandbox mode" precedent CLAUDE.md section 11 already documents for mechanics.
+- `sandbox/runner.py::run_sandbox_generation`/`_run_async` take `assets_mode: str = "none"`,
+  threaded into `build_workspace_dir` and appended to the agent's initial message (`Assets mode:
+  {assets_mode}`) so the agent knows whether to lean on real sprites -- relevant if it rewrites
+  `run_scene.py` itself for a custom simulation loop and needs to preserve the asset-resolution
+  step manually.
+- `cli.py`'s `_cmd_generate_sandbox` now passes `args.assets` through; `--sandbox`'s help text no
+  longer claims to ignore `--assets` (only `--provider`/`--no-fallback` are still ignored, since
+  sandbox mode has no LLM-repair-agent path or fallback-template path to apply them to).
+- `sandbox_agent.md` gained a paragraph telling the agent about `ASSETS_MODE`, how to call
+  `resolve_assets`, that the default `run_scene.py` already does this, and that `generated`/`auto`
+  cost real API time per new object type -- don't request a mode switch, just honor whatever
+  `ASSETS_MODE` says.
+
+### Live verification
+
+Ran `--sandbox --assets local` against a kitchen-delivery prompt: succeeded on the first attempt
+(no repair needed). Verified real sprites were used, not flat colored cells, by cropping each
+object's cell out of `render.png` and counting distinct pixel colors -- 30-80 distinct colors per
+object cell (a flat-color fallback cell would show 1-2). The agent used the default `run_scene.py`
+template completely unmodified (byte-identical apart from a trailing newline) and the
+asset-resolution wiring worked correctly with zero agent-side effort, confirming the plumbing
+integrates cleanly with the existing reference entrypoint rather than requiring every sandbox
+agent to reimplement it. Also ran `--sandbox --assets generated` (prompt: "agent picks up a
+glowing crystal and places it on a pedestal") to confirm real OpenAI Images API calls succeed from
+inside the sandboxed process (relevant specifically because environment variable inheritance into
+the sandbox backend was previously verified only by reading `unix_local.py`'s `os.environ.copy()`
+call, never proven with a real `generated`-mode run) -- succeeded on the first attempt, no repair
+needed. `sandbox_workspace/asset_cache/` contained five real generated PNGs (`agent.png`,
+`glowing_crystal.png`, `package.png`, `pedestal.png`, `wall.png`, 2-8KB each), and cropping the
+rendered object cells out of `render.png` showed 68 and 218 distinct colors respectively (vs. 1-2
+for a flat fallback), confirming genuine generated art rather than a silent local-placeholder or
+flat-color fallback. `replay.gif` was a real 5-frame animation. `metrics.json` recorded
+`"outer_sanity_passed": true` and `"sandbox_self_reported_success": true` in agreement, with
+`repair_attempts: 0`.
+
+### GUI: expose --assets in sandbox mode too
+
+The GUI's `--assets` `<select>` lived inside the `#non-sandbox-fields` `<fieldset>`, which the
+frontend JS disables whenever the sandbox checkbox is on (`syncSandboxUi()`). That predates this
+round's backend change and meant a GUI user could never actually reach `generated`/`local`/`auto`
+for a sandbox run even after `sandbox/runner.py` learned to honor `assets_mode` -- the field was
+locked to `"none"` by the disabled attribute. Moved the `<select id="assets">` out of that
+fieldset (provider and `--no-fallback` stay inside it, since those genuinely don't apply to
+sandbox runs) and updated the sandbox note's copy accordingly. `gui/app.py::api_generate` now
+computes `assets_mode` once, before branching on `sandbox`, and passes it to both
+`_run_job`/`_run_sandbox_job` instead of only the non-sandbox path. `_run_sandbox_job` takes and
+forwards `assets_mode` to `run_sandbox_generation`, mirroring the CLI's existing wiring. Covered
+by `test_sandbox_generate_flow_threads_assets_mode_through` in `tests/test_gui.py`.
+
+### A third "technically valid but not what it claims" bug in outer_sanity_check, found from a user report
+
+User report: "gui_1783609484 run failed replay." That run's `metrics.json` said
+`"success": true`, `"outer_sanity_passed": true`, `"outer_sanity_error": null` -- the outer check
+had signed off on it. Investigated the actual `replay.gif` (a physics-chase scene, `used_physics:
+true`, 59 frames per its own custom `metrics.json` fields -- this run predates the standard
+schema and used the agent's own physics-simulation `run_scene.py`, not the default template).
+`PIL.Image.open(...).verify()` passed and `.n_frames` reported 59, exactly what
+`outer_sanity_check` already checked for. But actually decoding any frame
+(`img.seek(0); img.load()`) raised `OSError: broken data stream when reading image file` --
+confirmed independently with `ffmpeg -i replay.gif -f null -`, which reported `LZW decode failed`
+on every one of the 59 frames.
+
+Root cause: PIL's GIF `verify()` validates *container* structure (headers, block/sub-block
+length prefixes, trailer) — it does not run the LZW decoder over the pixel payload. Likewise
+`n_frames` is derived by seeking through frame descriptors, not by decoding them. A GIF can
+therefore have a perfectly well-formed header, correct frame count, and valid trailer while every
+single frame's actual pixel data is garbage — exactly the file this sandbox agent produced. This
+is the same *shape* of bug as the two earlier `outer_sanity_check` gaps (43-byte truncated GIF;
+technically-valid single-frame GIF) — a check that verifies "is this a valid file" without
+verifying "is this file what it's supposed to mean" — just a third, more subtle instance: this
+time the file *was* multi-frame and *did* pass `verify()`, so both of the previous fixes were
+insufficient on their own.
+
+Fixed in `sandbox/workspace.py::outer_sanity_check`: after `verify()` passes for `render.png`/
+`replay.gif`, both now get a second pass that re-opens the file fresh and calls `.load()` for
+real (verify() leaves the image object unusable for further reads). For `replay.gif` specifically,
+after the frame-count check, every individual frame is seeked to and loaded
+(`for i in range(n_frames): gif.seek(i); gif.load()`), not just frame 0 — the real corrupted file
+had all 59 frames corrupted, but a version of this fix that only checked frame 0 would already
+have been sufficient for this case; checking every frame is the more defensible bar since nothing
+guarantees corruption is uniform across frames.
+
+Regression test: `test_outer_sanity_check_fails_for_lzw_corrupted_replay_gif` in
+`tests/test_sandbox_workspace.py`, with a purpose-built `_make_lzw_corrupted_gif()` helper that
+constructs a real 2-frame animated GIF via PIL, then walks its actual block structure (extension
+blocks, image descriptor, LZW sub-blocks) and XORs only the sub-block *payload* bytes with
+`0xFF` — never touching length-prefix bytes, the block terminator, or any header -- so the
+resulting file keeps passing `verify()`/`n_frames` (asserted directly in the test) while its pixel
+data is genuinely undecodable, the same failure shape as the real file. Deliberately not using the
+real 4.8MB corrupted file as a fixture -- a minimal synthetic repro that exercises the identical
+code path is more maintainable and doesn't bloat the repo with a large binary.
+
+The existing, since-superseded run (`runs/gui_1783609484/metrics.json`) was retroactively
+corrected to `"success": false"`, `"outer_sanity_passed": false` with an `_note` explaining why,
+rather than left with a false `"success": true"` in the repo now that the real verdict is known --
+consistent with this project's standing rule that `metrics.json` must never claim success it
+can't back up.
+
+### Net effect
+
+Same as the previous two `outer_sanity_check` fixes: this doesn't loosen the guarantee, it closes
+a real gap in it. `success: true` in a sandbox run's `metrics.json` is now backed by an outer
+check that actually decodes every pixel of every artifact frame, not just its container
+structure.

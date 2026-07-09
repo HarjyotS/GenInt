@@ -84,6 +84,7 @@ def _cmd_generate_sandbox(args: argparse.Namespace) -> int:
         args.seed,
         args.out,
         max_repair_attempts=args.max_repair_attempts,
+        assets_mode=args.assets,
         on_stage=on_stage,
     )
     print()
@@ -295,7 +296,8 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["none", "local", "generated", "auto"],
         help="none: flat colored cells (default). local: checked-in placeholder sprites, no key "
         "needed. generated: OpenAI image generation only, no silent fallback. auto: generated "
-        "then local placeholder fallback.",
+        "then local placeholder fallback. Applies to --sandbox runs too (resolved inside the "
+        "sandbox workspace via a copy of assets/resolver.py).",
     )
     g.add_argument(
         "--sandbox",
@@ -303,7 +305,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Let an isolated sandbox agent write and run its own code (in a per-run copy of "
         "the engine, never the real installation) to implement mechanics beyond the fixed "
         "vocabulary, repairing its own work against an outer sanity check up to "
-        "--max-repair-attempts times. Ignores --provider/--assets/--no-fallback; trades away "
+        "--max-repair-attempts times. Ignores --provider/--no-fallback; trades away "
         "the validator-guaranteed solvability check other runs have. See CLAUDE.md.",
     )
     g.set_defaults(func=cmd_generate)

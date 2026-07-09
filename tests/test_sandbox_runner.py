@@ -191,3 +191,59 @@ def test_repair_loop_succeeds_immediately_without_using_the_repair_budget(tmp_pa
     assert len(attempts) == 1
     assert result["success"] is True
     assert result["repair_attempts"] == 0
+
+
+def test_assets_mode_threads_through_to_workspace_and_agent_message(tmp_path, patched_sdk):
+    Runner = patched_sdk
+    attempts: list[str] = []
+
+    async def fake_run(agent, message, *, run_config, max_turns):
+        attempts.append(message)
+        session = run_config.sandbox.session
+        _write_good_attempt(session.files)
+        return SimpleNamespace(final_output="summary")
+
+    out_dir = str(tmp_path / "run")
+
+    # persist_workspace's fake implementation always tars an unrelated empty temp dir (it has
+    # no access to the real workspace_dir), so sync_full_workspace would wipe ASSETS_MODE off
+    # disk afterward -- inspect the pre-run workspace, written by build_workspace_dir, before
+    # that happens rather than asserting on post-sync disk state.
+    written_assets_mode: list[str] = []
+    real_build_workspace_dir = __import__(
+        "infinienv.sandbox.runner", fromlist=["build_workspace_dir"]
+    ).build_workspace_dir
+
+    def spy_build_workspace_dir(out_dir, *, assets_mode="none"):
+        workspace_dir = real_build_workspace_dir(out_dir, assets_mode=assets_mode)
+        with open(f"{workspace_dir}/ASSETS_MODE") as f:
+            written_assets_mode.append(f.read())
+        return workspace_dir
+
+    with (
+        patch.object(Runner, "run", AsyncMock(side_effect=fake_run)),
+        patch("infinienv.sandbox.runner.build_workspace_dir", spy_build_workspace_dir),
+    ):
+        result = run_sandbox_generation(
+            "make a game", 1, out_dir, max_repair_attempts=2, assets_mode="local"
+        )
+
+    assert result["success"] is True
+    assert "Assets mode: local" in attempts[0]
+    assert written_assets_mode == ["local"]
+
+
+def test_assets_mode_defaults_to_none(tmp_path, patched_sdk):
+    Runner = patched_sdk
+    attempts: list[str] = []
+
+    async def fake_run(agent, message, *, run_config, max_turns):
+        attempts.append(message)
+        session = run_config.sandbox.session
+        _write_good_attempt(session.files)
+        return SimpleNamespace(final_output="summary")
+
+    with patch.object(Runner, "run", AsyncMock(side_effect=fake_run)):
+        run_sandbox_generation("make a game", 1, str(tmp_path / "run"), max_repair_attempts=2)
+
+    assert "Assets mode: none" in attempts[0]

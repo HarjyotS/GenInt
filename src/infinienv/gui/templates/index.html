@@ -106,9 +106,23 @@
     <div class="sandbox-note" id="sandbox-note">
       Trades away the validator-guaranteed solvability check every other run has, in exchange for
       mechanics the fixed vocabulary can't express (see CLAUDE.md section 11). Ignores
-      provider/assets/--no-fallback below. If the first attempt fails an independent outer sanity
+      provider/--no-fallback below. Assets still applies -- the sandbox agent resolves real sprites
+      the same way any other run does. If the first attempt fails an independent outer sanity
       check, the same agent gets the concrete failure and repairs its own work, up to max repair
       attempts.
+    </div>
+
+    <div class="row">
+      <div>
+        <label for="assets">Assets</label>
+        <select id="assets">
+          <option value="none" selected>none</option>
+          <option value="local">local</option>
+          <option value="generated">generated</option>
+          <option value="auto">auto</option>
+        </select>
+        <div class="hint">Applies in --sandbox mode too.</div>
+      </div>
     </div>
 
     <fieldset id="non-sandbox-fields">
@@ -119,18 +133,6 @@
         {% endfor %}
       </select>
       <div class="hint">mock needs no API key. openai_agents is the default full runtime.</div>
-
-      <div class="row">
-        <div>
-          <label for="assets">Assets</label>
-          <select id="assets">
-            <option value="none" selected>none</option>
-            <option value="local">local</option>
-            <option value="generated">generated</option>
-            <option value="auto">auto</option>
-          </select>
-        </div>
-      </div>
 
       <div class="checkbox-row">
         <input type="checkbox" id="no_fallback">

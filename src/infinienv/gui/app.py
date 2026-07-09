@@ -81,6 +81,7 @@ def _run_sandbox_job(
     seed: int,
     out_dir: str,
     max_repair_attempts: int | None,
+    assets_mode: str,
 ) -> None:
     from infinienv.sandbox.runner import run_sandbox_generation
 
@@ -93,6 +94,7 @@ def _run_sandbox_job(
             seed,
             out_dir,
             max_repair_attempts=max_repair_attempts,
+            assets_mode=assets_mode,
             on_stage=on_stage,
         )
         # No SceneSpec/validation-errors payload here (unlike the non-sandbox path): a
@@ -151,14 +153,19 @@ def create_app():
         out_dir = (data.get("out") or "").strip() or f"runs/gui_{int(time.time())}"
         sandbox = bool(data.get("sandbox"))
 
+        assets_mode = data.get("assets") or "none"
+        if assets_mode not in ("none", "local", "generated", "auto"):
+            return jsonify({"error": f"unknown assets mode {assets_mode!r}"}), 400
+
         job = Job()
         job_id = uuid.uuid4().hex
         with _jobs_lock:
             _jobs[job_id] = job
 
         if sandbox:
-            # --sandbox ignores provider/assets/no_fallback -- same as the CLI (see CLAUDE.md
-            # section 11) -- so those fields are neither read nor validated here.
+            # --sandbox ignores provider/no_fallback -- same as the CLI (see CLAUDE.md section
+            # 11) -- but --assets applies the same as any other run, so it's still threaded
+            # through here.
             thread = threading.Thread(
                 target=_run_sandbox_job,
                 kwargs=dict(
@@ -167,6 +174,7 @@ def create_app():
                     seed=seed,
                     out_dir=out_dir,
                     max_repair_attempts=max_repair_attempts,
+                    assets_mode=assets_mode,
                 ),
                 daemon=True,
             )
@@ -174,10 +182,6 @@ def create_app():
             provider_name = data.get("provider") or "mock"
             if provider_name not in PROVIDER_NAMES:
                 return jsonify({"error": f"unknown provider {provider_name!r}"}), 400
-
-            assets_mode = data.get("assets") or "none"
-            if assets_mode not in ("none", "local", "generated", "auto"):
-                return jsonify({"error": f"unknown assets mode {assets_mode!r}"}), 400
 
             no_fallback = bool(data.get("no_fallback"))
 

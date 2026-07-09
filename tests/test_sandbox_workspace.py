@@ -20,11 +20,63 @@ def test_build_workspace_dir_copies_engine_and_reference_runner(tmp_path):
     assert os.path.isdir(os.path.join(workspace, "navigation"))
     assert os.path.isdir(os.path.join(workspace, "validation"))
     assert os.path.isdir(os.path.join(workspace, "render"))
+    assert os.path.isdir(os.path.join(workspace, "assets"))
     assert os.path.exists(os.path.join(workspace, "run_scene.py"))
-    # nothing from the installed package's cli/llm/generation/assets/gui should leak in --
-    # the sandbox gets exactly the engine surface it needs, not the whole installation.
+    assert os.path.exists(os.path.join(workspace, "ASSETS_MODE"))
+    # nothing from the installed package's cli/generation/gui should leak in, and only the
+    # one file assets/*.py actually needs (ProviderError) is copied from llm/, not the
+    # whole package (providers, prompts, heavy optional deps).
     assert not os.path.exists(os.path.join(workspace, "cli.py"))
-    assert not os.path.exists(os.path.join(workspace, "llm"))
+    assert not os.path.exists(os.path.join(workspace, "generation"))
+    assert os.path.exists(os.path.join(workspace, "llm", "base.py"))
+    assert not os.path.exists(os.path.join(workspace, "llm", "providers"))
+
+
+def test_build_workspace_dir_default_assets_mode_is_none(tmp_path):
+    workspace = build_workspace_dir(str(tmp_path))
+    with open(os.path.join(workspace, "ASSETS_MODE")) as f:
+        assert f.read().strip() == "none"
+
+
+def test_build_workspace_dir_writes_requested_assets_mode(tmp_path):
+    workspace = build_workspace_dir(str(tmp_path), assets_mode="generated")
+    with open(os.path.join(workspace, "ASSETS_MODE")) as f:
+        assert f.read().strip() == "generated"
+
+
+def test_build_workspace_dir_rewrites_internal_infinienv_imports(tmp_path):
+    # Regression test for a real bug: infinienv is installed editable, so a copied module's
+    # `from infinienv.engine.grid import Grid`-style import would otherwise silently resolve
+    # to the *real* installed package instead of the sandboxed copy sitting next to it.
+    import re
+
+    import_line = re.compile(r"^\s*(from|import)\s+infinienv\.", re.MULTILINE)
+    workspace = build_workspace_dir(str(tmp_path))
+    for root, _dirs, files in os.walk(workspace):
+        for name in files:
+            if not name.endswith(".py"):
+                continue
+            with open(os.path.join(root, name)) as f:
+                content = f.read()
+            assert not import_line.search(content), f"{name} still imports from the real installed package"
+
+
+def test_build_workspace_dir_copy_is_actually_self_contained(tmp_path):
+    # The real regression check: run a copied module's code from a subprocess whose cwd is
+    # the workspace (matching how the sandbox actually executes it) and confirm the classes
+    # it uses really are the sandboxed copies, not the real installed package.
+    import subprocess
+    import sys
+
+    workspace = build_workspace_dir(str(tmp_path))
+    result = subprocess.run(
+        [sys.executable, "-c", "from engine.grid import Grid; import engine.grid as m; print(m.__file__)"],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == os.path.join(workspace, "engine", "grid.py")
 
 
 def test_build_workspace_dir_excludes_pycache(tmp_path):
@@ -229,3 +281,80 @@ def test_outer_sanity_check_fails_for_single_frame_replay_gif(tmp_path):
     assert ok is False
     assert "replay.gif" in error
     assert "frame" in error
+
+
+def _make_lzw_corrupted_gif() -> bytes:
+    """Build a 2-frame animated GIF, then XOR every image sub-block's *payload* bytes (never
+    the length-prefix bytes, the block terminator, or any header) so the container structure --
+    and therefore `Image.verify()` and `n_frames` -- stays fully intact, but the LZW-compressed
+    pixel data is garbage. Reproduces a real bug: PIL's `verify()` validates GIF container
+    structure, not that pixel data actually decodes.
+    """
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    frame1 = Image.new("RGB", (16, 16), (255, 0, 0))
+    frame2 = Image.new("RGB", (16, 16), (0, 255, 0))
+    frame1.save(buf, format="GIF", save_all=True, append_images=[frame2], duration=100, loop=0)
+    data = bytearray(buf.getvalue())
+
+    pos = 6  # skip "GIF87a"/"GIF89a"
+    lsd_packed = data[pos + 4]
+    pos += 7  # logical screen descriptor
+    if lsd_packed & 0x80:
+        pos += 3 * (2 ** ((lsd_packed & 0x07) + 1))  # global color table
+
+    while pos < len(data):
+        b = data[pos]
+        if b == 0x21:  # extension block: introducer + label, then length-prefixed sub-blocks
+            pos += 2
+            while data[pos] != 0x00:
+                pos += 1 + data[pos]
+            pos += 1
+        elif b == 0x2C:  # image descriptor: introducer(1) + left/top/w/h(8) + packed(1)
+            img_packed = data[pos + 9]
+            pos += 10
+            if img_packed & 0x80:
+                pos += 3 * (2 ** ((img_packed & 0x07) + 1))  # local color table
+            pos += 1  # LZW minimum code size byte
+            while data[pos] != 0x00:  # length-prefixed image data sub-blocks
+                block_len = data[pos]
+                start = pos + 1
+                for j in range(start, start + block_len):
+                    data[j] ^= 0xFF  # corrupt payload only, never the length byte
+                pos = start + block_len
+            pos += 1  # block terminator
+        else:  # trailer (0x3B) or anything else: stop walking, structure beyond isn't ours
+            break
+
+    return bytes(data)
+
+
+def test_outer_sanity_check_fails_for_lzw_corrupted_replay_gif(tmp_path):
+    # Regression test for a real bug found from a user report ("gui_1783609484 run failed
+    # replay"): a sandbox run self-reported success with a replay.gif that had a correct
+    # header/trailer and 59 well-formed frame descriptors -- passing both `Image.verify()` and
+    # the frame-count check -- but malformed LZW-compressed pixel data in every frame.
+    # `Image.verify()` only validates GIF container structure, not that pixel data actually
+    # decodes, so this slipped through until outer_sanity_check started forcing a real
+    # frame-by-frame `.load()`. See notes.md.
+    out_dir = tmp_path / "run"
+    out_dir.mkdir()
+    _write_valid_scene(out_dir)
+    from PIL import Image
+
+    Image.new("RGB", (64, 64), (255, 0, 0)).save(out_dir / "render.png")
+    (out_dir / "replay.gif").write_bytes(_make_lzw_corrupted_gif())
+
+    from PIL import Image as PILImage
+
+    with PILImage.open(out_dir / "replay.gif") as sanity:
+        assert sanity.n_frames == 2  # structurally still a 2-frame animation
+        sanity.verify()  # and verify() still passes -- the corruption is only in pixel data
+
+    ok, error = outer_sanity_check(str(out_dir))
+    assert ok is False
+    assert "replay.gif" in error
+    assert "corrupted" in error.lower() or "decod" in error.lower()

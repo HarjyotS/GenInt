@@ -139,16 +139,19 @@ and the prompt instructs it to reuse an existing definition verbatim before inve
 The extended-mechanics system above is still a fixed, validated vocabulary -- the model composes
 existing effect ops, it never writes code. `--sandbox` is the opposite, opt-in trade-off: the
 model gets a real, isolated per-run copy of `schema/`/`engine/`/`navigation/`/`validation/`/
-`render/` and may read, edit, or run anything in it -- including rewriting the engine itself -- to
-build a mechanic the fixed vocabulary genuinely can't express (an adversarial NPC that chases the
-agent, a custom win/lose condition). This gives up the validator-guaranteed solvability check
-every other run has, and says so plainly: sandbox runs are labeled `"source": "sandbox"` in
-`metrics.json`, carrying both the agent's own self-reported success and an independent outer
-sanity check (re-parses `scene.json` against the real, unmodified schema; confirms `render.png`/
-`replay.gif` are genuine, non-trivial, *animated* images) side by side. If that outer check fails,
-the same agent gets the concrete failure fed back and a chance to repair its own work in the same
-persistent workspace, up to `--max-repair-attempts` times (default 2) -- the harness keeps
-deciding pass/fail, the model just gets more chances against the same real check.
+`render/`/`assets/` and may read, edit, or run anything in it -- including rewriting the engine
+itself -- to build a mechanic the fixed vocabulary genuinely can't express (an adversarial NPC
+that chases the agent, a custom win/lose condition). This gives up the validator-guaranteed
+solvability check every other run has, and says so plainly: sandbox runs are labeled `"source":
+"sandbox"` in `metrics.json`, carrying both the agent's own self-reported success and an
+independent outer sanity check (re-parses `scene.json` against the real, unmodified schema;
+confirms `render.png`/`replay.gif` are genuine, non-trivial, *animated* images) side by side. If
+that outer check fails, the same agent gets the concrete failure fed back and a chance to repair
+its own work in the same persistent workspace, up to `--max-repair-attempts` times (default 2) --
+the harness keeps deciding pass/fail, the model just gets more chances against the same real
+check. `--assets {local,generated,auto}` applies to sandbox runs the same as any other -- the
+agent's reference `run_scene.py` resolves real sprites via the copied `assets/resolver.py` before
+rendering.
 
 ```bash
 python -m infinienv generate --sandbox --seed 2 --out runs/chase_demo --prompt \
