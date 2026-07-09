@@ -76,9 +76,17 @@ def _cmd_generate_sandbox(args: argparse.Namespace) -> int:
     )
     print()
 
+    def on_stage(msg: str) -> None:
+        print(f"[sandbox] {msg}")
+
     result = run_sandbox_generation(
-        args.prompt, args.seed, args.out, max_repair_attempts=args.max_repair_attempts
+        args.prompt,
+        args.seed,
+        args.out,
+        max_repair_attempts=args.max_repair_attempts,
+        on_stage=on_stage,
     )
+    print()
     if result["repair_attempts"]:
         print(f"Repaired over {result['repair_attempts']} additional attempt(s) after the first.")
         print()

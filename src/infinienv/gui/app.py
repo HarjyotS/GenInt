@@ -74,6 +74,51 @@ def _run_job(
         job.done = True
 
 
+def _run_sandbox_job(
+    job: Job,
+    *,
+    prompt: str,
+    seed: int,
+    out_dir: str,
+    max_repair_attempts: int | None,
+) -> None:
+    from infinienv.sandbox.runner import run_sandbox_generation
+
+    def on_stage(msg: str) -> None:
+        job.events.put({"type": "stage", "message": msg})
+
+    try:
+        result = run_sandbox_generation(
+            prompt,
+            seed,
+            out_dir,
+            max_repair_attempts=max_repair_attempts,
+            on_stage=on_stage,
+        )
+        # No SceneSpec/validation-errors payload here (unlike the non-sandbox path): a
+        # sandbox scene.json is only checked for basic schema well-formedness, not
+        # re-validated/re-solved by this process -- see outer_sanity_* in metrics below.
+        job.events.put(
+            {
+                "type": "done",
+                "success": result["success"],
+                "metrics": result["metrics"],
+                "out_dir": os.path.relpath(out_dir, os.getcwd()),
+                "sandbox": True,
+                "agent_summary": result["agent_summary"],
+                "run_error": result["run_error"],
+                "repair_attempts": result["repair_attempts"],
+                "workspace_dir": os.path.relpath(result["workspace_dir"], os.getcwd()),
+            }
+        )
+    except ProviderError as exc:
+        job.events.put({"type": "error", "message": str(exc)})
+    except Exception as exc:  # a GUI must never crash the server on a bad run; surface it instead
+        job.events.put({"type": "error", "message": f"unexpected error: {exc}"})
+    finally:
+        job.done = True
+
+
 def create_app():
     from flask import Flask, Response, abort, jsonify, render_template, request, send_from_directory
 
@@ -90,20 +135,11 @@ def create_app():
         if not prompt:
             return jsonify({"error": "prompt is required"}), 400
 
-        provider_name = data.get("provider") or "mock"
-        if provider_name not in PROVIDER_NAMES:
-            return jsonify({"error": f"unknown provider {provider_name!r}"}), 400
-
         try:
             seed = int(data.get("seed") or 42)
         except (TypeError, ValueError):
             return jsonify({"error": "seed must be an integer"}), 400
 
-        assets_mode = data.get("assets") or "none"
-        if assets_mode not in ("none", "local", "generated", "auto"):
-            return jsonify({"error": f"unknown assets mode {assets_mode!r}"}), 400
-
-        no_fallback = bool(data.get("no_fallback"))
         raw_repair = data.get("max_repair_attempts")
         max_repair_attempts = None
         if raw_repair not in (None, ""):
@@ -113,26 +149,52 @@ def create_app():
                 return jsonify({"error": "max_repair_attempts must be an integer"}), 400
 
         out_dir = (data.get("out") or "").strip() or f"runs/gui_{int(time.time())}"
+        sandbox = bool(data.get("sandbox"))
 
         job = Job()
         job_id = uuid.uuid4().hex
         with _jobs_lock:
             _jobs[job_id] = job
 
-        thread = threading.Thread(
-            target=_run_job,
-            kwargs=dict(
-                job=job,
-                provider_name=provider_name,
-                prompt=prompt,
-                seed=seed,
-                out_dir=out_dir,
-                max_repair_attempts=max_repair_attempts,
-                allow_fallback=not no_fallback,
-                assets_mode=assets_mode,
-            ),
-            daemon=True,
-        )
+        if sandbox:
+            # --sandbox ignores provider/assets/no_fallback -- same as the CLI (see CLAUDE.md
+            # section 11) -- so those fields are neither read nor validated here.
+            thread = threading.Thread(
+                target=_run_sandbox_job,
+                kwargs=dict(
+                    job=job,
+                    prompt=prompt,
+                    seed=seed,
+                    out_dir=out_dir,
+                    max_repair_attempts=max_repair_attempts,
+                ),
+                daemon=True,
+            )
+        else:
+            provider_name = data.get("provider") or "mock"
+            if provider_name not in PROVIDER_NAMES:
+                return jsonify({"error": f"unknown provider {provider_name!r}"}), 400
+
+            assets_mode = data.get("assets") or "none"
+            if assets_mode not in ("none", "local", "generated", "auto"):
+                return jsonify({"error": f"unknown assets mode {assets_mode!r}"}), 400
+
+            no_fallback = bool(data.get("no_fallback"))
+
+            thread = threading.Thread(
+                target=_run_job,
+                kwargs=dict(
+                    job=job,
+                    provider_name=provider_name,
+                    prompt=prompt,
+                    seed=seed,
+                    out_dir=out_dir,
+                    max_repair_attempts=max_repair_attempts,
+                    allow_fallback=not no_fallback,
+                    assets_mode=assets_mode,
+                ),
+                daemon=True,
+            )
         thread.start()
         return jsonify({"job_id": job_id}), 202
 
@@ -184,16 +246,20 @@ def create_app():
                 continue
             metrics_path = os.path.join(run_path, "metrics.json")
             success = None
+            sandbox = False
             if os.path.isfile(metrics_path):
                 try:
                     with open(metrics_path) as f:
-                        success = json.load(f).get("success")
+                        run_metrics = json.load(f)
+                    success = run_metrics.get("success")
+                    sandbox = run_metrics.get("source") == "sandbox"
                 except (OSError, json.JSONDecodeError):
                     pass
             entries.append(
                 {
                     "name": name,
                     "success": success,
+                    "sandbox": sandbox,
                     "render_url": f"/artifact/runs/{name}/render.png"
                     if os.path.isfile(os.path.join(run_path, "render.png"))
                     else None,

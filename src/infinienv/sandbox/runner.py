@@ -16,6 +16,7 @@ import asyncio
 import json
 import os
 from importlib import resources
+from typing import Callable
 
 from infinienv.llm.base import ProviderError
 from infinienv.sandbox.workspace import (
@@ -52,8 +53,19 @@ def _repair_message(*, run_error: str | None, sanity_error: str | None) -> str:
 
 
 async def _run_async(
-    prompt: str, seed: int, out_dir: str, *, model: str, max_turns: int, max_repair_attempts: int
+    prompt: str,
+    seed: int,
+    out_dir: str,
+    *,
+    model: str,
+    max_turns: int,
+    max_repair_attempts: int,
+    on_stage: Callable[[str], None] | None = None,
 ) -> dict:
+    def stage(msg: str) -> None:
+        if on_stage is not None:
+            on_stage(msg)
+
     try:
         from agents import Runner
         from agents.run import RunConfig
@@ -66,6 +78,7 @@ async def _run_async(
             "Install it with `pip install infinienv[openai]`."
         ) from exc
 
+    stage("Preparing isolated sandbox workspace (copy of schema/engine/navigation/validation/render)...")
     workspace_dir = build_workspace_dir(out_dir)
 
     client = UnixLocalSandboxClient()
@@ -94,6 +107,11 @@ async def _run_async(
 
     try:
         for attempt in range(max_repair_attempts + 1):
+            stage(
+                f"Running sandbox agent (attempt {attempt + 1}/{max_repair_attempts + 1})..."
+                if attempt == 0
+                else f"Repairing against the outer sanity check (attempt {attempt + 1}/{max_repair_attempts + 1})..."
+            )
             try:
                 result = await Runner.run(agent, message, run_config=run_config, max_turns=max_turns)
                 agent_summary = result.final_output
@@ -142,9 +160,12 @@ async def _run_async(
             )
 
             if run_error is None and sane and not missing:
+                stage(f"Attempt {attempt + 1} passed the outer sanity check.")
                 break
             if attempt >= max_repair_attempts:
+                stage(f"Attempt {attempt + 1} failed and the repair budget is exhausted: {sanity_error}")
                 break
+            stage(f"Attempt {attempt + 1} failed an outer check, repairing: {sanity_error}")
             message = _repair_message(run_error=run_error, sanity_error=sanity_error)
     finally:
         await session.aclose()
@@ -198,15 +219,26 @@ def run_sandbox_generation(
     model: str | None = None,
     max_turns: int = 40,
     max_repair_attempts: int | None = None,
+    on_stage: Callable[[str], None] | None = None,
 ) -> dict:
     """Sync entrypoint: run a sandboxed generation end to end, repairing via the same agent
     against the real outer sanity check until it passes or the repair budget runs out. See
-    module docstring.
+    module docstring. `on_stage`, if given, is called with a short progress message at each
+    attempt boundary -- mirrors `evaluation.runner.run_generation`'s `on_stage` so the CLI and
+    GUI can show live progress the same way for both paths.
     """
     model = model or os.environ.get("INFINIENV_SANDBOX_MODEL", DEFAULT_SANDBOX_MODEL)
     attempts = (
         DEFAULT_SANDBOX_MAX_REPAIR_ATTEMPTS if max_repair_attempts is None else max_repair_attempts
     )
     return asyncio.run(
-        _run_async(prompt, seed, out_dir, model=model, max_turns=max_turns, max_repair_attempts=attempts)
+        _run_async(
+            prompt,
+            seed,
+            out_dir,
+            model=model,
+            max_turns=max_turns,
+            max_repair_attempts=attempts,
+            on_stage=on_stage,
+        )
     )

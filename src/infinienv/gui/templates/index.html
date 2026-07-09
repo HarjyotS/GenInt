@@ -71,7 +71,20 @@
   .run-item .name { font-size: 11px; padding: 5px 6px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .run-item .name.ok::before { content: "\2713 "; color: var(--ok); }
   .run-item .name.bad::before { content: "\2717 "; color: var(--err); }
+  .run-item .name.sandbox::after { content: " \1F9EA"; }
   .empty { color: var(--muted); font-size: 13px; }
+  fieldset { border: none; padding: 0; margin: 0; }
+  fieldset:disabled { opacity: .4; }
+  .sandbox-note {
+    font-size: 12px; color: var(--muted); margin-top: 16px; padding: 10px 12px;
+    border: 1px solid var(--border); border-radius: 8px; display: none;
+  }
+  .sandbox-note.visible { display: block; }
+  .badge {
+    display: inline-block; font-size: 11px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .03em; padding: 2px 8px; border-radius: 999px; margin-left: 8px;
+    background: rgba(59,91,253,.15); color: var(--accent); vertical-align: middle;
+  }
 </style>
 </head>
 <body>
@@ -86,13 +99,44 @@
     <label for="prompt">Prompt</label>
     <textarea id="prompt" placeholder="Create a museum heist where the agent must find a key, unlock a security door, crack a safe with a stethoscope, and deliver the jewel to the exit."></textarea>
 
-    <label for="provider">Provider</label>
-    <select id="provider">
-      {% for p in providers %}
-      <option value="{{ p }}" {% if p == "mock" %}selected{% endif %}>{{ p }}</option>
-      {% endfor %}
-    </select>
-    <div class="hint">mock needs no API key. openai_agents is the default full runtime.</div>
+    <div class="checkbox-row" style="margin-top:0">
+      <input type="checkbox" id="sandbox">
+      <label for="sandbox">--sandbox (let an isolated agent write and run its own engine code)</label>
+    </div>
+    <div class="sandbox-note" id="sandbox-note">
+      Trades away the validator-guaranteed solvability check every other run has, in exchange for
+      mechanics the fixed vocabulary can't express (see CLAUDE.md section 11). Ignores
+      provider/assets/--no-fallback below. If the first attempt fails an independent outer sanity
+      check, the same agent gets the concrete failure and repairs its own work, up to max repair
+      attempts.
+    </div>
+
+    <fieldset id="non-sandbox-fields">
+      <label for="provider">Provider</label>
+      <select id="provider">
+        {% for p in providers %}
+        <option value="{{ p }}" {% if p == "mock" %}selected{% endif %}>{{ p }}</option>
+        {% endfor %}
+      </select>
+      <div class="hint">mock needs no API key. openai_agents is the default full runtime.</div>
+
+      <div class="row">
+        <div>
+          <label for="assets">Assets</label>
+          <select id="assets">
+            <option value="none" selected>none</option>
+            <option value="local">local</option>
+            <option value="generated">generated</option>
+            <option value="auto">auto</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="checkbox-row">
+        <input type="checkbox" id="no_fallback">
+        <label for="no_fallback">--no-fallback (error instead of silently using the template)</label>
+      </div>
+    </fieldset>
 
     <div class="row">
       <div>
@@ -100,26 +144,13 @@
         <input type="number" id="seed" value="42">
       </div>
       <div>
-        <label for="assets">Assets</label>
-        <select id="assets">
-          <option value="none" selected>none</option>
-          <option value="local">local</option>
-          <option value="generated">generated</option>
-          <option value="auto">auto</option>
-        </select>
+        <label for="max_repair_attempts" id="max_repair_label">Max repair attempts</label>
+        <input type="number" id="max_repair_attempts" placeholder="default: 3">
       </div>
     </div>
 
-    <label for="max_repair_attempts">Max repair attempts</label>
-    <input type="number" id="max_repair_attempts" placeholder="default: 3">
-
     <label for="out">Output directory</label>
     <input type="text" id="out" placeholder="auto: runs/gui_&lt;timestamp&gt;">
-
-    <div class="checkbox-row">
-      <input type="checkbox" id="no_fallback">
-      <label for="no_fallback">--no-fallback (error instead of silently using the template)</label>
-    </div>
 
     <button id="generate">Generate</button>
 
@@ -137,6 +168,10 @@
       <figure><img id="replay-img" alt="replay.gif"><figcaption>replay.gif</figcaption></figure>
     </div>
     <table class="metrics" id="metrics-table" style="display:none"></table>
+    <details id="summary-details" style="display:none">
+      <summary>Sandbox agent summary</summary>
+      <pre class="scene" id="agent-summary"></pre>
+    </details>
     <details id="scene-details" style="display:none">
       <summary>scene.json</summary>
       <pre class="scene" id="scene-json"></pre>
@@ -148,7 +183,19 @@
 const $ = (id) => document.getElementById(id);
 const logEl = $('log'), bannerEl = $('banner'), mediaEl = $('media');
 const metricsEl = $('metrics-table'), sceneDetails = $('scene-details'), sceneJson = $('scene-json');
+const summaryDetails = $('summary-details'), agentSummaryEl = $('agent-summary');
 const genBtn = $('generate');
+const sandboxCheckbox = $('sandbox'), nonSandboxFields = $('non-sandbox-fields');
+const sandboxNote = $('sandbox-note'), maxRepairLabel = $('max_repair_label');
+
+function syncSandboxUi() {
+  const on = sandboxCheckbox.checked;
+  nonSandboxFields.disabled = on;
+  sandboxNote.classList.toggle('visible', on);
+  maxRepairLabel.textContent = on ? 'Max repair attempts (sandbox, default 2)' : 'Max repair attempts';
+}
+sandboxCheckbox.addEventListener('change', syncSandboxUi);
+syncSandboxUi();
 
 function logLine(text) {
   const div = document.createElement('div');
@@ -164,6 +211,7 @@ function resetLog() {
   mediaEl.style.display = 'none';
   metricsEl.style.display = 'none';
   sceneDetails.style.display = 'none';
+  summaryDetails.style.display = 'none';
 }
 
 async function loadRuns() {
@@ -175,7 +223,8 @@ async function loadRuns() {
   for (const run of data.runs) {
     const item = document.createElement('div');
     item.className = 'run-item';
-    const statusClass = run.success === true ? 'ok' : run.success === false ? 'bad' : '';
+    let statusClass = run.success === true ? 'ok' : run.success === false ? 'bad' : '';
+    if (run.sandbox) statusClass += ' sandbox';
     item.innerHTML = `
       <img src="${run.render_url || ''}" onerror="this.style.opacity=0.2" alt="${run.name}">
       <div class="name ${statusClass}">${run.name}</div>`;
@@ -186,7 +235,7 @@ async function loadRuns() {
 
 function showRun(run) {
   resetLog();
-  logLine(`Showing existing run: ${run.name}`);
+  logLine(`Showing existing run: ${run.name}${run.sandbox ? ' (sandbox)' : ''}`);
   if (run.render_url || run.replay_url) {
     mediaEl.style.display = 'grid';
     $('render-img').src = run.render_url || '';
@@ -202,8 +251,10 @@ $('generate').addEventListener('click', async () => {
   genBtn.disabled = true;
   logLine('Submitting job...');
 
+  const sandbox = sandboxCheckbox.checked;
   const payload = {
     prompt,
+    sandbox,
     provider: $('provider').value,
     seed: $('seed').value,
     assets: $('assets').value,
@@ -231,20 +282,38 @@ $('generate').addEventListener('click', async () => {
   });
   source.addEventListener('done', (ev) => {
     const data = JSON.parse(ev.data);
+    const badge = data.sandbox ? '<span class="badge">sandbox</span>' : '';
     bannerEl.className = 'banner ' + (data.success ? 'success' : 'fail');
-    bannerEl.textContent = data.success ? 'SUCCESS' : 'FAILED (see report.md / errors above)';
+    bannerEl.innerHTML = (data.success ? 'SUCCESS' : 'FAILED (see metrics below)') + badge;
     if (data.validation_errors && data.validation_errors.length) {
       for (const err of data.validation_errors) logLine(`  [${err.code}] ${err.message}`);
+    }
+    if (data.sandbox) {
+      logLine(`Sandbox verdicts -- self-reported: ${data.metrics.sandbox_self_reported_success}, ` +
+        `outer sanity check: ${data.metrics.outer_sanity_passed}` +
+        (data.metrics.outer_sanity_error ? ` (${data.metrics.outer_sanity_error})` : ''));
+      if (data.repair_attempts) logLine(`Repaired over ${data.repair_attempts} additional attempt(s).`);
+      if (data.run_error) logLine(`Agent run did not finish cleanly: ${data.run_error}`);
     }
     mediaEl.style.display = 'grid';
     $('render-img').src = '/artifact/' + data.out_dir + '/render.png?t=' + Date.now();
     $('replay-img').src = '/artifact/' + data.out_dir + '/replay.gif?t=' + Date.now();
     metricsEl.style.display = 'table';
     metricsEl.innerHTML = Object.entries(data.metrics).map(
-      ([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`
+      ([k, v]) => `<tr><td>${k}</td><td>${typeof v === 'object' ? JSON.stringify(v) : v}</td></tr>`
     ).join('');
-    sceneDetails.style.display = 'block';
-    sceneJson.textContent = JSON.stringify(data.scene, null, 2);
+    if (data.sandbox) {
+      summaryDetails.style.display = data.agent_summary ? 'block' : 'none';
+      agentSummaryEl.textContent = data.agent_summary || '';
+      sceneDetails.style.display = 'block';
+      sceneJson.textContent = 'loading...';
+      fetch('/artifact/' + data.out_dir + '/scene.json?t=' + Date.now())
+        .then((r) => r.json()).then((scene) => { sceneJson.textContent = JSON.stringify(scene, null, 2); })
+        .catch(() => { sceneJson.textContent = '(could not load scene.json)'; });
+    } else {
+      sceneDetails.style.display = 'block';
+      sceneJson.textContent = JSON.stringify(data.scene, null, 2);
+    }
     source.close();
     genBtn.disabled = false;
     loadRuns();

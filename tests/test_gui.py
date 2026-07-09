@@ -84,3 +84,63 @@ def test_runs_listing_reflects_completed_run(client):
     runs = client.get("/api/runs").get_json()["runs"]
     assert len(runs) >= 1
     assert runs[0]["success"] is True
+
+
+def _fake_run_sandbox_generation(prompt, seed, out_dir, *, max_repair_attempts=None, on_stage=None, **_):
+    import os
+
+    if on_stage is not None:
+        on_stage("Running sandbox agent (attempt 1/1)...")
+        on_stage("Attempt 1 passed the outer sanity check.")
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, "scene.json"), "w") as f:
+        json.dump({"version": "0.1", "metadata": {"name": "fake"}}, f)
+    metrics = {
+        "source": "sandbox",
+        "success": True,
+        "sandbox_self_reported_success": True,
+        "outer_sanity_passed": True,
+        "outer_sanity_error": None,
+        "missing_artifacts": [],
+        "repair_attempts": 0,
+    }
+    with open(os.path.join(out_dir, "metrics.json"), "w") as f:
+        json.dump(metrics, f)
+    with open(os.path.join(out_dir, "render.png"), "wb") as f:
+        f.write(b"\x89PNG-fake")
+    with open(os.path.join(out_dir, "replay.gif"), "wb") as f:
+        f.write(b"GIF89a-fake")
+    return {
+        "success": True,
+        "agent_summary": "built a fake sandbox scene",
+        "run_error": None,
+        "artifact_paths": {},
+        "workspace_dir": os.path.join(out_dir, "sandbox_workspace"),
+        "metrics": metrics,
+        "repair_attempts": 0,
+    }
+
+
+def test_sandbox_generate_flow_streams_stage_and_done_events(client, monkeypatch):
+    import infinienv.sandbox.runner as sandbox_runner
+
+    monkeypatch.setattr(sandbox_runner, "run_sandbox_generation", _fake_run_sandbox_generation)
+
+    res = client.post("/api/generate", json={"prompt": "a chase task", "sandbox": True, "seed": 3})
+    assert res.status_code == 202
+    job_id = res.get_json()["job_id"]
+
+    events = _consume_sse(client.get(f"/api/stream/{job_id}"))
+    stage_events = [e for e in events if e["type"] == "stage"]
+    done_events = [e for e in events if e["type"] == "done"]
+    assert len(stage_events) == 2
+    assert len(done_events) == 1
+    done = done_events[0]
+    assert done["success"] is True
+    assert done["sandbox"] is True
+    assert done["agent_summary"] == "built a fake sandbox scene"
+    assert done["metrics"]["outer_sanity_passed"] is True
+    assert "scene" not in done  # sandbox path doesn't re-validate/re-parse a SceneSpec itself
+
+    runs = client.get("/api/runs").get_json()["runs"]
+    assert any(r["sandbox"] is True for r in runs)

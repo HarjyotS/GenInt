@@ -718,7 +718,16 @@ Every `generate` writes stage-by-stage progress to stdout (`[n/total] ...`) endi
 terminal, not just for a human who already knows what happened. `gui` is a thin Flask frontend on
 the exact same `run_generation` pipeline, streaming that same stage-by-stage progress live over
 SSE instead of stdout — see `gui/app.py`. It requires `pip install infinienv[gui]`; nothing else
-in the project depends on `flask`.
+in the project depends on `flask`. The GUI also has a `--sandbox` toggle that calls
+`sandbox/runner.py::run_sandbox_generation` the same way the CLI does (not a second
+implementation) — checking it disables the provider/assets/`--no-fallback` fields (ignored by
+sandbox mode, same as the CLI), streams the same per-attempt `on_stage` progress messages
+(`sandbox/runner.py`'s repair loop now takes an `on_stage` callback mirroring
+`evaluation/runner.py`'s), and renders results distinctly: both verdicts side by side
+(`sandbox_self_reported_success`/`outer_sanity_passed`), the agent's own summary text, and a
+"sandbox" badge on both the live result banner and that run's entry in the recent-runs gallery —
+so a reviewer browsing past runs in the GUI can never mistake a sandbox result for a
+validator-guaranteed one, the same requirement the CLI output already met.
 
 Artifacts written per successful `generate` run:
 
