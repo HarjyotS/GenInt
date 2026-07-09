@@ -161,10 +161,12 @@ def outer_sanity_check(out_dir: str) -> tuple[bool, str | None]:
     This is deliberately NOT a solvability check -- that guarantee doesn't survive sandbox
     mode, and pretending otherwise would misrepresent the trade-off. It's a floor against a
     completely malformed or missing result being reported as a success: confirms scene.json
-    at least parses against the real schema, and that render.png/replay.gif are actually
-    valid, non-trivial image files rather than a truncated/empty write the sandbox never
-    verified itself (a real failure mode observed live -- see notes.md: a sandbox run once
-    self-reported success with a 43-byte, effectively-empty replay.gif).
+    at least parses against the real schema, that render.png/replay.gif are actually valid,
+    non-trivial image files rather than a truncated/empty write the sandbox never verified
+    itself, and that replay.gif is a genuine multi-frame animation rather than a single static
+    frame -- both real failure modes observed live (see notes.md): a sandbox run once
+    self-reported success with a 43-byte, effectively-empty replay.gif, and a later run
+    self-reported success with a technically-valid but single-frame (non-animated) replay.gif.
     """
     from PIL import Image
 
@@ -190,5 +192,19 @@ def outer_sanity_check(out_dir: str) -> tuple[bool, str | None]:
                 img.verify()
         except Exception as exc:
             return False, f"sandbox's {name} is not a valid image: {exc}"
+
+    # img.verify() above leaves the image object unusable for anything further, so re-open
+    # replay.gif fresh to check it's an actual multi-frame animation -- a real failure mode
+    # observed live: a technically-valid, correctly-sized GIF that was just one static frame,
+    # which passes every check above but shows nothing happening (same shape of bug as the
+    # truncated-GIF case this function already guards against -- see notes.md).
+    gif_path = os.path.join(out_dir, "replay.gif")
+    try:
+        with Image.open(gif_path) as gif:
+            n_frames = getattr(gif, "n_frames", 1)
+    except Exception as exc:
+        return False, f"sandbox's replay.gif could not be re-opened to check frame count: {exc}"
+    if n_frames < 2:
+        return False, f"sandbox's replay.gif has only {n_frames} frame(s) -- not an animated replay"
 
     return True, None

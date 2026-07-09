@@ -211,3 +211,21 @@ def test_outer_sanity_check_fails_when_render_png_missing(tmp_path):
     ok, error = outer_sanity_check(str(out_dir))
     assert ok is False
     assert "render.png" in error
+
+
+def test_outer_sanity_check_fails_for_single_frame_replay_gif(tmp_path):
+    # Regression test: a real sandbox run once self-reported success with a replay.gif that
+    # was a technically-valid, correctly-sized image -- but only one static frame, showing
+    # nothing happening. See notes.md.
+    out_dir = tmp_path / "run"
+    out_dir.mkdir()
+    _write_valid_scene(out_dir)
+    from PIL import Image
+
+    Image.new("RGB", (64, 64), (255, 0, 0)).save(out_dir / "render.png")
+    Image.new("RGB", (64, 64), (255, 0, 0)).save(out_dir / "replay.gif")  # single frame, no animation
+
+    ok, error = outer_sanity_check(str(out_dir))
+    assert ok is False
+    assert "replay.gif" in error
+    assert "frame" in error

@@ -550,3 +550,70 @@ CLAUDE.md sections 1, 2, 11 (new), and 17 were all updated to state the sandbox 
 rather than let the document's existing "declined" language go stale and misleading. See CLAUDE.md
 section 11 for the full design writeup (isolation boundary, what the outer sanity check does and
 doesn't verify, explicit scope exclusions for this pass).
+
+## Sandbox agents, round two: from "one shot, report failure" to self-repair
+
+After the first sandbox-agents pass shipped, live-tested it against five prompts specifically
+designed to stress `pymunk` physics (steering-force pursuit, momentum/pushable objects,
+projectile arcs, collision ricochet, multi-body herding). The very first one reproduced the exact
+failure mode already documented above: the agent invented its own pixel/world-coordinate scene
+format (`world.walls`, `agent_start`, `mechanics.robot_force`) instead of the real `SceneSpec`,
+correctly rejected by the outer sanity check. The user's response was direct: "it just shouldn't
+fail, it should edit everything so it works, any prompt should create a working game."
+
+This is not a request to loosen the outer check -- it's a request that a single failed attempt
+not be the end of the story. The non-sandbox path already has exactly this shape of answer
+(`generation/compiler.py`'s repair loop: generate, validate, and if invalid, hand the concrete
+errors back to a RepairAgent, up to a budget). Built the same pattern for sandbox mode:
+`sandbox/runner.py`'s `_run_async` now loops up to `max_repair_attempts + 1` times (default 2
+extra, so 3 total; `INFINIENV_SANDBOX_MAX_REPAIR_ATTEMPTS` env override, `--max-repair-attempts`
+CLI flag now applies to sandbox mode too instead of being ignored). Each iteration: run the agent,
+extract artifacts, sync the workspace, run `outer_sanity_check`; if it fails and budget remains,
+build a message describing exactly what failed (`_repair_message`) and start a fresh `Runner.run`
+call. The sandbox *session* (filesystem) is the same object across attempts, so even though each
+`Runner.run` call is a fresh conversation with no memory of the last attempt, the agent's actual
+files are still on disk -- the repair prompt tells it to `ls`/`cat` and fix rather than starting
+from zero. Every attempt is recorded in a new `repair_history` list in `metrics.json`, mirroring
+`repair_history` in the non-sandbox path's `validation.json`.
+
+Also tightened `sandbox_agent.md` itself, since the format-invention failure was partly a
+prompting gap: it now explicitly says `scene.json` must load through the copied
+`schema/scene_schema.py` (grid-based `x`/`y`, not pixels), that only the *static* layout needs to
+be in that format (continuous physics state can live in the agent's own code, not in scene.json),
+and tells the agent to actually run a self-check against the schema before declaring done. Re-run
+after this prompt fix alone, the same prompt succeeded on the first attempt -- the repair loop's
+control-flow correctness was verified separately via three mocked tests
+(`tests/test_sandbox_runner.py`, fake `Runner.run`/session objects using the exact call shapes
+already proven live in the first sandbox-agents pass) rather than by deliberately trying to induce
+a live failure just to watch the retry fire, since that would burn real API budget for something
+the mocks already cover deterministically.
+
+### A second real "technically valid but not what it claims" bug, found from a user bug report
+
+While reviewing a `SUCCESS`-labeled run's `replay.gif`, the user reported "the physics chase gif
+is just blank." Not blank -- `PIL.Image.open(...).n_frames` was `1`. The file was a genuine,
+correctly-sized, loadable PNG-in-GIF-clothing: it passed every check `outer_sanity_check` had
+(exists, over the size floor, `Image.verify()` succeeds), because none of those checks ever looked
+at frame count. This is the same *shape* of bug as the 43-byte truncated-GIF case from the first
+pass (an artifact that satisfies "is a valid file" while failing "is what this file is supposed to
+mean"), just a different specific gap. Fixed by re-opening `replay.gif` after the existing
+per-file checks (can't reuse the same `Image` object post-`verify()`) and requiring
+`n_frames >= 2`, with a regression test (`test_outer_sanity_check_fails_for_single_frame_replay_gif`)
+and a `sandbox_agent.md` clarification that `replay.gif` must be a genuine multi-frame animation,
+not just a valid image file.
+
+Re-ran the original failing prompt (robot-chase-with-real-physics) after both fixes: succeeded on
+the first attempt, with a genuine 56-frame `replay.gif`. Didn't just trust `success: true` --
+extracted and visually inspected the first and last frames directly, confirming the blue agent
+moves from spawn across the maze to the green exit while the red robot NPC trails behind on a
+visible path line. This is the standard this project holds itself to for every non-trivial claim
+of correctness (see the very first live-verification entries in this file): the artifact itself,
+not the self-report about the artifact, is the thing that gets checked.
+
+### Net effect
+
+Neither fix loosens what `outer_sanity_check` guarantees -- if anything both fixes make it catch
+more real failure classes than before (truncated file, now also non-animated file), and the
+repair loop still requires that check to genuinely pass, it just gives the same agent more
+chances against the same real bar. `success: true` in a sandbox run's `metrics.json` is a
+strictly stronger claim after this round than before it, not a weaker one.

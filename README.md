@@ -145,7 +145,10 @@ agent, a custom win/lose condition). This gives up the validator-guaranteed solv
 every other run has, and says so plainly: sandbox runs are labeled `"source": "sandbox"` in
 `metrics.json`, carrying both the agent's own self-reported success and an independent outer
 sanity check (re-parses `scene.json` against the real, unmodified schema; confirms `render.png`/
-`replay.gif` are genuine, non-trivial images) side by side.
+`replay.gif` are genuine, non-trivial, *animated* images) side by side. If that outer check fails,
+the same agent gets the concrete failure fed back and a chance to repair its own work in the same
+persistent workspace, up to `--max-repair-attempts` times (default 2) -- the harness keeps
+deciding pass/fail, the model just gets more chances against the same real check.
 
 ```bash
 python -m infinienv generate --sandbox --seed 2 --out runs/chase_demo --prompt \

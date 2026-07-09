@@ -583,17 +583,38 @@ verification (see below).
   this process instead imported the sandbox's edited code afterward, the sandbox boundary would be
   theater — isolation only means something if untrusted code never runs outside it.
 - **An outer sanity check re-parses the sandbox's `scene.json` against the real, unmodified
-  schema**, and confirms `render.png`/`replay.gif` are genuine, non-trivial, loadable images
-  (`outer_sanity_check`). This is explicitly **not** a solvability guarantee — it can't be, that's
-  the nature of the trade-off — just a floor against a malformed or fabricated success being
-  reported. It exists because live verification found a real case of exactly that: a sandbox run
-  self-reported `"success": true` with a 43-byte, header-only `replay.gif` it never actually
-  checked itself.
+  schema**, and confirms `render.png`/`replay.gif` are genuine, non-trivial, loadable images, and
+  that `replay.gif` is an actual multi-frame animation (`outer_sanity_check`). This is explicitly
+  **not** a solvability guarantee — it can't be, that's the nature of the trade-off — just a floor
+  against a malformed or fabricated success being reported. It exists because live verification
+  found two real cases of exactly that: a sandbox run that self-reported `"success": true` with a
+  43-byte, header-only `replay.gif` it never actually checked itself, and later a run that
+  self-reported success with a technically-valid, correctly-sized `replay.gif` that was just one
+  static frame — a real image file, but not a replay of anything happening. Both are now caught
+  before `success` can be `true`.
 - **An agent conversation that doesn't finish cleanly (e.g. hits its turn budget) still gets a
   full, honest report.** `sandbox/runner.py` captures that failure as `run_error` rather than
   letting it propagate past artifact extraction, workspace sync, and the sanity check — whatever
-  the agent produced up to that point is still extracted, sanity-checked, and recorded, and
-  `run_error` is folded into a failed outer verdict instead of being reported as a bare crash.
+  the agent produced up to that point is still extracted, sanity-checked, and recorded as one
+  attempt in the repair loop below, instead of being reported as a bare crash.
+
+### Self-repair against the outer sanity check
+
+A single agent attempt failing the outer sanity check isn't the end of the run. `sandbox/runner.py`
+mirrors `generation/compiler.py`'s repair loop for the non-sandbox path: if the outer check fails,
+the concrete failure (the real pydantic error, the missing-frame message, whatever it was) is fed
+back to the *same* agent as a new message, and it gets another attempt — up to
+`--max-repair-attempts` times (default 2, so 3 attempts total; `INFINIENV_SANDBOX_MAX_REPAIR_ATTEMPTS`
+env override). The sandbox *filesystem* persists across attempts (same session, same
+`hydrate_workspace` call from the start of the run) even though each attempt is a fresh agent
+conversation with no memory of the previous one — the repair prompt tells the agent its prior
+files are still on disk and to inspect (`ls`/`cat`) and fix them rather than starting over. Every
+attempt is recorded in `metrics.json`'s `repair_history` (mirroring the non-sandbox path's
+`repair_history` in `validation.json`) so a reviewer can see exactly what failed and what changed
+between attempts, not just the final verdict. This does not weaken the outer sanity check or make
+its failure less real — it's still the harness deciding pass/fail, not the model; the model simply
+gets more chances against the same real check, the same way the non-sandbox path gets more chances
+against the same real validator.
 
 ### What a run's `metrics.json` looks like
 
@@ -606,7 +627,8 @@ disagreed:
   "source": "sandbox", "provider": "openai_agents_sandbox", "seed": 2,
   "success": true, "sandbox_self_reported_success": true,
   "outer_sanity_passed": true, "outer_sanity_error": null,
-  "missing_artifacts": []
+  "missing_artifacts": [], "repair_attempts": 0,
+  "repair_history": [{"attempt": 0, "run_error": null, "outer_sanity_passed": true, "outer_sanity_error": null, "missing_artifacts": []}]
 }
 ```
 
@@ -629,14 +651,34 @@ confirmed to be a genuine render from this project's real renderer. An earlier r
 turn budget and prompt were tuned) demonstrated the failure path instead: the agent invented its
 own incompatible scene format, which the outer sanity check correctly rejected.
 
+Separately, five prompts targeting distinct `pymunk` physics behaviors (steering-force pursuit,
+momentum/pushable objects, projectile arcs, collision ricochet, multi-body herding) were run live
+to stress the physics side specifically. The first attempt at the pursuit prompt reproduced the
+exact "invents its own incompatible scene format" failure mode again (a pixel/world-coordinate
+format with `mechanics.robot_force`, correctly rejected by the outer check) — the sandbox prompt
+was tightened to explicitly require self-validating `scene.json` against the copied schema before
+finishing and to clarify that `scene.json` only needs the *static* layout (continuous physics
+state can live in the agent's own code). Two more real bugs surfaced from there, both fixed and
+covered by regression tests: the `run_error`-swallowing bug described above, and — found from a
+user-reported "the gif is just blank" on an otherwise-`SUCCESS` run — a `replay.gif` that was
+technically a valid, correctly-sized image but only one static frame, which passed every existing
+image check without showing anything happening. `outer_sanity_check` now also requires
+`replay.gif` to have more than one frame. Re-run after both fixes, the same prompt succeeded on
+the first attempt with a genuine 56-frame animated GIF (agent visibly moving across the maze from
+spawn to exit while the robot trails behind) — visually confirmed by extracting and inspecting the
+first and last frames, not just checking `success: true`.
+
 ### Explicitly out of scope for this mode (for now)
 
-Making sandbox mode the default or folding it into the normal repair loop; the `docker`-backed
-sandbox client (Unix-local was the pragmatic first choice); having the outer layer verify
-sandbox-authored mechanics beyond basic well-formedness (not achievable without reintroducing the
-fixed-vocabulary constraint this mode exists to escape); reusing sandbox-authored mechanics across
-runs (no cache/reuse mechanism like `generation/mechanics_cache.py` for this mode — every run
-starts from the same clean workspace copy).
+Making sandbox mode the default; the `docker`-backed sandbox client (Unix-local was the pragmatic
+first choice); having the outer layer verify sandbox-authored mechanics beyond basic
+well-formedness (not achievable without reintroducing the fixed-vocabulary constraint this mode
+exists to escape — the repair loop above strengthens *that* check's pass rate, it doesn't add a
+new kind of check); reusing sandbox-authored mechanics across runs (no cache/reuse mechanism like
+`generation/mechanics_cache.py` for this mode — every run starts from the same clean workspace
+copy); folding sandbox mode into the *non-sandbox* repair loop in `generation/compiler.py` (they
+remain two separate code paths with two different kinds of guarantee, even though each now has its
+own repair loop internally).
 
 ---
 
@@ -647,10 +689,11 @@ python -m infinienv generate --prompt "..." --provider {mock,openai_agents,opena
   --seed 42 --out runs/demo [--max-repair-attempts N] [--no-fallback] \
   [--assets {none,local,generated,auto}]
 
-python -m infinienv generate --sandbox --prompt "..." --seed 42 --out runs/demo
+python -m infinienv generate --sandbox --prompt "..." --seed 42 --out runs/demo [--max-repair-attempts N]
   # opt-in, section 11: model-authored engine code in an isolated per-run workspace copy.
-  # ignores --provider/--assets/--no-fallback/--max-repair-attempts; trades away the
-  # validator-guaranteed solvability check every other run has -- see metrics.json's
+  # ignores --provider/--assets/--no-fallback; --max-repair-attempts here means repair
+  # attempts against the outer sanity check (default 2), not the LLM repair agent; trades
+  # away the validator-guaranteed solvability check every other run has -- see metrics.json's
   # outer_sanity_* fields.
 
 python -m infinienv validate runs/demo/scene.json

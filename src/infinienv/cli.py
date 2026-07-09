@@ -70,11 +70,18 @@ def _cmd_generate_sandbox(args: argparse.Namespace) -> int:
     print(
         "Note: sandbox mode lets the agent write and run its own code in an isolated per-run\n"
         "workspace copy. Unlike every other run, this trades away the validator-guaranteed\n"
-        "solvability check -- see metrics.json's outer_sanity_* fields and CLAUDE.md."
+        "solvability check -- see metrics.json's outer_sanity_* fields and CLAUDE.md. If the\n"
+        "first attempt fails an independent outer check, the same agent gets the concrete\n"
+        "failure and a chance to repair its own work, up to a bounded number of attempts."
     )
     print()
 
-    result = run_sandbox_generation(args.prompt, args.seed, args.out)
+    result = run_sandbox_generation(
+        args.prompt, args.seed, args.out, max_repair_attempts=args.max_repair_attempts
+    )
+    if result["repair_attempts"]:
+        print(f"Repaired over {result['repair_attempts']} additional attempt(s) after the first.")
+        print()
     if result["run_error"]:
         print(f"Sandbox agent run did not finish cleanly: {result['run_error']}")
         print("(partial artifacts, if any, were still extracted and sanity-checked below)")
@@ -259,7 +266,15 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--provider", default="mock", choices=["mock", "openai_agents", "openai_responses", "anthropic"])
     g.add_argument("--seed", type=int, default=42)
     g.add_argument("--out", required=True)
-    g.add_argument("--max-repair-attempts", type=int, default=None, dest="max_repair_attempts")
+    g.add_argument(
+        "--max-repair-attempts",
+        type=int,
+        default=None,
+        dest="max_repair_attempts",
+        help="Non-sandbox: repair attempts against the LLM repair agent (default 3). Sandbox: "
+        "repair attempts where the same sandbox agent gets the concrete outer-sanity-check "
+        "failure and a chance to fix its own work in the same persistent workspace (default 2).",
+    )
     g.add_argument(
         "--no-fallback",
         action="store_true",
@@ -279,8 +294,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Let an isolated sandbox agent write and run its own code (in a per-run copy of "
         "the engine, never the real installation) to implement mechanics beyond the fixed "
-        "vocabulary. Ignores --provider/--assets/--no-fallback/--max-repair-attempts; trades "
-        "away the validator-guaranteed solvability check other runs have. See CLAUDE.md.",
+        "vocabulary, repairing its own work against an outer sanity check up to "
+        "--max-repair-attempts times. Ignores --provider/--assets/--no-fallback; trades away "
+        "the validator-guaranteed solvability check other runs have. See CLAUDE.md.",
     )
     g.set_defaults(func=cmd_generate)
 
