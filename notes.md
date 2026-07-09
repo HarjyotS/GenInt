@@ -434,3 +434,119 @@ test: started the actual server as a background process, hit it with real `curl`
 appear during the real network wait, and the run validated on the first try, rendered correctly,
 and appeared in `/api/runs` afterward). Cleaned up the test run directories and killed the test
 server before finishing.
+
+## Sandbox agents: from "declined twice" to an explicit, disclosed exception
+
+This project declined sandboxed model-authored code execution twice earlier in this session, on
+correctness/determinism grounds (see the extended-mechanics entry above -- the declarative effect
+system was built specifically as the non-code-execution answer to "let the model define real
+behavior"). It came up a third time from a real, concrete gap: a generated museum/friend scene
+had a girl and a boy NPC that were supposed to chase the agent, and did not, because no chasing
+primitive existed anywhere in the engine. My first response was to scope a hand-built pymunk
+chase/catch primitive. Mid-implementation (pymunk added to `pyproject.toml`, a `behavior` field
+partially added to the schema), the user corrected the scope directly: "caught by npc is just one
+case i had in mind, it could be any condition set by a user, i want the sandboxes, update the plan
+to allow sandboxes to code the game from our basis and edit everything too." This wasn't a request
+for a bigger fixed vocabulary -- it was an explicit, informed ask for general model-authored code,
+after having already seen (and accepted) the argument against it twice. I asked one clarifying
+question on the highest-risk ambiguity (does the sandbox edit the real repo or an isolated copy?);
+the answer was "isolated per-run copy," which is what got built. The partial pymunk-schema change
+was cleanly reverted (confirmed via `git diff --stat` showing empty output) before starting the
+new implementation, so nothing from the superseded approach lingered in the codebase.
+
+### API surface: three real quirks only live testing found
+
+`agents.sandbox` ships inside the already-installed `openai-agents` package -- no new dependency
+for the agent-orchestration side (pymunk was still added as a `physics` extra, available *inside*
+the sandbox if a mechanic needs real physics, not as a new hand-built engine primitive). Reading
+the SDK's types suggested a fairly direct API; three things only surfaced by actually running it:
+
+1. **Model requirement.** `gpt-4.1` fails the sandbox's tool schema outright (`Error code: 400 -
+   Invalid value: 'custom'`). `gpt-5.5` works. No amount of reading the `SandboxAgent` signature
+   would have surfaced this -- it's a mismatch between that model's tool-calling format and what
+   the sandbox's tool definitions need.
+2. **Hydration isn't automatic.** `LocalSnapshotSpec(base_path=...)` looks like it should mount a
+   local directory as the sandbox's starting filesystem on `client.create(snapshot=...)`. In the
+   installed SDK version it does not -- `session.start()` leaves the workspace empty
+   (`session.ls('.')` returns `[]`). The actual mechanism is `session.hydrate_workspace(data:
+   io.IOBase)`, which needs an explicitly-built tar of the source directory.
+3. **`session.write()` wants `io.IOBase`, not raw bytes** -- passing `bytes` directly raises
+   `AttributeError: 'bytes' object has no attribute 'read'`.
+
+None of these were guessable from type signatures alone; they were found by writing a minimal
+"write a file, read it back" script and iterating against the real error messages.
+
+### A real bug in the audit trail itself, found by trying to verify the audit trail
+
+The isolation design's stated promise is that the sandbox workspace is kept on disk (in
+`runs/<id>/sandbox_workspace/`) as the audit trail substituting for the solvability guarantee this
+mode gives up. First live run "succeeded" (both self-reported and outer-sanity-passed), and its
+own summary claimed it added `navigation/chase.py`. Trying to actually inspect that file for the
+notes.md writeup, it didn't exist anywhere in the kept workspace -- `grep -rl "chase"` across the
+whole directory came back empty. The reason: `hydrate_workspace()` populates the sandbox backend's
+*own* separate execution filesystem (a fresh temp directory), not the `sandbox_workspace/`
+directory `build_workspace_dir` wrote to disk. The original `extract_artifacts()` only ever pulled
+the five named artifact files back out -- it never synced the sandbox's actual final filesystem
+state anywhere. So the "kept for audit" workspace was silently frozen at its pre-run state the
+entire time, even on a run that genuinely worked. This is exactly the kind of thing this project's
+testing standard exists to catch (live verification over trusting an offline assumption) -- it
+just caught it in the harness's own audit-trail code instead of in application logic.
+
+Fix: `session.persist_workspace()` (the read-side counterpart of `hydrate_workspace()`, returning
+a tar of the sandbox's actual current filesystem) is called after the run and extracted over the
+kept `sandbox_workspace/` directory, replacing the stale pre-run copy with the real final state.
+Added a unit test (`test_sync_full_workspace_replaces_stale_copy_with_agent_edits`) that builds a
+fake "agent final state" tree with an added file and a removed stale directory, and asserts the
+synced-to-disk workspace matches it exactly, not the pre-run copy.
+
+While re-verifying with the fix in place, a second real gap surfaced: a run whose agent
+conversation didn't finish cleanly (hit the 40-turn budget on a more complex prompt) raised a bare
+`ProviderError` that propagated straight past artifact extraction, workspace sync, and the outer
+sanity check/metrics write -- so a run that had produced real partial work got reduced to one
+stderr line at the CLI's top level, with no `metrics.json`, no synced workspace, nothing to
+inspect. Fixed by capturing that failure as `run_error` inside `_run_async` instead of letting it
+propagate: artifact extraction, workspace sync, and the outer sanity check all still run
+regardless, `run_error` is folded into a failed outer verdict (`success` is always `false` if the
+agent run itself failed, even if stray artifacts happen to exist), and the CLI prints it distinctly
+from the agent's own summary rather than crashing past the rest of the report.
+
+### Two live end-to-end runs: one failure mode, one clean success
+
+Same chase/catch-mechanic task family the museum screenshot originally surfaced, run twice:
+
+- **First run**, less directive prompt: the agent self-reported success, but had invented its own
+  incompatible scene format instead of reusing the real `SceneSpec` schema. The outer sanity check
+  correctly rejected it (`scene.json does not parse against the real schema`) -- exactly the
+  failure mode this mode's outer check exists to catch. It also had the 43-byte truncated
+  `replay.gif` described above, which the sanity check did not yet catch at the time (that check
+  was added afterward -- see `outer_sanity_check`'s image-validity block and
+  `test_outer_sanity_check_fails_for_truncated_replay_gif`).
+- **Second run**, prompt made explicit about reusing the existing schema/mechanics extension point
+  and only extending engine logic: the agent produced a real `SceneSpec` (grid/agent/objects/
+  walls/goals, a `sequence` goal for open-door/grab-friend/deliver-friend,
+  `mechanics.custom_object_types` declaring `friend`/`girl_npc`/`boy_npc`), and extended
+  `navigation/policy.py` in place with a `solve_chase_scene` path dispatched off the scene's
+  declared custom object types, plus real chase-stepping (`_npc_step`, greedy Manhattan-distance
+  movement respecting walls/doors/other NPCs) and catch detection. Confirmed by diffing the
+  *synced* workspace against this repo's actual `navigation/policy.py` -- not by trusting the
+  agent's own summary, which is exactly the discipline the first run's audit-trail bug had been
+  masking. `render.png` was inspected directly and is a real, correctly-legended render from this
+  project's actual renderer (agent/key/door/friend/girl_npc/boy_npc/sink/table all present).
+  `metrics.json` showed `sandbox_self_reported_success: true` and `outer_sanity_passed: true` in
+  agreement.
+
+Both runs are evidence for the same conclusion: the sandbox agent is capable of recognizing and
+reusing this project's real, existing extension points (schema, `mechanics.custom_object_types`)
+rather than always reinventing from scratch, but that's a property of how directively it's
+prompted and how much turn budget it has, not a guarantee -- which is exactly why the outer sanity
+check and the honest `run_error`/`sandbox_self_reported_success`/`outer_sanity_passed` fields
+exist as real, independent signals rather than trusting the agent's self-report alone.
+
+### What this does and doesn't change
+
+Every existing guarantee (validator-wins, no-model-code-execution) still holds unconditionally for
+every run that doesn't pass `--sandbox` -- this is additive, not a loosening of the default path.
+CLAUDE.md sections 1, 2, 11 (new), and 17 were all updated to state the sandbox exception plainly
+rather than let the document's existing "declined" language go stale and misleading. See CLAUDE.md
+section 11 for the full design writeup (isolation boundary, what the outer sanity check does and
+doesn't verify, explicit scope exclusions for this pass).

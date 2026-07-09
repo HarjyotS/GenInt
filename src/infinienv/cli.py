@@ -27,6 +27,9 @@ def _load_dotenv() -> None:
 
 
 def cmd_generate(args: argparse.Namespace) -> int:
+    if args.sandbox:
+        return _cmd_generate_sandbox(args)
+
     from infinienv.evaluation.runner import run_generation
 
     provider = get_provider(args.provider)
@@ -56,6 +59,37 @@ def cmd_generate(args: argparse.Namespace) -> int:
     print()
     ok = result.metrics["success"]
     print("Result: SUCCESS" if ok else "Result: FAILED (see report.md)")
+    return 0 if ok else 1
+
+
+def _cmd_generate_sandbox(args: argparse.Namespace) -> int:
+    from infinienv.sandbox.runner import run_sandbox_generation
+
+    print(f"InfiniEnv SANDBOX run: {args.out}")
+    print(f"Prompt: {args.prompt}")
+    print(
+        "Note: sandbox mode lets the agent write and run its own code in an isolated per-run\n"
+        "workspace copy. Unlike every other run, this trades away the validator-guaranteed\n"
+        "solvability check -- see metrics.json's outer_sanity_* fields and CLAUDE.md."
+    )
+    print()
+
+    result = run_sandbox_generation(args.prompt, args.seed, args.out)
+    if result["run_error"]:
+        print(f"Sandbox agent run did not finish cleanly: {result['run_error']}")
+        print("(partial artifacts, if any, were still extracted and sanity-checked below)")
+        print()
+    if result["agent_summary"]:
+        print("Sandbox agent summary:")
+        print(result["agent_summary"])
+        print()
+    print(f"Sandbox workspace kept at: {result['workspace_dir']}")
+    print("Wrote artifacts:")
+    for path in result["artifact_paths"].values():
+        print(f"      - {path}")
+    print()
+    ok = result["success"]
+    print("Result: SUCCESS" if ok else "Result: FAILED (see metrics.json outer_sanity_error)")
     return 0 if ok else 1
 
 
@@ -239,6 +273,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="none: flat colored cells (default). local: checked-in placeholder sprites, no key "
         "needed. generated: OpenAI image generation only, no silent fallback. auto: generated "
         "then local placeholder fallback.",
+    )
+    g.add_argument(
+        "--sandbox",
+        action="store_true",
+        help="Let an isolated sandbox agent write and run its own code (in a per-run copy of "
+        "the engine, never the real installation) to implement mechanics beyond the fixed "
+        "vocabulary. Ignores --provider/--assets/--no-fallback/--max-repair-attempts; trades "
+        "away the validator-guaranteed solvability check other runs have. See CLAUDE.md.",
     )
     g.set_defaults(func=cmd_generate)
 

@@ -32,11 +32,16 @@ apply anymore. The only questions that matter for new work are:
 2. Is the new capability itself deterministic and testable, even if what it *enables* the model
    to express is more open-ended?
 
-If a request would require trading away #1 to get something the user wants (the sandbox-agents
-discussion in `notes.md` is the canonical example — full shell/code execution per scene, even
-sandboxed, breaks the solvability guarantee), say so explicitly and ask before building it, the
-same way section 6's declarative effect system was designed specifically to deliver the
-underlying ask ("let the model define real behavior") *without* that trade-off.
+If a request would require trading away #1 to get something the user wants, say so explicitly and
+ask before building it. Section 5's declarative effect system is the example of resolving that
+tension *without* the trade-off — delivering "let the model define real behavior" through a fixed,
+validated vocabulary. Section 11's sandbox mode is the example of the user making an informed
+call *to* take the trade-off after two earlier rounds of exactly this pushback: it's real
+model-authored code execution, scoped to an isolated per-run workspace and opt-in via `--sandbox`,
+with the loss of guarantee disclosed rather than hidden. Both are legitimate answers to "the model
+needs to do something the fixed vocabulary can't express" — which one applies depends on whether
+the user actually wants determinism preserved or has explicitly chosen to trade it away for a
+given capability.
 
 `notes.md` is the running decision log — read it when you need the *why* and historical context
 behind something (a rejected alternative, a bug that was found and fixed, a live-verification
@@ -57,19 +62,24 @@ system grows:
   checks, reachability, pathfinding, inventory transitions, goal completion, and scoring are
   always deterministic and testable. If model output and deterministic validation conflict, the
   validator wins, full stop.
-- **No model-authored code execution, ever — sandboxed or not.** Not `eval`/`exec`, not shell
-  commands, not dynamically imported/chosen packages, not arbitrary file writes outside the
-  selected output directory. This is why section 6's extended mechanics are a *declarative
-  effect system* (a fixed, finite vocabulary of effect ops interpreted by real, tested Python in
-  `engine/interactions.py`) and not "let the model write and run a handler function." A sandbox
-  changes *where* code runs, not *whether* letting the model author it breaks the guarantee that
-  every scene's behavior is statically knowable before it runs. See `notes.md` for the concrete
-  case (OpenAI Agents SDK "sandbox agents") this was already tested against and declined.
-- **Movement and physics stay deterministic code, not per-step LLM calls.** The model plans task
-  *semantics* (which goals exist, what a custom interaction's effects are); A* pathfinding and
-  the primitive action executor (`engine/actions.py`) are always plain Python, never an LLM call
-  in the loop. This is also why the answer to "let a sandbox agent redefine movement/physics per
-  game" was no — see `notes.md`.
+- **No model-authored code execution in the default path.** Every `generate` run other than the
+  explicit, opt-in `--sandbox` mode never lets the model write or run code: not `eval`/`exec`, not
+  shell commands, not dynamically imported/chosen packages, not arbitrary file writes outside the
+  selected output directory. This is why section 5's extended mechanics are a *declarative effect
+  system* (a fixed, finite vocabulary of effect ops interpreted by real, tested Python in
+  `engine/interactions.py`) and not "let the model write and run a handler function." **The one
+  disclosed exception is section 11's sandbox mode** — built after the user explicitly requested
+  general model-authored engine code (not just a fixed set of effects) and, when asked to resolve
+  the highest-risk design question, chose an isolated per-run workspace copy over touching the
+  real installation. That mode does not pretend the validator-wins guarantee survives it — it
+  labels every affected run `"source": "sandbox"` and documents exactly what's lost. See section
+  11 and `notes.md` for the full history, including the two earlier rounds where this was
+  proposed and declined before the user's explicit, informed redirect.
+- **Movement and physics stay deterministic code, not per-step LLM calls — outside sandbox mode.**
+  The model plans task *semantics* (which goals exist, what a custom interaction's effects are);
+  A* pathfinding and the primitive action executor (`engine/actions.py`) are always plain Python,
+  never an LLM call in the loop, for every run except section 11's sandbox mode, where the agent
+  may rewrite that logic itself inside its isolated workspace copy.
 - **Extend by adding new deterministic primitives, not by loosening the two rules above.** A
   genuinely new capability (a new effect op, a new provider, a new pipeline stage) is real code
   with real tests, same as it always was — never a way to let the model bypass the validator or
@@ -527,12 +537,121 @@ attempts / avg path length / avg generation time, and writes `benchmark_summary.
 
 ---
 
-## 11. CLI reference
+## 11. Sandbox agents: model-authored engine code, per-run isolated
+
+Every capability above keeps the validator-wins guarantee intact by construction: the model
+proposes data (a `SceneSpec`, a mutation, a declarative effect), deterministic code decides
+whether it's valid. That's deliberate and it's not going away as the default. But it has a real
+ceiling — the model can only express what the fixed action/goal vocabulary and section 5's fixed
+effect-op vocabulary already support. `--sandbox` is the disclosed, opt-in exception: the user
+explicitly asked for a general mechanism ("it could be any condition set by a user... update the
+plan to allow sandboxes to code the game from our basis and edit everything too") after two
+earlier rounds in this project where sandboxed code execution was proposed and declined on
+exactly these correctness/determinism grounds. This section exists so that exception is documented
+as plainly as the guarantee it trades away, not quietly bolted on.
+
+### What it is
+
+`infinienv generate --sandbox --prompt "..." --seed N --out runs/id` hands the scene prompt to a
+`SandboxAgent` (OpenAI Agents SDK, `agents.sandbox`, `UnixLocalSandboxClient` — a local backend,
+no Docker/cloud requirement) running inside a **fresh, isolated per-run copy** of this project's
+`schema/`, `engine/`, `navigation/`, `validation/`, and `render/` packages, plus a reference
+`run_scene.py` entrypoint (`sandbox/workspace.py::build_workspace_dir`). The agent may read, edit,
+or add any file in that copy — including rewriting the engine itself — to implement a mechanic the
+base vocabulary doesn't support (a chasing NPC, a physics-based interaction, a custom win/lose
+condition), then must run what it built and leave behind the same five standard artifacts every
+other run produces: `scene.json`, `metrics.json`, `replay.json`, `render.png`, `replay.gif`.
+`pymunk` (a `physics` extra in `pyproject.toml`) is available inside the sandbox if a mechanic
+needs real physics simulation, but nothing requires the agent to use it — reusing the existing
+`SceneSpec` schema and extending `navigation/policy.py` in place has worked just as well in live
+verification (see below).
+
+### The isolation boundary, and why it's real
+
+- **Nothing the agent does touches this repo or another run.** `build_workspace_dir` copies from
+  the *installed* package into `<out_dir>/sandbox_workspace/`, a fresh directory scoped to that
+  one run; the sandbox backend hydrates its own separate execution filesystem from a tar of that
+  copy (`session.hydrate_workspace`), and after the run `sync_full_workspace` pulls the sandbox's
+  actual final filesystem state back onto disk via `session.persist_workspace()` — overwriting the
+  pre-run copy so `sandbox_workspace/` on disk is a true record of what the agent wrote, not the
+  template it started from. This was a real bug caught during live verification: the first
+  version of this code only ever extracted the five named artifact files, so the *kept* workspace
+  silently stayed frozen at its pre-run state even though the agent had genuinely edited
+  `navigation/policy.py` inside the sandbox — see `notes.md`.
+- **The outer (trusted) process never imports or executes the sandboxed `.py` files.** It only
+  ever reads back the five named artifact files (`sandbox/workspace.py::extract_artifacts`). If
+  this process instead imported the sandbox's edited code afterward, the sandbox boundary would be
+  theater — isolation only means something if untrusted code never runs outside it.
+- **An outer sanity check re-parses the sandbox's `scene.json` against the real, unmodified
+  schema**, and confirms `render.png`/`replay.gif` are genuine, non-trivial, loadable images
+  (`outer_sanity_check`). This is explicitly **not** a solvability guarantee — it can't be, that's
+  the nature of the trade-off — just a floor against a malformed or fabricated success being
+  reported. It exists because live verification found a real case of exactly that: a sandbox run
+  self-reported `"success": true` with a 43-byte, header-only `replay.gif` it never actually
+  checked itself.
+- **An agent conversation that doesn't finish cleanly (e.g. hits its turn budget) still gets a
+  full, honest report.** `sandbox/runner.py` captures that failure as `run_error` rather than
+  letting it propagate past artifact extraction, workspace sync, and the sanity check — whatever
+  the agent produced up to that point is still extracted, sanity-checked, and recorded, and
+  `run_error` is folded into a failed outer verdict instead of being reported as a bare crash.
+
+### What a run's `metrics.json` looks like
+
+Sandbox runs are labeled `"source": "sandbox"` and carry both verdicts side by side, so a
+reviewer can immediately tell which guarantee (if any) applies and where the two checks agreed or
+disagreed:
+
+```json
+{
+  "source": "sandbox", "provider": "openai_agents_sandbox", "seed": 2,
+  "success": true, "sandbox_self_reported_success": true,
+  "outer_sanity_passed": true, "outer_sanity_error": null,
+  "missing_artifacts": []
+}
+```
+
+`success` is `true` only if both the artifact set is complete and the outer sanity check passes
+(and, if the agent conversation itself failed, `success` is always `false` regardless of what
+partial artifacts exist). CLI output for `--sandbox` prints the sandbox agent's own summary and
+the kept workspace path, distinctly from the normal `generate` progress output, so a reviewer
+never confuses a sandbox run's report for a validator-guaranteed one.
+
+### Live verification (see `notes.md` for the full account)
+
+A prompt describing a chase/catch mechanic ("a girl and a boy NPC chase the agent; touching the
+agent before a friend is delivered fails the run") was run twice. Both times the agent reused the
+real `SceneSpec` schema (grid/agent/objects/walls/goals, `sequence` goals,
+`mechanics.custom_object_types` for the NPC types) rather than inventing an incompatible format,
+and extended `navigation/policy.py` in place with real chase-stepping logic dispatched off the
+scene's declared custom object types — confirmed by diffing the synced workspace against this
+repo's actual `navigation/policy.py`, not by trusting the agent's own summary. `render.png` was
+confirmed to be a genuine render from this project's real renderer. An earlier run (before the
+turn budget and prompt were tuned) demonstrated the failure path instead: the agent invented its
+own incompatible scene format, which the outer sanity check correctly rejected.
+
+### Explicitly out of scope for this mode (for now)
+
+Making sandbox mode the default or folding it into the normal repair loop; the `docker`-backed
+sandbox client (Unix-local was the pragmatic first choice); having the outer layer verify
+sandbox-authored mechanics beyond basic well-formedness (not achievable without reintroducing the
+fixed-vocabulary constraint this mode exists to escape); reusing sandbox-authored mechanics across
+runs (no cache/reuse mechanism like `generation/mechanics_cache.py` for this mode — every run
+starts from the same clean workspace copy).
+
+---
+
+## 12. CLI reference
 
 ```bash
 python -m infinienv generate --prompt "..." --provider {mock,openai_agents,openai_responses,anthropic} \
   --seed 42 --out runs/demo [--max-repair-attempts N] [--no-fallback] \
   [--assets {none,local,generated,auto}]
+
+python -m infinienv generate --sandbox --prompt "..." --seed 42 --out runs/demo
+  # opt-in, section 11: model-authored engine code in an isolated per-run workspace copy.
+  # ignores --provider/--assets/--no-fallback/--max-repair-attempts; trades away the
+  # validator-guaranteed solvability check every other run has -- see metrics.json's
+  # outer_sanity_* fields.
 
 python -m infinienv validate runs/demo/scene.json
 python -m infinienv solve runs/demo/scene.json [--out runs/demo]
@@ -575,7 +694,7 @@ runs/<run_id>/
 
 ---
 
-## 12. Evaluation and metrics
+## 13. Evaluation and metrics
 
 `metrics.json` (via `evaluation/metrics.py::compute_metrics`):
 
@@ -593,7 +712,7 @@ success otherwise, in `metrics.json` or in `report.md`.
 
 ---
 
-## 13. Coding standards
+## 14. Coding standards
 
 Python 3.11+.
 
@@ -609,7 +728,7 @@ validator check and a test, dead code (delete it, don't comment it out or leave 
 
 ---
 
-## 14. Testing
+## 15. Testing
 
 One test module per source module, roughly (`tests/test_<name>.py` for `src/infinienv/**/<name>.py`).
 Minimum coverage per area:
@@ -664,7 +783,7 @@ current environment, say so honestly rather than claiming untested work passes.
 
 ---
 
-## 15. Documentation
+## 16. Documentation
 
 `README.md` must stay reviewer-first: one-paragraph pitch, pipeline diagram, setup, no-key mock
 mode, CLI examples, artifact examples, evaluation-criteria mapping, an honest limitations section.
@@ -678,9 +797,10 @@ always, for anything non-obvious).
 
 ---
 
-## 16. Safety and sandboxing
+## 17. Safety and sandboxing
 
-The runtime LLM must not execute arbitrary generated code (section 2). Concretely:
+The runtime LLM must not execute arbitrary generated code **in the default path** (section 2).
+Concretely, for every `generate` run other than `--sandbox`:
 
 Allowed: emitting `SceneSpec`/mechanics JSON, calling the deterministic read-only/validate-only
 tools (`get_scene_schema`, `get_supported_mechanics`, `get_known_mechanics`, `validate_scene_tool`),
@@ -688,14 +808,19 @@ requesting validation, requesting repair.
 
 Not allowed: shell execution from model output, arbitrary file writes from model output
 (`artifacts/writer.py::resolve_out_dir` rejects path traversal outside the working directory),
-importing packages chosen by the model at runtime, unrestricted `eval`/`exec`, and — per the
-explicit decision recorded in `notes.md` — sandboxed arbitrary code execution frameworks (e.g.
-the OpenAI Agents SDK's "sandbox agents"), because sandboxing changes the blast radius of running
-untrusted code, not whether doing so breaks the deterministic-validation guarantee.
+importing packages chosen by the model at runtime, unrestricted `eval`/`exec`.
+
+**Section 11's `--sandbox` mode is the one disclosed exception**, built after the user explicitly
+asked for it following two earlier rounds where the same idea was proposed and declined on these
+exact grounds. It does let the model write and run real code — scoped to an isolated per-run
+workspace copy (never this repo's real source, never another run's workspace), opt-in via an
+explicit flag, with the outer process never importing or executing the sandboxed code itself and
+every affected run labeled `"source": "sandbox"` so the lost guarantee is visible, not hidden. See
+section 11 for the full design and what it does and doesn't verify.
 
 ---
 
-## 17. Roadmap: GPU and 3D
+## 18. Roadmap: GPU and 3D
 
 Not required for the CPU/2D core. GPU becomes relevant for local LLM inference (an
 OpenAI-compatible endpoint, e.g. `LLM_PROVIDER=vllm`, `LLM_BASE_URL=http://localhost:8000/v1`),
@@ -710,7 +835,7 @@ vision-based policy eventually replacing the deterministic 2D planner for that p
 
 ---
 
-## 18. Release checklist
+## 19. Release checklist
 
 ```text
 [ ] README explains the project in under 60 seconds.
@@ -725,6 +850,9 @@ vision-based policy eventually replacing the deterministic 2D planner for that p
 [ ] benchmark mode runs over multiple prompts; mutate/curriculum --run/export-dataset all work.
 [ ] At least one scene exercises section 5's extended mechanics end-to-end (validated, solved,
     replayed), ideally live-verified against a prompt with no exact hand-authored precedent.
+[ ] `--sandbox` mode (section 11) live-verified end-to-end at least once: agent-edited workspace
+    actually synced back (not just the pre-run copy), outer sanity check runs and its verdict is
+    recorded alongside the agent's own self-report in metrics.json.
 [ ] pytest passes; anything touching a provider/mechanic/asset was also verified live, not just
     against the offline suite.
 [ ] notes.md reflects any non-obvious decision or bug fix from the current work.
@@ -732,7 +860,7 @@ vision-based policy eventually replacing the deterministic 2D planner for that p
 
 ---
 
-## 19. Framing
+## 20. Framing
 
 > InfiniEnv is a verified environment factory. It compiles natural language into structured,
 > playable worlds — including worlds with mechanics the model defined itself, expressed as safe,

@@ -134,10 +134,39 @@ every new custom object type/interaction from a validated scene into
 and the prompt instructs it to reuse an existing definition verbatim before inventing a new one
 — so "window" keeps meaning the same thing across a session instead of drifting scene to scene.
 
+## Sandbox agents: model-authored engine code, per-run isolated
+
+The extended-mechanics system above is still a fixed, validated vocabulary -- the model composes
+existing effect ops, it never writes code. `--sandbox` is the opposite, opt-in trade-off: the
+model gets a real, isolated per-run copy of `schema/`/`engine/`/`navigation/`/`validation/`/
+`render/` and may read, edit, or run anything in it -- including rewriting the engine itself -- to
+build a mechanic the fixed vocabulary genuinely can't express (an adversarial NPC that chases the
+agent, a custom win/lose condition). This gives up the validator-guaranteed solvability check
+every other run has, and says so plainly: sandbox runs are labeled `"source": "sandbox"` in
+`metrics.json`, carrying both the agent's own self-reported success and an independent outer
+sanity check (re-parses `scene.json` against the real, unmodified schema; confirms `render.png`/
+`replay.gif` are genuine, non-trivial images) side by side.
+
+```bash
+python -m infinienv generate --sandbox --seed 2 --out runs/chase_demo --prompt \
+  "Create a game where the agent must grab a friend and deliver them to a sink. A girl and a boy \
+  NPC chase the agent; touching the agent before delivery fails the run."
+```
+
+Live-verified: the agent reused the real `SceneSpec` schema (`mechanics.custom_object_types` for
+the NPC types, a `sequence` goal for open-door/grab-friend/deliver-friend) and extended
+`navigation/policy.py` in place with real chase-stepping logic dispatched off the scene's declared
+custom object types -- confirmed by diffing the run's kept `sandbox_workspace/` against this
+repo's actual source, not by trusting the agent's summary. The outer process never imports or
+executes that sandboxed code itself; it only ever reads back the same five standard artifact files
+every other run produces. See CLAUDE.md section 11 for the full design, the isolation boundary,
+and what the outer sanity check does and doesn't guarantee.
+
 ## CLI
 
 ```bash
 python -m infinienv generate --prompt "..." --provider mock --seed 42 --out runs/demo
+python -m infinienv generate --sandbox --prompt "..." --seed 42 --out runs/demo   # see above
 python -m infinienv validate runs/demo/scene.json
 python -m infinienv solve runs/demo/scene.json --out runs/demo
 python -m infinienv play runs/demo/scene.json          # interactive terminal play
@@ -231,6 +260,8 @@ src/infinienv/
 ├── assets/                  # placeholder sprite generator, resolver, OpenAI Images generator, manifest
 ├── evaluation/               # per-run metrics, end-to-end runner, benchmark aggregation
 ├── export/                    # dataset.py: runs directory -> JSONL with programmatic_reward
+├── sandbox/                    # --sandbox mode: isolated per-run workspace, agent orchestration,
+│                                # artifact extraction, outer sanity check (see README above)
 └── artifacts/                 # scene/validation/metrics JSON writers, report.md builder
 tests/                          # pytest: schema, validator, reachability, solver, mock generation, CLI,
                                 # mutation, assets, curriculum, dataset export, interactions, mechanics cache
