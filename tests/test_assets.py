@@ -2,8 +2,16 @@ import os
 import threading
 import time
 
+import infinienv.assets.generator_diffusion as generator_diffusion
 import infinienv.assets.generator_openai as generator_openai
-from infinienv.assets.resolver import _scene_descriptions, resolve_assets, scene_asset_types
+from infinienv.assets.resolver import (
+    _scene_descriptions,
+    _select_sprite_generator,
+    resolve_assets,
+    scene_asset_types,
+    variant_descriptions,
+    variant_types,
+)
 from infinienv.generation.templates import kitchen_delivery
 from infinienv.llm.base import ProviderError
 from infinienv.schema.scene_schema import scene_spec_from_dict
@@ -51,6 +59,7 @@ def test_resolve_assets_generated_mode_calls_generate_sprite_for_each_missing_ty
         calls.append(object_type)
         return _write_fake_sprite(cache_dir, object_type)
 
+    monkeypatch.setenv("INFINIENV_SPRITE_BACKEND", "openai")
     monkeypatch.setattr(generator_openai, "generate_sprite", fake_generate)
     entries, notes = resolve_assets(scene, "generated", str(tmp_path))
 
@@ -73,6 +82,7 @@ def test_resolve_assets_skips_generation_for_a_cache_hit(tmp_path, monkeypatch):
         calls.append(object_type)
         return _write_fake_sprite(cache_dir, object_type)
 
+    monkeypatch.setenv("INFINIENV_SPRITE_BACKEND", "openai")
     monkeypatch.setattr(generator_openai, "generate_sprite", fake_generate)
     entries, notes = resolve_assets(scene, "generated", cache_dir)
 
@@ -100,6 +110,7 @@ def test_resolve_assets_generates_missing_types_concurrently(tmp_path, monkeypat
             in_flight -= 1
         return _write_fake_sprite(cache_dir, object_type)
 
+    monkeypatch.setenv("INFINIENV_SPRITE_BACKEND", "openai")
     monkeypatch.setattr(generator_openai, "generate_sprite", fake_generate)
     start = time.perf_counter()
     entries, notes = resolve_assets(scene, "generated", str(tmp_path))
@@ -127,6 +138,7 @@ def test_resolve_assets_concurrency_is_bounded_by_env_override(tmp_path, monkeyp
             in_flight -= 1
         return _write_fake_sprite(cache_dir, object_type)
 
+    monkeypatch.setenv("INFINIENV_SPRITE_BACKEND", "openai")
     monkeypatch.setattr(generator_openai, "generate_sprite", fake_generate)
     monkeypatch.setenv("INFINIENV_ASSET_CONCURRENCY", "1")
     resolve_assets(scene, "generated", str(tmp_path))
@@ -142,6 +154,7 @@ def test_resolve_assets_generated_mode_records_a_note_and_no_asset_on_failure(tm
             raise ProviderError("image generation failed for 'table': boom")
         return _write_fake_sprite(cache_dir, object_type)
 
+    monkeypatch.setenv("INFINIENV_SPRITE_BACKEND", "openai")
     monkeypatch.setattr(generator_openai, "generate_sprite", fake_generate)
     entries, notes = resolve_assets(scene, "generated", str(tmp_path))
 
@@ -158,6 +171,7 @@ def test_resolve_assets_auto_mode_falls_back_to_local_on_generation_failure(tmp_
     def fake_generate(object_type, cache_dir, **kwargs):
         raise ProviderError(f"image generation failed for {object_type!r}: boom")
 
+    monkeypatch.setenv("INFINIENV_SPRITE_BACKEND", "openai")
     monkeypatch.setattr(generator_openai, "generate_sprite", fake_generate)
     entries, notes = resolve_assets(scene, "auto", str(tmp_path))
 
@@ -220,8 +234,137 @@ def test_resolve_assets_generated_mode_passes_scene_description_to_generate_spri
         calls[object_type] = kwargs.get("description")
         return _write_fake_sprite(cache_dir, object_type)
 
+    monkeypatch.setenv("INFINIENV_SPRITE_BACKEND", "openai")
     monkeypatch.setattr(generator_openai, "generate_sprite", fake_generate)
     resolve_assets(scene, "generated", str(tmp_path))
 
     assert calls["turtle"] == "a smooth-moving green turtle hazard"
     assert "Italian man in green clothing" in calls["agent"]
+
+
+def test_variant_types_builds_canonical_names():
+    assert variant_types("hazard", ["idle", "active"]) == ["hazard__idle", "hazard__active"]
+
+
+def test_variant_descriptions_derives_one_description_per_state():
+    descriptions = variant_descriptions("a spiky trap", "trap", ["hidden", "sprung"])
+    assert descriptions == {
+        "trap__hidden": "a spiky trap -- specifically its hidden state",
+        "trap__sprung": "a spiky trap -- specifically its sprung state",
+    }
+
+
+def test_resolve_assets_extra_types_resolved_without_a_placed_scene_object():
+    # A variant type (e.g. an animation frame) need not correspond to any SceneObject -- it
+    # should still show up in the manifest when passed via extra_types.
+    scene = kitchen_delivery("kitchen task", seed=1)
+    assert "trap__sprung" not in scene_asset_types(scene)
+    entries, notes = resolve_assets(scene, "none", "/tmp/unused", extra_types=["trap__sprung"])
+    assert notes == []
+    assert entries["trap__sprung"].source == "none"
+    assert "trap__sprung" in entries
+
+
+def test_resolve_assets_extra_types_local_mode_falls_back_gracefully():
+    scene = kitchen_delivery("kitchen task", seed=1)
+    entries, _ = resolve_assets(scene, "local", "/tmp/unused", extra_types=["nonexistent_variant"])
+    assert entries["nonexistent_variant"].source == "none"
+    assert entries["nonexistent_variant"].note
+
+
+def test_resolve_assets_extra_types_generated_mode_uses_extra_descriptions(tmp_path, monkeypatch):
+    scene = kitchen_delivery("kitchen task", seed=1)
+    calls = {}
+
+    def fake_generate(object_type, cache_dir, **kwargs):
+        calls[object_type] = kwargs.get("description")
+        return _write_fake_sprite(cache_dir, object_type)
+
+    monkeypatch.setenv("INFINIENV_SPRITE_BACKEND", "openai")
+    monkeypatch.setattr(generator_openai, "generate_sprite", fake_generate)
+    extra_types = variant_types("hazard", ["idle", "active"])
+    extra_descriptions = variant_descriptions("a lurking hazard", "hazard", ["idle", "active"])
+    entries, notes = resolve_assets(
+        scene, "generated", str(tmp_path), extra_types=extra_types, extra_descriptions=extra_descriptions
+    )
+
+    assert notes == []
+    assert set(extra_types) <= set(entries)
+    for t, entry in entries.items():
+        if t in extra_types:
+            assert entry.source == "generated"
+    assert calls["hazard__idle"] == "a lurking hazard -- specifically its idle state"
+    assert calls["hazard__active"] == "a lurking hazard -- specifically its active state"
+
+
+def test_select_sprite_generator_defaults_to_openai(monkeypatch):
+    # Briefly flipped to "diffusion" after two real OpenAI failure modes (a rate limit, then a
+    # moderation rejection of a character description), then reverted after live-verified
+    # quality problems with the local model's character sprites -- see notes.md for both.
+    monkeypatch.delenv("INFINIENV_SPRITE_BACKEND", raising=False)
+    backend, fn = _select_sprite_generator()
+    assert backend == "openai"
+    assert fn is generator_openai.generate_sprite
+
+
+def test_select_sprite_generator_diffusion_available_as_explicit_opt_in(monkeypatch):
+    monkeypatch.setenv("INFINIENV_SPRITE_BACKEND", "diffusion")
+    backend, fn = _select_sprite_generator()
+    assert backend == "diffusion"
+    assert fn is generator_diffusion.generate_sprite
+
+
+def test_select_sprite_generator_rejects_unknown_backend(monkeypatch):
+    monkeypatch.setenv("INFINIENV_SPRITE_BACKEND", "midjourney")
+    try:
+        _select_sprite_generator()
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "midjourney" in str(exc)
+
+
+def test_resolve_assets_generated_mode_records_openai_backend_in_note_by_default(tmp_path, monkeypatch):
+    monkeypatch.delenv("INFINIENV_SPRITE_BACKEND", raising=False)
+    scene = kitchen_delivery("kitchen task", seed=1)
+
+    def fake_generate(object_type, cache_dir, **kwargs):
+        return _write_fake_sprite(cache_dir, object_type)
+
+    monkeypatch.setattr(generator_openai, "generate_sprite", fake_generate)
+    entries, _ = resolve_assets(scene, "generated", str(tmp_path))
+    assert all(e.note == "backend: openai" for e in entries.values())
+
+
+def test_resolve_assets_generated_mode_records_diffusion_backend_in_note_when_selected(tmp_path, monkeypatch):
+    scene = kitchen_delivery("kitchen task", seed=1)
+
+    def fake_generate(object_type, cache_dir, **kwargs):
+        return _write_fake_sprite(cache_dir, object_type)
+
+    monkeypatch.setenv("INFINIENV_SPRITE_BACKEND", "diffusion")
+    monkeypatch.setattr(generator_diffusion, "generate_sprite", fake_generate)
+    entries, _ = resolve_assets(scene, "generated", str(tmp_path))
+    assert all(e.note == "backend: diffusion" for e in entries.values())
+
+
+def test_resolve_assets_uses_diffusion_backend_when_selected(tmp_path, monkeypatch):
+    scene = kitchen_delivery("kitchen task", seed=1)
+    calls = []
+
+    def fake_generate(object_type, cache_dir, **kwargs):
+        calls.append(object_type)
+        return _write_fake_sprite(cache_dir, object_type)
+
+    def fail_if_called(object_type, cache_dir, **kwargs):
+        raise AssertionError("openai backend should not have been called")
+
+    monkeypatch.setattr(generator_diffusion, "generate_sprite", fake_generate)
+    monkeypatch.setattr(generator_openai, "generate_sprite", fail_if_called)
+    monkeypatch.setenv("INFINIENV_SPRITE_BACKEND", "diffusion")
+
+    entries, notes = resolve_assets(scene, "generated", str(tmp_path))
+
+    assert notes == []
+    expected_types = set(scene_asset_types(scene))
+    assert set(calls) == expected_types
+    assert all(e.note == "backend: diffusion" for e in entries.values())

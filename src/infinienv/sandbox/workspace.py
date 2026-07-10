@@ -69,6 +69,19 @@ with open("scene.json") as f:
 validation = validate_scene(scene)
 solve = solve_scene(scene)
 
+assets_mode = "none"
+if os.path.exists("ASSETS_MODE"):
+    with open("ASSETS_MODE") as f:
+        assets_mode = f.read().strip() or "none"
+
+asset_paths = {}
+asset_notes = []
+if assets_mode != "none":
+    from assets.resolver import resolve_assets
+
+    entries, asset_notes = resolve_assets(scene, assets_mode, os.path.abspath("asset_cache"))
+    asset_paths = {t: e.path for t, e in entries.items() if e.path}
+
 metrics = {
     "success": bool(validation.valid and solve.success),
     "source": "sandbox",
@@ -78,6 +91,10 @@ metrics = {
     "num_objects": len(scene.objects),
     "num_goals": len(scene.goals),
 }
+# asset_notes carries resolve_assets()'s per-type failure reasons (e.g. a generation error) --
+# recorded even when empty is fine, but ALWAYS recorded: a sprite that silently fell back to a
+# flat colored cell with no trace of why is a real, previously-hit diagnostic dead end.
+metrics["asset_notes"] = asset_notes
 with open("metrics.json", "w") as f:
     json.dump(metrics, f, indent=2)
 
@@ -88,18 +105,6 @@ with open("replay.json", "w") as f:
         indent=2,
         default=str,
     )
-
-assets_mode = "none"
-if os.path.exists("ASSETS_MODE"):
-    with open("ASSETS_MODE") as f:
-        assets_mode = f.read().strip() or "none"
-
-asset_paths = {}
-if assets_mode != "none":
-    from assets.resolver import resolve_assets
-
-    entries, notes = resolve_assets(scene, assets_mode, os.path.abspath("asset_cache"))
-    asset_paths = {t: e.path for t, e in entries.items() if e.path}
 
 save_render_png(scene, "render.png", title=scene.metadata.name, asset_paths=asset_paths)
 save_replay_gif(scene, solve.actions, "replay.gif", asset_paths=asset_paths)

@@ -1743,3 +1743,661 @@ recognizable generated sprites throughout (hero on the ladder, princess at the t
 patrolling below). This closes the loop cleanly: the gap found in live verification was itself
 small enough to fix by extending an existing principle's example list, and the very next run
 enforced it correctly, in code, without needing a sixth named incident.
+
+## 2026-07-09: Genre-accurate hazard behavior and real per-frame animation
+
+### Diagnosis
+
+User-reported screenshot (a run's `replay.gif`, prompt: "...moving plants try to eat him from
+below like a side-scrolling platform game") showed the "chomping plants" drifting side to side
+along the ground, and asked "where are the animations and the full feature set that a later stage
+project has." Read the actual generated code for that run
+(`runs/gui_1783629196/sandbox_workspace/run_scene.py`) rather than guessing at the cause:
+
+- `plant_position(p, t)` returned `p.base_x + sin(t*speed+phase)*amp` for `x`, with only a tiny
+  6px vertical wobble -- pure horizontal patrol, nothing popping up from a gap or retracting.
+- `draw_frame()` drew the exact same three fixed primitives (stem rectangle, body ellipse, a fixed
+  triangular "mouth" polygon) at the plant's current position every single frame across a 700-step
+  trace -- the mouth shape itself never opened or closed. Same for the hero: one fixed pose,
+  translated only. Nothing in the code varied an entity's *drawn state* by its own phase/timer,
+  only its position -- true independent of `ASSETS_MODE` (this run had it set to `none`, but the
+  gap is in the drawing logic itself, not sprite usage).
+
+Root cause traced to two real gaps in `sandbox_agent.md`, not a one-off mistake in this run:
+principle 3 already said "build the specific behavior the task actually describes... rather than
+whatever's easiest to code," but its own example list ("moves side to side, up and down, chases,
+patrols a fixed lane") presented "side to side" as an equally-valid default alongside the others,
+giving the agent no signal to prefer whatever pattern the task's own wording actually implied
+("eat him from below" is the canonical Piranha-Plant pop-up-from-a-pipe pattern, not a ground
+patrol). And there was no guidance anywhere in the prompt about animating an entity's drawn state
+over time -- the only code example (`paste_sprite`) pastes one static image per entity per frame,
+with nothing telling the agent that a mouth, walk cycle, or other obviously-animated real-world
+reference should visibly change pose/state across frames, independent of position.
+
+### Fix
+
+Both fixes are prompt-only (sandbox mode's entire premise is that the agent can already write
+arbitrary Python -- it just wasn't told to do either of these things), continuing this session's
+established pattern of generalizing a live-observed bug into a durable principle rather than
+special-casing "plants":
+
+- Sharpened principle 3 to explicitly require reading the task's own positional/behavioral
+  language ("from below," "emerges," "erupts," "guards a doorway," "chases") and implementing the
+  motion pattern that language actually implies, rather than defaulting to a generic side-to-side
+  patrol just because it would technically satisfy "the hazard is reachable" -- naming the
+  from-below/Piranha-Plant case as the one concrete illustration.
+- Added principle 6: "Animate what has an obviously animated real-world reference, not just its
+  position." Requires driving at least one drawn parameter from the entity's own phase/state timer
+  whenever its real-world reference has an obvious animated aspect, via either (a) a procedurally
+  animated overlay (mouth-angle, leg-offset, squash-and-stretch, retract/extend cycle) or (b), when
+  assets are enabled, resolving more than one `custom_object_type` per entity (e.g.
+  `plant_open`/`plant_closed`) and swapping the resolved sprite by state -- `resolve_assets`
+  already supports resolving as many declared custom types as given, no code change needed for
+  this path. Self-test: freeze two frames at the same position but a different point in the cycle;
+  if the pose is pixel-identical, it wasn't animated, only moved.
+- Extended the existing `paste_sprite` code example with a second snippet showing a state-keyed
+  sprite swap in practice, and extended the "before you finish" visual-review step to explicitly
+  check whether animated entities actually look different in pose/state between sampled frames,
+  not just at different positions.
+- Bumped `sandbox/runner.py`'s `max_turns` default from 40 to 60 -- the run that surfaced this bug
+  had already hit the 40-turn ceiling once on its first attempt before this change asks for
+  measurably more per-attempt reasoning (behavioral-language mapping, an animation approach,
+  potentially extra sprite types).
+
+### Live verification
+
+Re-ran the same prompt (`runs/mario_animation_test`, `--assets none`, seed 42). Read the
+agent-authored `run_scene.py` directly rather than trusting its self-report:
+
+- `plant_state(p, t)` now computes a `cycle` phase and derives vertical `y = 9.05 - ext*1.28` from
+  an extend/hold/retract/hidden schedule -- a genuine pop-up-from-pipe cycle. Static pipe openings
+  are drawn as fixed rectangles at each plant's `x`; the plant body only appears while `extent >
+  0.05`, drawn emerging from within the pipe.
+- `draw_frame()` derives the mouth polygon's opening size from `sin(p['phase'] * pi)` when
+  `p['open']` is true, and the hero's leg rectangles from `sin(t * 18)` -- both genuinely
+  phase-driven, independent of position, exactly principle 6's shape.
+- Extracted and viewed frames at six points across the 173-frame `replay.gif`: frame 28 shows all
+  three plants at different emergence/mouth states simultaneously (one fully emerged with an open
+  mouth, one partially emerged, one just poking its head above the pipe); by frame 86 the plant
+  that was fully emerged at frame 28 has fully retracted out of view into its pipe while a
+  different plant has newly emerged -- confirming real cycling over time, not a static shape in
+  horizontal translation.
+- Principles 1-5 held throughout in the same run, unprompted by anything changed this round: the
+  agent's own generated `validate_trace()` still asserts every vertical hero movement traces to a
+  declared action (`run`/`jump`/`climb`) and every plant came within a declared threat distance
+  (`assert all(v<2.2 for v in threats.values())`) before allowing `success=True`.
+
+### Net effect
+
+Genuinely fixed, not just re-described: the before/after code shapes are structurally different
+(horizontal-only `sin` patrol with a static mouth vs. a vertical extend/retract cycle with a
+phase-driven mouth and leg animation), confirmed from the agent's own code and by visually
+comparing frames at different points in the cycle -- not from trusting either run's self-reported
+summary.
+
+## 2026-07-09 (same day, follow-up): the user rejected the prompt-only fix -- generic library
+## primitives instead of per-case prose
+
+### The correction
+
+Immediately after the entry above, the user rejected the approach directly: *"i dont want you to
+add that stuff to the sandbox prompt, i need you to engineer it in a way that makes that behavior
+possible without specifying specific cases into it, like new info/sprite costumes etc should be
+in our sandbox already, new types of characters/actions too should be makable easily."* This is
+the same lesson this session already learned one level up (five bug-specific prompt patches
+consolidated into general "closed action space" principles, same file, same day, entries above) --
+now applied a level further: even a *general* principle illustrated with one specific worked
+example (the Piranha-Plant sentence, the `plant_open`/`plant_closed` code snippet) is still prose
+the agent has to be individually taught, not a capability it can just use. The fix has to be code,
+not prompt.
+
+### Design
+
+Three exploration agents confirmed the mechanics before writing anything:
+- `sandbox/workspace.py::_COPIED_PACKAGES` already copies `engine/` wholesale via
+  `shutil.copytree`, and `_rewrite_internal_imports()` already rewrites any `.py` file's
+  `infinienv.X` imports generically -- new files just need to exist under `engine/`, no
+  workspace-builder change needed at all.
+- Multi-variant sprite resolution (`plant_open`/`plant_closed`-style) already worked with zero
+  code changes today (`_generate_many` fans out arbitrary type strings through the same
+  concurrent path) -- but only for types matching a placed `SceneObject`, since
+  `scene_asset_types()` only scans `scene.objects[].type`. A genuinely new capability was needed
+  here: resolving a sprite variant with no placed object instance.
+- `engine/actions.py::apply_action`'s if/elif dispatch (reject-the-unrecognized-case pattern) and
+  `engine/physics.py`'s size/style (small, flat, pure, thoroughly-documented functions) were the
+  models to match for new modules.
+
+Built `engine/action_registry.py` (`ActionSpace`: register/dispatch/`UnknownActionError`,
+structurally enforcing "state only changes through a declared action"), `engine/motion_patterns.py`
+(`patrol`, `pulse_cycle`, `pursue` -- three generic composable functions, none named after or
+tuned to a specific creature), `engine/animation.py` (`phase_of`, `oscillate`, `cycle_variant` --
+generic phase-driven animation), and extended `assets/resolver.py` with `variant_types()`/
+`variant_descriptions()` plus `resolve_assets(..., extra_types=, extra_descriptions=)` (keyword-
+only, backward compatible, closes the placed-object gap above). `sandbox_agent.md`'s case-specific
+content was reverted -- the Piranha-Plant sentence, the `plant_open`/`plant_closed` snippet -- and
+replaced with a short "Reusable building blocks" pointer section plus one inline sentence per
+principle naming the actual function names, still fully generic (no creature/game named anywhere).
+36 new tests across three new test files plus extensions to `test_assets.py`/
+`test_sandbox_workspace.py`; full suite (188 tests) passes.
+
+### Live verification round 1: an honest null result
+
+Ran `--sandbox` on a deliberately unrelated prompt (a factory floor, an erupting steam vent, a
+chasing security drone -- `runs/factory_infra_test`) specifically to test genuine discovery, not
+imitation of a worked example that was never given. The run succeeded and was correct, but reading
+the synced `run_scene.py` (not trusting the agent's summary) showed zero imports from any of the
+three new modules: the agent had hand-rolled `vent_active()` (a phase-cycle function functionally
+identical to `pulse_cycle`), `step_toward()` (identical to `pursue`), and inline sine-driven leg/
+pulse animation (identical to `oscillate`) from scratch. Reported honestly rather than glossed
+over, consistent with this session's verification discipline. Two readings: the library's shape
+was validated (an independent agent reasoning from the task alone converged on nearly the same
+three primitives InfiniEnv had already built) but the *reuse* goal wasn't met -- the pointer
+existed but wasn't prominent enough to beat the pull of just writing three quick lines inline,
+especially under the same kind of iterative fix-and-rerun turn pressure visible throughout that
+run's narration log.
+
+### Visibility fix and round 2: confirmed
+
+Per the plan's own anticipated fallback ("the pointer needs to be more visible, not more
+prescriptive" -- decided before running the first verification, so this wasn't a post-hoc
+rationalization), two changes: the "Reusable building blocks" section's framing moved from "none
+of these are required" to "prefer these over writing the same math yourself, they're already
+tested"; and principles 3 and 6's cross-references moved from "see below" to naming the actual
+function signatures inline at the point of relevance (`patrol()`/`pulse_cycle()`/`pursue()` in
+principle 3, `phase_of()`/`oscillate()`/`cycle_variant()` in principle 6) -- still fully generic,
+no creature or game named, just the real function names an agent could act on without an extra
+file-read.
+
+Re-ran on a second, again-unrelated prompt (a submarine cave, blooming stinging anemones, a
+pursuing eel -- `runs/cave_infra_test`). This time the synced code opened with
+`from engine.action_registry import ActionSpace` and `from engine.motion_patterns import
+pulse_cycle, pursue`, and the usage was genuinely correct, not decorative: `ActionSpace` gates
+every position change through registered `thrust`/`hold` actions via real `register()`/
+`dispatch()` calls; `pulse_cycle()`'s return value drives both the sting-gating logic *and* the
+anemone's drawn bloom radius/spike angle (`r=8+18*a["bloom"]`) -- meaning the same reused function
+also solved principle 6's animation requirement as a side effect, unprompted; `pursue()` drives
+the eel's distance-gated chase-vs-return-to-rest behavior. Confirmed visually, not from the
+agent's summary: extracted two `replay.gif` frames showing the submarine's health dropping 5 → 3
+(a real hazard contact occurred) and the same anemone in genuinely different bloom states between
+them.
+
+### Net effect
+
+A real, closed loop: found a gap (the library wasn't discovered), predicted the fix in advance
+(visibility, not more instruction), applied it, and confirmed it actually worked against a *third*
+prompt with no overlap with either the original bug report or the first verification's factory
+scenario -- three genuinely different mechanics (Piranha-Plant-style pop-up, factory hazards,
+underwater bloom/chase) now share the same three reusable modules, with the second and third
+proving the fix generalizes rather than being tuned to look right on one retry. Also worth being
+honest about the limits of what this proves: the agent still had to *choose* to import the
+library both times it worked (nothing forces it to), and one confirmed success after one confirmed
+failure is a promising signal, not a guarantee for every future prompt -- if a future run shows the
+same null result again, the next lever is likely making disuse itself detectable (e.g. a
+self-review question asking "did you check `engine/` before writing this math") rather than
+pushing the pointer's visibility a third time.
+
+## 2026-07-09: asset_notes -> real rate-limit root cause -> local diffusion backend
+
+### Diagnosis chain
+
+A user-reported screenshot ("the graphics look so poor") on a Mario-style scene showed the hero
+and two "chomping plants" rendered as crude hand-drawn primitives while the princess and tower had
+real generated art. Reading the run's own `ASSETS_MODE`/`asset_cache` confirmed `generated` mode
+was active and 6 of 8 requested types succeeded -- only `agent`/`chomper_plant` were missing.
+Digging into why surfaced a real, generic bug: `resolve_assets()` has always returned `(entries,
+notes)`, `notes` carrying the exact per-type failure reason, but both the reference sandbox
+`run_scene.py` template (`sandbox/workspace.py`) and every sandbox-agent-authored rewrite of it
+captured `notes` and threw it away -- a sprite that silently fell back to a primitive left zero
+trace of why, anywhere. Fixed generically: the reference template now records `asset_notes` in
+`metrics.json` unconditionally, and `sandbox_agent.md` tells the agent to do the same if it
+rewrites `run_scene.py`. New regression test:
+`test_reference_run_scene_records_asset_notes_in_metrics` (runs the real template via subprocess).
+
+Re-running the same prompt with this fix in place surfaced the real cause immediately:
+`asset_notes` contained genuine `429 rate_limit_exceeded` errors from `gpt-image-1` -- "Rate limit
+reached... Limit 5, Used 5, Requested 1." The account's real limit is 5 images/minute, and a scene
+with several novel object types resolved concurrently (`DEFAULT_ASSET_CONCURRENCY = 4`) routinely
+exceeds it; `--assets generated`'s "no silent fallback" design means those sprites just don't
+exist, previously with no diagnostic anywhere. (Side note: my own first attempt to reproduce this
+independently via a raw `generate_sprite()` call hit a 401 "invalid API key" -- turned out to be my
+own test script skipping the `OP_KEY` -> `OPENAI_API_KEY` copy step that `cli.py::_load_dotenv()`
+does, not a real key problem; the user correctly diagnosed this immediately as "theres a global oai
+key set and you didnt use the one in env." Once reproduced correctly, both `agent` and
+`chomper_plant` generated fine standalone -- confirming the 429s were real account-level rate
+limiting, not a broken key or a content-policy rejection.)
+
+### Local diffusion backend: two designs, the first live-verified to fail
+
+Asked whether a local model could help (these end up as 64x64 sprites regardless of source
+quality). User chose bundling a small local diffusion model directly
+(`pip install infinienv[diffusion]`) over pointing at a self-hosted OpenAI-compatible server.
+Three research passes confirmed: no existing backend-selection seam in `resolver.py`
+(`_generate_many` hardcoded the OpenAI import); "local" was already taken (`--assets local` means
+checked-in static placeholders); every asset knob in this project is env-var-only, never a CLI
+flag, so `INFINIENV_SPRITE_BACKEND` (not a 5th `--assets` value) was the right shape; sandbox mode
+needed zero new plumbing since `assets/` is already fully copied and the existing
+`SandboxPathGrant(path=sys.prefix, ...)` (added for `pymunk`) already covers any harness-venv
+package. Built `assets/generator_diffusion.py` (same `generate_sprite()` contract as
+`generator_openai.py`, `stabilityai/sd-turbo` default model, `cuda`/`mps`/`cpu` auto-detection,
+lock-serialized pipeline singleton) plus `resolver.py::_select_sprite_generator()` as the seam,
+with `AssetEntry.note` recording which backend actually ran.
+
+First transparency design: prompt for a solid magenta chroma-key background, remove it by
+color-distance thresholding. Live-verified in three stages, each one a real finding:
+
+1. A hard single-threshold cutoff left a visible magenta fringe around every sprite in the actual
+   `render.png` -- confirmed by looking at the rendered scene, not just the isolated sprite file.
+2. A softer ramp between an inner/outer threshold reduced the fringe on one sprite (`can`) but a
+   second sprite (`table`) came back with almost its *entire* background still magenta-tinted.
+3. Dumped the raw pre-processed image directly to find out why: for "a wooden table," SD-Turbo at
+   2 inference steps produced pink corrugated stripes with a red-framed square -- nothing close to
+   a flat background. This is a real prompt-adherence limitation of a tiny 2-step distilled model,
+   not a threshold-tuning problem -- there was nothing clean to key against no matter where the
+   threshold was set.
+
+User's call once this was reported: replace chroma-keying with a real background-removal model
+(`rembg`, U2Net-based) rather than keep tuning a fragile threshold. This is a strictly more robust
+design -- segmentation doesn't depend on the generator painting any particular background color,
+only on there being a foreground object at all. Rewrote `generator_diffusion.py`:
+`DIFFUSION_SPRITE_PROMPT_TEMPLATE` no longer requests a specific background color (just "a plain
+simple background clearly distinct from the object"), and `_remove_background()` runs `rembg.remove()`
+after generation, before the same `_crop_to_content` (reused unchanged from `generator_openai.py`)
+and 64x64 resize. `rembg` needs the `[cpu]` extra for its `onnxruntime` backend -- a bare `rembg`
+install raises a runtime error, not an import error, at first actual use; caught live (the pyproject
+extra was `rembg>=2.0` initially, corrected to `rembg[cpu]>=2.0` after the real failure showed up).
+
+### Live verification (final)
+
+Cleared the two previously-bad cached sprites and regenerated via `INFINIENV_SPRITE_BACKEND=diffusion
+--assets generated` on the same kitchen-delivery scene. Both `can` and `table` came back with clean
+transparent backgrounds and no fringe -- confirmed both in the isolated sprite PNGs and in the
+actual `render.png` (no tinted patches behind either sprite this time, unlike every chroma-key
+attempt). Separately generated a `wall` texture tile (skips background removal entirely, same as
+the OpenAI backend's texture branch) -- a genuine seamless brick pattern, no artifacts.
+`asset_manifest.json` correctly recorded `"note": "backend: diffusion"` only for the two
+freshly-generated types, `"note": "cache hit"` for the rest (shared on-disk cache with prior
+OpenAI-backend runs, as designed). Timing: first-ever call paid a real one-time cost (SD-Turbo
+weights + U2Net weights downloads, ~4GB combined, several minutes on this connection); once warm,
+per-sprite generation dropped to roughly 1-2 seconds on this machine's Apple Silicon (MPS) GPU --
+fast enough that the design's choice to serialize local inference (rather than trying to run it
+concurrently like the network-bound OpenAI path) doesn't cost much wall-clock time in practice for
+scenes with a handful of novel types.
+
+### Net effect
+
+A real, complete diagnosis-to-fix chain, each step verified against actual output rather than
+assumed: a vague "graphics look poor" report traced to a specific silent-discard bug, which once
+fixed surfaced the actual root cause (a real account rate limit, not a code bug), which motivated
+a new local backend, whose first design was live-verified to fail for a specific, understood
+reason (weak prompt adherence at 2 inference steps breaks chroma-keying) before landing on a
+structurally more robust second design (real segmentation, not color-matching) that was then
+independently confirmed to work. Consistent with this session's standing practice: every claim
+here is backed by looking at the actual generated file or rendered scene, not by trusting that a
+command exited zero.
+
+## 2026-07-09 (same day, follow-up): four real bugs in the next Mario-rescue run, found by reading
+## the actual code -- grounded-character physics module + default backend flip
+
+### Diagnosis
+
+User reported (screenshot) the most recent run (`runs/gui_1783638533`, GUI-triggered) had "a
+really bad character asset, runs off the screen, flys on a place it cant and teleports." Read the
+run's real `metrics.json` and agent-authored `run_scene.py` rather than guessing:
+
+1. **Bad character asset** -- `asset_notes` (this session's earlier fix, immediately useful again)
+   showed `agent_run_1`/`agent_run_2` both failed with a real `400 moderation_blocked`
+   ("Your request was rejected by the safety system... category: other") -- almost certainly
+   because "an Italian man in green clothing" reads as a copyrighted-character request. `tower`/
+   `wall` hit the already-known rate limit. Every custom type in the scene fell back to a
+   hand-drawn primitive; the hero's was visibly cruder than the plant's.
+2. **Runs off the screen** -- `vx=RUN` (125 px/s) was assigned unconditionally every step
+   (`run_scene.py` line 77) including during the `climb_tower` branch; nothing ever zeroed it
+   while climbing, so the character drifted horizontally off the tower's face the entire time it
+   was supposedly climbing straight up. No world/screen-bounds clamp existed anywhere.
+3. **"Flies in a place it can't"** -- the climb condition (`nx>24*TILE-10 and ny>6*TILE`) had a
+   lower x-bound only, no upper bound tied to the tower's actual right edge. Once bug 2 drifted
+   the character past the tower, the condition stayed true, so it kept "climbing" (rising) while
+   floating in open air beside the structure.
+4. **Teleports** -- a post-rescue celebration tail appended 46 frames at the hardcoded literal
+   `(26*TILE+16, 5*TILE+8)`, regardless of the trace's actual last position -- given bugs 2-3, often
+   far from that literal, producing an instant snap on the very next frame.
+
+Also notable: this run's code imported `engine/motion_patterns.py`/`engine/animation.py`
+(genuinely used, for the plants and flag) but not `engine/action_registry.py` at all -- the
+player's own movement was a hand-rolled ad hoc if-chain, not routed through discrete,
+mutually-exclusive registered actions. Structural root of bugs 2-3: nothing prevented "run" and
+"climb" from both partially mutating state in the same frame.
+
+### Fix 1: `engine/platformer_physics.py`
+
+Same reasoning as the earlier `motion_patterns.py`/`animation.py` work, one level over: gravity +
+ground + climbing + world bounds get hand-rolled fresh (and subtly wrong) every run with no shared
+tested primitive for *player-locomotion* physics, the same way hazard motion used to. New module:
+`integrate_grounded_2d(pos, vel, *, gravity, dt, ground_y, bounds=None)` (gravity + ground clamp +
+optional silent world-bounds clamp -- targets bug 2 directly), `climb_step(pos, climb_speed, dt,
+*, structure_bounds)` (moves only `y`, structurally cannot also apply horizontal velocity in the
+same call -- targets bug 2's climb-drift specifically; raises `ValueError` if `x` is outside the
+structure's bounds, turning bug 3's exact shape into a loud failure during the agent's own
+testing rather than a silently floating character), and a standalone `clamp_to_bounds(pos,
+bounds)`. 12 new tests, mirroring `test_motion_patterns.py`'s shape.
+
+Prompt changes were deliberately minimal, principle-level, no named incident: one "Reusable
+building blocks" line, one clause on principle 3's existing grounded-movement sentence (generic —
+"a run action," "a climb branch," no Mario/tower mentioned), and "world/screen bounds" added to
+principle 2's existing list of rules that must apply unconditionally. Bug 4 (the teleport) needed
+no new principle -- it's already covered by principles 1 and 5; this run's own self-check just
+didn't apply the "no unexplained position jump between frames" example the self-review section
+already suggests.
+
+### Fix 2: default sprite backend flipped to `diffusion`
+
+Originally planned as an opt-in `INFINIENV_SPRITE_FALLBACK_BACKEND` var (openai primary, diffusion
+fallback on failure), but the user redirected mid-plan: *"make it use the local image gen not
+openai anymore."* Simpler than a fallback chain -- `_select_sprite_generator()`'s default changed
+from `"openai"` to `"diffusion"` directly. `openai` stays fully available as an explicit opt-in
+(`INFINIENV_SPRITE_BACKEND=openai`). Deliberately no automatic fallback *to* `openai` if the
+`diffusion` extra is missing -- that would silently reintroduce the exact dependency/cost this
+change exists to remove; a missing extra just gets the existing clear `ProviderError`.
+
+Real test fallout from the flip: several `tests/test_assets.py` tests mocked
+`generator_openai.generate_sprite` and called `resolve_assets(..., "generated"/"auto")` without
+setting the backend env var, relying on the old implicit default -- after the flip they started
+routing through the *real* diffusion backend instead of their mocks. Caught immediately: running
+`pytest tests/test_assets.py` after the flip visibly hung/ran for minutes doing real pipeline
+generation instead of finishing in under a second. Killed the run and pinned every such test to
+`monkeypatch.setenv("INFINIENV_SPRITE_BACKEND", "openai")` explicitly; added a parallel default-is-
+diffusion test. Full suite back to passing in ~11s afterward, confirming nothing was silently left
+hitting the real backend.
+
+### Net effect
+
+Both fixes trace to the same single user report, both are generic/reusable rather than
+incident-specific (a physics module usable by any grounded-character scene; a backend default that
+helps any future moderation-sensitive or rate-limited prompt, not just this one), and both were
+caught either by direct code reading (the four bugs) or by a fast, honest test-suite signal (the
+mocking gap) rather than by assumption.
+
+## 2026-07-09 (same day, follow-up 2): sandbox runs were re-downloading the diffusion model from
+## scratch every time -- a live-caught 1.2GB-per-run bug, project-level model cache fix
+
+### Diagnosis
+
+Live-verifying the physics-module + default-backend-flip fix above (same prompt, `--sandbox
+--assets generated`) surfaced its own real bug via the run's own narration: "Asset generation is
+hanging too long, so I'm interrupting and using recorded fallback rendering" -- the agent gave up
+on sprite generation entirely and switched `ASSETS_MODE` to `none` itself mid-run. User's
+instruction: *"remove all the runs with the model downloaded, then make the model at the project
+level, it should never download a torch model every time."*
+
+Checked disk usage across every `runs/*/sandbox_workspace` directory: every prior run was under
+7MB; this one alone was 1.2GB, and `find ... -iname "*huggingface*"` pointed straight at
+`runs/physics_fix_verify/sandbox_workspace/.cache/huggingface` -- a full, from-scratch SD-Turbo
+download that had happened *inside the sandboxed workspace itself*. Root cause: `HOME` resolves
+within a sandboxed run's own ephemeral, per-attempt filesystem, not the host's real home
+directory (the same category of bug as the earlier `sys.prefix`/pymunk Seatbelt finding, just for
+a different env var), so `diffusers`/`rembg`'s default cache locations (`~/.cache/huggingface`,
+`~/.u2net`) landed inside that one run's workspace and vanished with it -- meaning every sandboxed
+run using the diffusion backend would repeat the full multi-GB download from scratch, forever.
+
+### Fix
+
+`generator_diffusion.py` gained a project-level cache root: `INFINIENV_MODEL_CACHE_DIR`
+(default `.infinienv_model_cache/`, next to the existing `.infinienv_asset_cache/`), with
+`HF_HOME`/`U2NET_HOME` set (via `setdefault`, so an explicit user override of those standard env
+vars still wins) to subdirectories under it at module-import time, and a new `model_cache_dir()`
+accessor. `sandbox/runner.py::_run_async` now explicitly sets `INFINIENV_MODEL_CACHE_DIR` in the
+outer process's environment *before* creating the sandbox session (so the sandboxed subprocess's
+inherited `env = os.environ.copy()` carries the identical absolute host path, rather than each
+sandboxed run recomputing its own from a `cwd` that doesn't correspond to the host repo), and
+grants that exact path read-write via a second `SandboxPathGrant` (read-write, not read-only like
+the `sys.prefix` grant -- a first-time download needs to actually write into the cache).
+`_interpreter_briefing()` also gained a note explaining that a slow first-time download is
+normal and shouldn't be interrupted, addressing the agent's own "hanging too long" narration
+directly -- not with a case-specific instruction, but by giving it the actual missing fact (this
+is a one-time, now-shared cost, not a hang).
+
+Cleanup per the user's explicit instruction: deleted `runs/physics_fix_verify` (the only bloated
+run), and moved the already-downloaded weights from `~/.cache/huggingface`/`~/.u2net` into the
+new project-level `.infinienv_model_cache/` directly (a plain `mv`, same filesystem) rather than
+deleting and re-downloading them -- ~5GB of SD-Turbo + U2Net weights preserved and now reusable by
+every future run, sandboxed or not. Added `.infinienv_model_cache/` to `.gitignore`, mirroring
+`.infinienv_asset_cache/`'s treatment. New regression test
+(`test_session_is_created_with_a_read_write_grant_for_the_model_cache_dir`) asserts the grant
+exists and is read-write; the pre-existing `sys.prefix` grant test was loosened from asserting
+exactly one grant to asserting the specific `sys.prefix` grant it actually cares about, since a
+second, unrelated grant now legitimately coexists with it.
+
+### Net effect
+
+A second real, live-caught bug found *while verifying the fix for the first set of bugs* --
+consistent with this session's repeated experience that live verification surfaces genuine issues
+prompt-only or first-principles reasoning wouldn't have: nothing about the physics-module or
+default-backend-flip design would have predicted a sandbox-specific `HOME`-resolution bug, it only
+showed up by actually running the thing and reading the real narration and real disk usage.
+
+## 2026-07-09 (same day, follow-up 3): re-verification found a broken hero sprite -- CLIP
+## truncation eating the prompt's own formatting instructions
+
+### Diagnosis
+
+Re-ran the physics-fix verification after the model-cache fix (`runs/physics_fix_verify2`):
+`sandbox_workspace` stayed at 3.7MB this time (confirming the cache fix worked, no re-download),
+and the run succeeded. But `render.png` showed the plant/tower/princess sprites looking genuinely
+good while the hero was essentially invisible -- a tiny illegible dark speck. Opened
+`asset_cache/agent.png` directly: nearly blank, faint fragments on a transparent background.
+
+Reproduced standalone by calling `_run_pipeline()` directly with the real player-character prompt
+and saving the *raw*, pre-`rembg` image (same diagnostic technique as the earlier chroma-key
+investigation): SD-Turbo had drawn an entire elaborate scene -- floating islands, water, trees,
+several small figures -- instead of one isolated character. The terminal output explained why:
+"Token indices sequence length is longer than the specified maximum sequence length for this
+model (95 > 77)... The following part of your input was truncated." `_scene_descriptions()`
+embeds up to 220 characters of the scene prompt for the `"agent"` key (reasonable for the OpenAI
+backend, a much larger model with no such hard limit) -- but `DIFFUSION_SPRITE_PROMPT_TEMPLATE`
+put the fixed "isolated object... plain simple background" instructions *after* `{desc}`, so for
+any moderately long description, CLIP's 77-token truncation silently cut those instructions away
+entirely, leaving only the raw (narrative, multi-element) description text. `rembg` then had no
+single clear foreground object to segment against a scene with several unrelated figures, which
+explains the near-blank result -- not a `rembg` bug, a garbage-in problem one step upstream.
+
+Separately, the user noticed live generation was using a lot of memory; every pipeline load had in
+fact been printing "Cannot initialize model with low cpu memory usage because `accelerate` was not
+found in the environment" the whole time -- a real, generically-useful fix sitting in plain sight
+in the tool's own output, not specific to this incident.
+
+### Fix
+
+Reordered both `DIFFUSION_SPRITE_PROMPT_TEMPLATE` and `DIFFUSION_TEXTURE_PROMPT_TEMPLATE` so the
+fixed style/framing instructions come *before* `{desc}`, not after -- truncation (which still
+happens for long descriptions) now only ever drops the tail of the description text, never the
+instructions the rest of the pipeline (crop-to-content, background removal) depends on. Added
+`accelerate` to the `diffusion` extra in `pyproject.toml`. New regression tests: one asserting the
+`{desc}` placeholder sits at the end of both templates (a structural check, not tied to any real
+model), one confirming a long description still produces a prompt whose "isolated object..."
+instructions remain intact ahead of the `Subject:` marker.
+
+### Live re-verification, honest partial result
+
+Reinstalled the `diffusion` extra with `accelerate` -- the "low cpu memory usage" warning is
+confirmed gone. Regenerated the hero sprite directly with the same real long description: no
+longer draws an entire scene (the reordering fix worked for its specific failure mode), but the
+result is still a cluster of small, somewhat disconnected fragments rather than one clean
+character -- visibly weaker than what the OpenAI backend or the plant/tower sprites in the same
+run produced. Read into why: the description that *does* survive truncation still contains
+narrative content ("...rescues a princess from a tower... piranha plants rise from below..."),
+and SD-Turbo, being small and only weakly prompt-adherent, tends to render narrative content
+somewhat literally (drawing scene elements it's told about) rather than understanding "this
+describes who the player is, draw only them" the way a much larger model can. This is reported
+honestly as a **known, only-partially-fixed limitation**, not claimed as solved: the reordering
+fix is real and correct (verified via the raw pre-processing image, not assumed), but a
+narrative-style character description may still be the wrong shape of input for a small local
+model, and further improvement would likely mean giving the diffusion backend a shorter,
+more visual-only description rather than embedding the full scene prompt -- a genuinely separate
+follow-up, not attempted this round given diminishing returns from further blind prompt tuning.
+
+### Net effect
+
+Two more real bugs found and fixed (or honestly partially fixed) purely from live-verifying the
+*previous* fix, each confirmed by direct evidence (disk usage, a dumped raw image, the tool's own
+warning text) rather than assumption -- consistent with this entire session's practice of treating
+"it ran without crashing" as necessary but never sufficient.
+
+## 2026-07-09 (same day, follow-up 4): default sprite backend reverted back to OpenAI
+
+### What happened
+
+Despite the CLIP-truncation fix and `accelerate` install genuinely improving the local diffusion
+pipeline, the user's verdict on the next real rendered scene was direct: a screenshot showing a
+garish, badly-segmented checkerboard-pattern hero sprite next to otherwise-fine plant/tower art,
+captioned *"this is shit go back to openai."* Reverted immediately, no further tuning attempted --
+the honest "known limitation" flagged in the previous entry turned out not to be acceptable in
+practice, and further blind prompt/model tuning wasn't the right response to direct user feedback
+on the actual output.
+
+### Fix
+
+`resolver.py::_select_sprite_generator()`'s default changed back to
+`os.environ.get("INFINIENV_SPRITE_BACKEND", "openai")`. `diffusion` remains fully available and
+working as an explicit opt-in (`INFINIENV_SPRITE_BACKEND=diffusion`) -- nothing about the backend
+itself, the model cache fix, or the prompt-ordering fix was reverted, since those are all real,
+correct, still-useful infrastructure regardless of which backend is the default; only the default
+selection changed back. Updated `tests/test_assets.py` (renamed/re-pointed the default-backend and
+note-provenance tests back to `openai`-as-default, removed one test that became a duplicate of an
+existing explicit-opt-in test), `CLAUDE.md` §9/§18, and `README.md`'s backend section to describe
+this as what it honestly is: a value that was tried as the default, live-verified thoroughly (a
+cache bug found and fixed, a truncation bug found and fixed), and still reverted once the actual
+visual quality was judged unacceptable by the person who has to look at the output.
+
+### Net effect
+
+The diffusion backend saga end to end is a genuine example of this session's verification
+discipline holding up even when it leads somewhere other than "ship the new thing": three real,
+non-obvious bugs were found and fixed by actually running the pipeline and looking at real
+output (the sandbox cache re-download, the CLIP truncation, and along the way a free memory-usage
+fix from `accelerate`) -- but fixing every *mechanical* bug in a pipeline doesn't guarantee the
+*product* quality clears the bar, and the right response to "this is shit" from the person the
+software is for is to revert immediately, not to keep defending the choice with more fixes.
+
+## 2026-07-09 (same day, follow-up 5): phasing through walls + no real procedural generation on a
+## cave-navigation run
+
+### Diagnosis
+
+User-reported screenshot on a different prompt ("A cave explorer chooses among uneven rocky
+tunnels... collects at least two glowing gems, then exits") flagged: phases through walls, and no
+uneven terrain or multiple paths despite the prompt explicitly asking for "procedurally
+generated... multiple possible paths." Found the run (`runs/gui_1783652701`) and read the actual
+generated code rather than guessing.
+
+`floors`/`path_cells` was a hand-listed set of specific grid cells -- essentially one winding
+corridor with a couple of one-cell alcoves, nothing procedural, no real branch choice. Worse: the
+agent's own movement wasn't checked against this data at all -- a hardcoded `route` list of
+waypoints was interpolated in a straight line between consecutive cell centers with zero
+wall-collision checking, despite the script generating a `walls` array from the exact same
+`floors` set moments earlier. Reproduced the exact defect programmatically (not by eyeballing):
+waypoint `(7,6)` on the route was never a floor cell at all, and two consecutive-waypoint segments
+(`(6,7)->(7,6)` and `(11,9)->(12,8)`) cut diagonally through a wall corner where *both* adjacent
+cells were blocked. This is the same "animation, not simulation" anti-pattern from earlier in this
+session's history, recurring in a new form: a route was planned to look collision-free, then
+trusted, never actually checked frame by frame.
+
+### Fix
+
+Two new generic modules, same pattern as every prior fix in this thread -- real, tested,
+importable capability, not a prompt worked-example:
+
+- `engine/grid_collision.py`: `segment_blocked(p0, p1, blocked, tile_size)` samples a move at
+  sub-tile resolution (not just its two endpoints) -- the exact check that would have caught the
+  diagonal-corner-cut bug, which neither endpoint cell alone reveals. `move_with_collision(pos,
+  target, speed, dt, blocked, tile_size)` is a drop-in replacement for hand-rolled waypoint
+  interpolation that stops at a wall instead of passing through it.
+- `engine/level_generation.py`: `generate_organic_region(width, height, start, *, steps, seed,
+  branch_chance, max_walkers)`, a seeded branching random-walk cave carver -- connected by
+  construction, real branch points as an emergent property of the algorithm rather than something
+  to hand-design. `region_is_connected(region, start)` is a general BFS reachability check for
+  verifying any level (generated or hand-authored) is actually fully navigable -- the motivating
+  bug's out-of-floor waypoint would have failed this immediately instead of surfacing as a visual
+  glitch three steps later.
+
+Prompt changes stayed principle-level, no named incident: both modules added to "Reusable building
+blocks"; principle 2 gained a clause naming grid-wall collision as a rule that must actually be
+*checked*, not just planned around; principle 3 gained a clause extending its existing "build what
+the task describes" idea from hazard motion to level structure itself; the self-review invariant-
+check example list gained "no consecutive position pair in the trace crosses a wall cell." 32 new
+tests across the two modules, mirroring the existing `motion_patterns`/`animation` test shape.
+
+### Net effect
+
+The fifth real, live-caught bug class in this session found by reading actual agent-authored code
+rather than trusting a self-report -- and, like several before it, traces to the same root
+tendency (a plan that *looks* correct, interpolated or executed without ever being checked against
+the rules it was supposedly respecting) recurring in a domain (grid navigation, level layout) the
+existing principles hadn't yet been extended to cover explicitly.
+
+## 2026-07-09 (same day, follow-up 6): capability-ceiling feedback -- no state-dependent puzzle
+## logic yet, only static navigation
+
+### Diagnosis
+
+User feedback on the cave-navigation fix was not about it being wrong -- it worked, verified live.
+It was a capability-ceiling observation with a graded difficulty table attached: every sandbox run
+this session (Mario rescue, cave, factory floor, submarine cave) had produced *static
+navigation* -- walk a space, avoid/reach things -- with the win condition always collapsing to
+whichever single check is simplest (a bare position, a raw item count). None had produced real
+state-dependent puzzle logic: a locked exit gated on multiple jointly-required conditions, an
+ordering between sub-objectives. Explicit instruction: fix this *generically*, not by re-tuning
+the cave prompt again -- and a specific harder prompt to verify against: "Create a cave maze where
+the exit is locked until the player collects two gems, avoids spikes, presses a pressure plate,
+and then reaches the exit."
+
+Root cause, consistent with every fix in this thread: no reusable primitive existed for
+state-dependent gating, the way `action_registry.py` gave closed action dispatch and
+`grid_collision.py` gave real wall collision. The base engine's schema already models locks/keys
+and ordered `sequence` goals -- but wired through `GameState`/`solve_scene()`, which no sandbox
+run this session has actually used (every one writes a custom simulation loop instead). A
+sandbox-facing equivalent needed to be dependency-free like the other `engine/` additions, not
+coupled to `GameState`.
+
+### Fix
+
+New module `engine/puzzle_state.py`: `PuzzleState` (named flag/counter store --
+`set`/`increment`/`get`/`snapshot`) and `Gate` (a declarative precondition over several
+flags/counters jointly -- `Gate(requires={"gems": 2, "switch_pressed": True})`,
+`is_open()`/`missing()`; numeric thresholds by `>=`, boolean by equality, unset flags default to
+closed). One real implementation subtlety caught by its own test suite: `bool` is a subclass of
+`int` in Python, so a naive "is this numeric" check on `increment()` would silently allow
+incrementing a boolean flag (`True + 1 == 2`) -- excluded explicitly.
+
+Prompt gained a genuinely new principle (7: state/sequencing the task describes must be real
+dependency structure, not collapsed to the simplest true check) rather than folding into principle
+3 again, since goal/win-condition *structure* is a different category from motion/terrain/
+rendering -- the same reasoning that justified principle 6 (animation) as its own addition. One
+"Reusable building blocks" entry, one self-review invariant example (assert a declared `Gate` was
+actually closed at some point before it opened).
+
+### Live verification
+
+Ran the user's own suggested harder prompt (not the cave prompt, deliberately, since this fix was
+explicitly not meant to over-fit to it) via `--sandbox`. First attempt, no visibility-tuning round
+needed. Confirmed from the synced code, not the agent's summary:
+`gate=Gate({"gems":2,"plate_pressed":True})` gates the exit directly (`if pos==exitc and
+gate.is_open(pstate) and not state["lost"]`) -- and the agent went further than asked, gating the
+pressure plate itself on already having 2 gems (`pos==plate and pstate.get("gems",0)>=2`), a real
+ordering dependency layered on top of the joint gate, unprompted. Checked the actual trace data
+(not assumed): `gate_open` was `False` for 28 of 36 steps and only flipped `True` once every
+condition held, staying open through the end -- a genuinely tested dependency, not a decorative
+one that was open from frame zero. The same run also imported and used `action_registry.py`
+(closed action dispatch) and `grid_collision.py`/`animation.py` alongside `puzzle_state.py` --
+four of this session's reusable primitives composed together in a single file. `render.png` showed
+a coherent branching maze with gems, spikes, a visible pressure plate, and the exit.
+
+### Net effect
+
+Closes the specific capability gap named in the feedback (locked-exit/gem/switch/required-order
+puzzles), verified against a prompt the fix was deliberately *not* tuned to, with hard trace data
+rather than a visual glance or a self-report -- consistent with this entire session's practice.
+The user's harder-still tier (moving hazards+switches+crates+NPCs+backtracking) is now partially
+covered too: moving hazards (`motion_patterns`), a switch/plate pattern (`puzzle_state`), real
+wall collision and terrain (`grid_collision`/`level_generation`) all exist and compose, as this
+run itself demonstrated by using four of them together unprompted. Crates (pushable objects) and
+NPCs (reactive, not just patrol/pursue) remain unaddressed -- not claimed as solved here.

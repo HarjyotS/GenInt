@@ -46,6 +46,16 @@ def test_interpreter_briefing_reports_real_pymunk_availability():
         assert "pymunk is NOT installed" in briefing
 
 
+def test_interpreter_briefing_reports_real_diffusion_extra_availability():
+    import importlib
+
+    briefing = _interpreter_briefing()
+    if importlib.util.find_spec("torch") is not None and importlib.util.find_spec("diffusers") is not None:
+        assert "torch/diffusers are installed and importable" in briefing
+    else:
+        assert "torch/diffusers are NOT installed" in briefing
+
+
 def _valid_scene_json() -> str:
     return json.dumps(
         {
@@ -292,9 +302,35 @@ def test_session_is_created_with_a_read_only_grant_for_the_harness_python_prefix
     manifest = _created_fake_clients[0].last_create_manifest
     assert manifest is not None
     grants = manifest.extra_path_grants
-    assert len(grants) == 1
-    assert grants[0].path == sys.prefix
-    assert grants[0].read_only is True
+    prefix_grants = [g for g in grants if g.path == sys.prefix]
+    assert len(prefix_grants) == 1
+    assert prefix_grants[0].read_only is True
+
+
+def test_session_is_created_with_a_read_write_grant_for_the_model_cache_dir(tmp_path, patched_sdk):
+    # Regression test for a real bug found live: HOME resolves within a sandboxed run's own
+    # ephemeral workspace filesystem, not the host's real home directory, so the local diffusion
+    # backend's model-weight cache (see generator_diffusion.py) would otherwise be re-downloaded
+    # from scratch on every single sandboxed run instead of being reused. Fixed by granting the
+    # shared, project-level model cache directory read-write access via the session's Manifest.
+    from infinienv.assets.generator_diffusion import model_cache_dir
+
+    Runner = patched_sdk
+    _created_fake_clients.clear()
+
+    async def fake_run(agent, message, *, run_config, max_turns):
+        session = run_config.sandbox.session
+        _write_good_attempt(session.files)
+        return SimpleNamespace(final_output="summary")
+
+    with patch.object(Runner, "run_streamed", _streamed(fake_run)):
+        run_sandbox_generation("make a game", 1, str(tmp_path / "run"), max_repair_attempts=0)
+
+    manifest = _created_fake_clients[0].last_create_manifest
+    grants = manifest.extra_path_grants
+    cache_grants = [g for g in grants if g.path == model_cache_dir()]
+    assert len(cache_grants) == 1
+    assert cache_grants[0].read_only is False
 
 
 def test_assets_mode_threads_through_to_workspace_and_agent_message(tmp_path, patched_sdk):

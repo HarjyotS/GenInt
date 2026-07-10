@@ -23,6 +23,16 @@ def test_build_workspace_dir_copies_engine_and_reference_runner(tmp_path):
     assert os.path.isdir(os.path.join(workspace, "assets"))
     assert os.path.exists(os.path.join(workspace, "run_scene.py"))
     assert os.path.exists(os.path.join(workspace, "ASSETS_MODE"))
+    # the generic, reusable sandbox-facing primitives (action registry, motion patterns,
+    # animation helpers) are plain files under engine/, so the existing shutil.copytree("engine")
+    # picks them up automatically -- assert they actually land in a built workspace.
+    assert os.path.exists(os.path.join(workspace, "engine", "action_registry.py"))
+    assert os.path.exists(os.path.join(workspace, "engine", "motion_patterns.py"))
+    assert os.path.exists(os.path.join(workspace, "engine", "animation.py"))
+    assert os.path.exists(os.path.join(workspace, "engine", "platformer_physics.py"))
+    assert os.path.exists(os.path.join(workspace, "engine", "grid_collision.py"))
+    assert os.path.exists(os.path.join(workspace, "engine", "level_generation.py"))
+    assert os.path.exists(os.path.join(workspace, "engine", "puzzle_state.py"))
     # nothing from the installed package's cli/generation/gui should leak in, and only the
     # one file assets/*.py actually needs (ProviderError) is copied from llm/, not the
     # whole package (providers, prompts, heavy optional deps).
@@ -77,6 +87,39 @@ def test_build_workspace_dir_copy_is_actually_self_contained(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == os.path.join(workspace, "engine", "grid.py")
+
+
+def test_reference_run_scene_records_asset_notes_in_metrics(tmp_path):
+    # Regression test: resolve_assets() returns (entries, notes), and the reference run_scene.py
+    # template used to discard `notes` entirely -- a sprite that silently failed to generate had
+    # no trace of why anywhere. ASSETS_MODE=none exercises the template's default asset_notes=[]
+    # path without needing network access; the field's presence is what regressed, not its
+    # contents for any particular mode.
+    import subprocess
+    import sys
+
+    workspace = build_workspace_dir(str(tmp_path), assets_mode="none")
+    scene = {
+        "version": "0.1",
+        "seed": 1,
+        "metadata": {"name": "t", "prompt": "p"},
+        "grid": {"width": 4, "height": 4, "tile_size": 32},
+        "agent": {"id": "agent", "x": 0, "y": 0},
+        "objects": [{"id": "spot", "type": "exit", "x": 1, "y": 0}],
+        "walls": [],
+        "goals": [{"id": "g", "type": "reach", "target_id": "spot"}],
+    }
+    with open(os.path.join(workspace, "scene.json"), "w") as f:
+        json.dump(scene, f)
+
+    result = subprocess.run(
+        [sys.executable, "run_scene.py"], cwd=workspace, capture_output=True, text=True
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+
+    with open(os.path.join(workspace, "metrics.json")) as f:
+        metrics = json.load(f)
+    assert metrics["asset_notes"] == []
 
 
 def test_build_workspace_dir_excludes_pycache(tmp_path):

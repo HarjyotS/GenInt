@@ -55,6 +55,57 @@ Requirements, non-negotiable regardless of how you implement the mechanic:
 - Run whatever you build (via the shell) before finishing, and fix errors you encounter -- don't
   hand back code you haven't executed.
 
+## Reusable building blocks already in your workspace
+
+Before hand-rolling motion, animation, or action-dispatch logic from scratch, check whether one
+of these already does what you need -- read each module's own docstrings for exact signatures,
+there's no need to memorize them here:
+
+- `engine/action_registry.py` -- `ActionSpace`: register your simulation's legal actions once,
+  then `dispatch()` is the only way decision logic can apply one; an unregistered name raises
+  instead of silently doing nothing.
+- `engine/motion_patterns.py` -- generic composable motion functions: `patrol()` (sinusoidal
+  back-and-forth), `pulse_cycle()` (a rise/hold/fall/idle timing curve for anything that emerges
+  and retracts), `pursue()` (step toward a target at capped speed).
+- `engine/animation.py` -- generic phase-driven animation: `phase_of()` (time to a repeating
+  `[0, 1)` phase), `oscillate()` (sweep a drawn parameter between two values by phase),
+  `cycle_variant()` (pick a named state/sprite-frame by phase).
+- `engine/platformer_physics.py` -- generic grounded-character physics: `integrate_grounded_2d()`
+  (gravity + ground contact + optional world/screen-bounds clamp in one step), `climb_step()`
+  (moves only vertically along a structure, so a horizontal run velocity can't also apply during
+  a climb; raises if the character isn't actually on the given structure's bounds), plus a
+  standalone `clamp_to_bounds()`.
+- `engine/grid_collision.py` -- generic wall collision for a continuous-position simulation with
+  grid-based walls: `segment_blocked()` (does a straight-line move cross any wall cell, checked
+  at sub-tile resolution so a diagonal move can't cut through a wall corner undetected) and
+  `move_with_collision()` (step toward a target at capped speed, stopping instead of moving if
+  the step would cross a wall) -- use this instead of interpolating along a hand-planned route of
+  waypoints, which has no way to notice if a waypoint or the straight line between two waypoints
+  actually passes through a wall.
+- `engine/level_generation.py` -- generic procedural terrain: `generate_organic_region()` (a
+  seeded branching random-walk cave/region carver -- produces an irregular, connected floor-cell
+  set with real branch points as an emergent property, not something to hand-author cell by cell)
+  and `region_is_connected()` (BFS reachability check, useful for verifying any level -- generated
+  or hand-authored -- is actually fully navigable before shipping it).
+- `engine/puzzle_state.py` -- generic named state and gating: `PuzzleState` (set/get/increment
+  named flags and counters -- "has X happened yet") and `Gate` (a declarative precondition over
+  several flags/counters at once, e.g. `Gate(requires={"gems": 2, "switch_pressed": True})`,
+  with `is_open()`/`missing()`) -- use this whenever a win condition, an exit, or any other part
+  of the task depends on more than one thing having happened, rather than hand-rolling scattered
+  flags and if-conditions that are easy to under-specify.
+- `assets/resolver.py`'s `variant_types()`/`variant_descriptions()` plus
+  `resolve_assets(scene, mode, cache_dir, extra_types=..., extra_descriptions=...)` -- resolve
+  more than one sprite for a single conceptual entity (e.g. distinct animation frames or costume
+  states), independent of whether each state corresponds to a placed `scene.json` object.
+
+None of these are mandatory -- but before writing your own version of what one of them already
+does (a sine-based oscillation, a rise/hold/fall timing curve, a step-toward-target chase, a
+phase-to-sprite lookup), import and use the existing one instead: it's already tested, and a
+hand-rolled equivalent almost always turns out to be the same handful of lines, just untested and
+inconsistent with what a repair attempt or a future run will also find here. Extend or ignore what
+doesn't fit, and feel free to add further modules of your own under `engine/` following the same
+style if a task needs a reusable pattern that isn't here yet.
+
 ## Design principles: a closed action space is what makes a simulation real
 
 These are general principles for building ANY environment here, not a list of specific bugs to
@@ -80,9 +131,16 @@ This single discipline is what prevents nearly everything below, because a bug b
 controller picked a bad action" (visible, fixable) instead of "some code path did something the
 rules never allowed" (invisible until someone notices the output looks wrong).
 
-**2. A rule that has exceptions isn't a rule.** Gravity, collision, structure-gating, and hazard
-contact must apply the same way every step, to everything they're declared to apply to -- never
-skipped, loosened, or exempted for one region/entity as a shortcut out of a bug. If enforcing a
+**2. A rule that has exceptions isn't a rule.** Gravity, collision, world/screen bounds,
+structure-gating, and hazard contact must apply the same way every step, to everything they're
+declared to apply to -- never
+skipped, loosened, or exempted for one region/entity as a shortcut out of a bug. For a
+continuous-position simulation with grid-based walls, that means every move is actually checked
+against the walls (`engine/grid_collision.py`'s `move_with_collision()`/`segment_blocked()`),
+not just planned along a route that's assumed to avoid them -- a pre-planned path interpolated
+blindly is exactly the "declared a rule, then never actually checked it" failure this principle
+exists to prevent, and a diagonal move between two open cells can still cut through a blocked
+corner neither endpoint is inside, which is easy to miss without checking sub-tile positions. If enforcing a
 rule causes your controller to get stuck, the bug is in the *decision logic* (it's choosing an
 illegal or unreachable target) or the *level layout* (a structure genuinely doesn't reach where it
 needs to) -- fix one of those. Never add a condition that widens what a rule allows just to make
@@ -95,14 +153,34 @@ matter.** A hazard the character's real actions can never bring it near is decor
 obstacle -- if the task describes something the character is meant to actively avoid, your control
 logic has to move it *through* space that hazard can reach, reacting to current hazard state each
 step, not pre-planned to dodge the hazard's existence entirely, and not "stop and wait" as the only
-response to danger. Build the specific behavior the task actually describes (a hazard that moves
-side to side, up and down, chases, patrols a fixed lane) rather than whatever's easiest to code.
-Likewise, if the character is grounded (walks/runs, not flies/swims), the *only* declared actions
+response to danger. Build the specific behavior the task actually describes, not whatever's
+easiest to code -- read the task's own positional/behavioral language ("from below," "emerges,"
+"erupts," "guards a doorway," "chases") and implement the motion pattern that language actually
+implies, rather than defaulting to a generic side-to-side patrol just because it would technically
+satisfy "the hazard is reachable." Before hand-coding that motion, check `engine/motion_patterns.py`
+-- it already has `patrol()` (back-and-forth), `pulse_cycle()` (a rise/hold/fall/idle timing curve
+for anything that emerges and retracts on a cycle), and `pursue()` (chase toward a target at
+capped speed) ready to import, so the pattern that matches what the task describes is usually
+already there rather than something to invent. Likewise, if the character is
+grounded (walks/runs, not flies/swims), the *only* declared actions
 that move it vertically should be climbing a real structure or a genuine jump -- a one-time
 upward impulse that gravity integrates back down into a parabola, landing on ground/a platform --
 never a velocity that can be reapplied mid-air to hover or climb indefinitely; dodging something
 at a different height should usually mean moving sideways or timing one real jump, not levitating
-to whichever height is safest this frame.
+to whichever height is safest this frame. `engine/platformer_physics.py`'s `integrate_grounded_2d()`
+(gravity, ground contact, world-bounds clamp) and `climb_step()` (vertical-only movement along a
+structure, so a run action's horizontal velocity can't bleed into a climb) exist so this doesn't
+have to be hand-integrated from scratch -- a hand-rolled version of this is exactly where a
+"run" action's velocity being left applied during a "climb" branch, or a climb condition with no
+upper bound tied to the structure's actual extent, tends to slip in unnoticed. This "build what
+the task actually describes" idea applies to the level's own structure too, not just to hazard
+motion: a task that asks for procedurally generated, uneven, or multiple-path terrain needs
+terrain that actually is those things -- check `engine/level_generation.py`'s
+`generate_organic_region()` (a seeded branching random walk that produces real branch points as
+an emergent property) before hand-listing a single corridor's cells one by one, which tends to
+collapse onto the simplest shape that technically connects a start to an end regardless of what
+was asked for. Whatever floor-plan you end up with, hand-authored or generated, verify it with
+`region_is_connected()` rather than assuming a route through it is actually walkable.
 
 **4. Size contact/collision against what you actually draw.** A hitbox distance chosen without
 reference to the sprites you render will disagree with what a viewer sees -- if two sprites
@@ -116,6 +194,34 @@ and ask which of your small set of declared actions caused it. If the answer is 
 code path did it directly," that's the root defect this whole section exists to prevent, whatever
 form it happens to take in this particular game -- go find that code path and route it through a
 real action instead of patching the specific symptom.
+
+**6. Animate what has an obviously animated real-world reference, not just its position.** If the
+thing you're drawing would visibly change pose or state on its own in reality -- an opening/
+closing mouth, legs mid-stride, a rippling flag, a hit-flash, a structure extending and
+retracting -- at least one drawn parameter must vary with your own phase/state timer each frame, on top of whatever
+translation the entity is already doing. A game where every entity is a single fixed shape or
+sprite that only ever translates is missing real animation, however correct its physics is.
+Before hand-rolling the phase math, check `engine/animation.py` -- `phase_of()` turns elapsed time
+into a repeating cycle, `oscillate()` sweeps a drawn parameter between two values by phase, and
+`cycle_variant()` picks a named sprite/pose by phase -- these cover the common cases directly.
+
+Self-test: freeze two frames from your own `replay.gif` where an entity is at the same position
+but at a different point in its cycle (e.g. two different times a patrolling hazard passes
+through the same spot). If the drawn pose is pixel-identical both times, you haven't animated it,
+only moved it.
+
+**7. State and sequencing the task describes must be real dependency structure, not collapsed to
+the simplest thing that's true.** If the task describes multiple sub-objectives, an ordering
+between them, or a condition on when something becomes available ("the exit is locked until...",
+"first do X, then Y"), your win/unlock condition has to actually encode that dependency, not
+quietly simplify to whichever single check is easiest to write (a bare position check, one item
+count) while ignoring the rest of what was asked. Under time pressure this collapse happens by
+default, the same way a hazard's motion collapses to a side-to-side patrol (principle 3) if you
+don't deliberately build what was actually described. Before hand-rolling scattered flags and
+if-conditions for this, check `engine/puzzle_state.py` -- `PuzzleState` tracks named flags/counters
+("has X happened yet"), and `Gate` declares a precondition over several of them jointly
+(`is_open()`/`missing()`), so a locked exit, a required item, or an ordered sequence is a couple
+of calls at the right moments rather than something to invent and easy to under-specify.
 
 If you're hand-tuning numeric constants through many small edits, use `apply_patch` for each
 change, not repeated shell text substitution (`perl -pi -e`, `sed -i`) against your own source --
@@ -136,19 +242,28 @@ trace against those rules directly -- e.g. every position change is attributable
 action (principle 5), a health/lives change only ever coincides with a real hazard distance below
 your declared contact threshold, a grounded character's vertical position never moves outside a
 climb or a real jump arc, structure-gated cells were never entered from outside the declared
-structure, and -- covering principle 3 specifically, since "every action is legal" doesn't imply
-"every declared hazard mattered" -- **every declared hazard's position came within some plausible
-threat distance of the agent at least once across the trace**; one that never did is decorative,
-whatever the rest of the invariant check says. This is exhaustive over the whole run and precise in
-a way eyeballing frames can't be -- if you can't state the check precisely enough to write it, you
-don't actually know whether the rule holds. Fix anything it finds before moving on.
+structure, **no consecutive position pair in the trace crosses a wall cell** (a straight-line
+check between them, not just whether each endpoint alone is legal -- see
+`engine/grid_collision.py`'s `segment_blocked()`), and -- covering principle 3 specifically, since
+"every action is legal" doesn't imply "every declared hazard mattered" -- **every declared
+hazard's position came within some plausible threat distance of the agent at least once across
+the trace**; one that never did is decorative, whatever the rest of the invariant check says. If
+you used a `Gate` (principle 7), assert it was actually closed (`is_open()` false) at some point
+in the trace before it opened -- a gate that's trivially open from the start never tested the
+dependency it was supposed to enforce. This
+is exhaustive over the whole run and precise in a way eyeballing frames can't be -- if you can't
+state the check precisely enough to write it, you don't actually know whether the rule holds. Fix
+anything it finds before moving on.
 
 **2. Then look at the actual gameplay.** Extract several representative frames from your
 `replay.gif` as separate PNG files (the start, a moment near a hazard, any moment a rule should
 trigger, the end) and call the `view_image` tool on each plus on `render.png`. This catches what
 step 1 can't: does this actually *look* right -- sprites overlapping with no consequence (or
 registering contact with no visible overlap), anything clipped through geometry, motion that looks
-implausible frame to frame even though no invariant check caught it.
+implausible frame to frame even though no invariant check caught it, and -- per principle 6 --
+does any entity that should be animated actually *look* different in pose/state between frames at
+different points in its cycle, not just at different positions; two frames of the same hazard at
+the same spot but a different phase should not look identical.
 
 If either pass finds a problem, fix the *simulation logic* (find which action/rule broke, per the
 principles above) and re-render -- do not paper over it by tweaking a numeric threshold, a
@@ -198,7 +313,13 @@ switching modes; use whatever `ASSETS_MODE` already says. `resolve_assets` alrea
 scene's own `mechanics.custom_object_types` descriptions and its `prompt` (for the player
 character specifically) to ask for art that matches what THIS task actually needs, instead of a
 generic default -- you don't need to do anything extra to get that; it happens automatically from
-what you already put in `scene.json`.
+what you already put in `scene.json`. `resolve_assets` returns `(entries, notes)` -- record
+`notes` somewhere visible (e.g. an `asset_notes` key in `metrics.json`, as the default
+`run_scene.py` already does) rather than discarding it. Sprite generation can fail per-type for
+real reasons (a transient API error, a content-policy rejection, a timeout); when it does, the
+renderer silently falls back to a flat colored cell or your own hand-drawn primitive, and without
+`notes` recorded there is no way for anyone -- including you, on a repair attempt -- to tell a
+real failure apart from a type that was never requested.
 
 **If you rewrite `run_scene.py` for a custom simulation loop (continuous positions, not the grid),
 you must still actually load and paste the resolved sprite images at your computed positions**
@@ -226,6 +347,17 @@ and only fall back to drawing an ellipse/rectangle when it returns `False` (no s
 key -- e.g. `ASSETS_MODE` is `none`, or generation failed and no local fallback existed). Primitive
 shapes are the fallback of last resort, not the default rendering path, whenever real sprites were
 requested.
+
+**Per principle 6, a single `paste_sprite` call per entity per frame is only correct for something
+that genuinely has no animated state of its own.** For anything that does, key the sprite lookup
+(or a drawn overlay) by phase/state, not just by entity type -- see `engine/animation.py`'s
+`cycle_variant()` (picks a named state from a phase) paired with `assets/resolver.py`'s
+`variant_types()`/`variant_descriptions()` and `resolve_assets(..., extra_types=...,
+extra_descriptions=...)` (resolves one sprite per named state, whether or not that state
+corresponds to a placed `scene.json` object) to get real per-state sprites, or
+`engine/animation.py`'s `oscillate()` to drive a drawn overlay on top of a single sprite instead.
+Either way, the phase/state must come from your own simulation clock, computed the same way every
+frame -- not a one-off pose chosen for a single screenshot.
 
 If you are told a previous attempt in this same workspace failed an independent outer check,
 your existing files from that attempt are still on disk -- inspect them (`ls`, `cat`), find and

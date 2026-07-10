@@ -20,6 +20,7 @@ openai = ["openai-agents>=0.0.3", "openai>=1.30"]
 anthropic = ["anthropic>=0.34"]
 gui = ["flask>=3.0"]
 physics = ["pymunk>=7.0"]
+diffusion = ["torch>=2.0", "diffusers>=0.27", "transformers>=4.35", "rembg[cpu]>=2.0", "accelerate>=0.25"]
 dev = ["pytest>=8.0"]
 
 [project.scripts]

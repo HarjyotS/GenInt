@@ -256,6 +256,33 @@ pool, `INFINIENV_ASSET_CONCURRENCY`, default 4) rather than one type at a time, 
 regardless of source quality — live-verified: 4 novel sprites in ~16s concurrently vs. the ~4x
 that sequentially, with no visible loss of quality at 64x64.
 
+### Sprite generation backend: OpenAI (default) or local diffusion
+
+`generated`/`auto` mode's actual image-generation backend is controlled by
+`INFINIENV_SPRITE_BACKEND` (`openai`, the default, or `diffusion`), independent of the `--assets`
+mode value itself — both backends share the exact same contract, so nothing else about how sprites
+are resolved/cached/manifested changes based on which one runs.
+
+- `openai` (default) — the OpenAI Images API path. Real failure modes to know about: account rate
+  limits (`gpt-image-1` is commonly limited to a handful of requests/minute) and content-moderation
+  rejections for some character descriptions; either way the affected sprites fail cleanly and are
+  recorded in `metrics.json`'s `asset_notes` field (the real per-type error, not silently
+  swallowed) rather than pretending nothing went wrong.
+- `diffusion` — a small local on-device model (`stabilityai/sd-turbo` by default,
+  `INFINIENV_DIFFUSION_MODEL` to override), opt-in via `INFINIENV_SPRITE_BACKEND=diffusion`, no
+  cloud call and no rate limit. Requires the optional `diffusion` extra: `pip install
+  infinienv[diffusion]` (`torch`, `diffusers`, `transformers`, `rembg[cpu]`, `accelerate`).
+  Auto-selects `cuda` → `mps` → `cpu`. **License note**: the default model, SD-Turbo, ships under
+  the Stability AI Community License (free for research/personal/small-business use; a revenue
+  threshold applies beyond that) — not as permissive as this project's other dependencies. Local
+  pipelines have no request-time "transparent background" feature the way the OpenAI API does, so
+  discrete objects go through a real background-removal model (`rembg`/U2Net) after generation.
+  **Was briefly the default**, reverted after live-verified quality problems with character/hero
+  sprites (a small, fast, weakly-prompt-adherent model isn't a great fit for narrative-heavy
+  character descriptions) — still a good opt-in for textures/simple objects or when OpenAI's rate
+  limit/moderation is the actual blocker. See `CLAUDE.md`'s asset pipeline section for the full,
+  honest account of what was tried and what didn't work.
+
 ## Creativity: mutation + curriculum + dataset export
 
 `infinienv mutate` takes one valid scene and produces N *validated* variants — five deterministic

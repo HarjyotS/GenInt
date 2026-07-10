@@ -74,8 +74,24 @@ def _interpreter_briefing() -> str:
         pymunk_note = "pymunk is installed and importable in it"
     except ImportError:
         pymunk_note = "pymunk is NOT installed in it -- if a mechanic needs real physics, implement your own"
+    try:
+        import diffusers  # noqa: F401
+        import torch  # noqa: F401
+
+        diffusion_note = (
+            "torch/diffusers are installed and importable in it; model weights are cached in a "
+            "shared, project-level directory reused across every run (sandboxed or not), so "
+            "generation may take a while the first time a given model/type needs downloading but "
+            "is fast afterward -- if a generation call seems slow, that's a one-time download, "
+            "not a hang; let it finish rather than interrupting and disabling asset generation"
+        )
+    except ImportError:
+        diffusion_note = (
+            "torch/diffusers are NOT installed in it -- assets.resolver's local diffusion sprite "
+            "backend (INFINIENV_SPRITE_BACKEND=diffusion) will raise a clear ProviderError if selected"
+        )
     return (
-        f"Python interpreter: {sys.executable} ({pymunk_note}).\n"
+        f"Python interpreter: {sys.executable} ({pymunk_note}; {diffusion_note}).\n"
         f"ALWAYS invoke it by this exact absolute path, e.g. `{sys.executable} run_scene.py` -- "
         "never a bare `python`/`python3` name. Your shell commands run as `sh -lc \"...\"` (a login "
         "shell), which on this kind of host re-runs PATH-rewriting logic on *every single command*, "
@@ -257,6 +273,18 @@ async def _run_async(
     stage("Preparing isolated sandbox workspace (copy of schema/engine/navigation/validation/render/assets)...")
     workspace_dir = build_workspace_dir(out_dir, assets_mode=assets_mode)
 
+    # Real, live-caught bug (see notes.md): inside a sandboxed run, HOME resolves within that
+    # one attempt's ephemeral workspace filesystem, not the host's real home directory -- so the
+    # local diffusion backend's HF_HOME/U2NET_HOME defaults (see generator_diffusion.py) would
+    # otherwise land inside the sandbox and re-download multi-GB model weights from scratch on
+    # every single run. Set the same env var the outer process uses so it's inherited into the
+    # sandboxed subprocess's environment (UnixLocalSandboxClient passes env = os.environ.copy()
+    # to every exec_command), and grant that exact host path read-write so a download that
+    # already happened (by this run or any earlier one) is reused instead of repeated.
+    from infinienv.assets.generator_diffusion import model_cache_dir
+
+    os.environ.setdefault("INFINIENV_MODEL_CACHE_DIR", model_cache_dir())
+
     client = UnixLocalSandboxClient()
     # Grant read-only access to this harness's own Python prefix (sys.prefix -- e.g. a project
     # .venv). Without this, on macOS, exec_command runs every shell command through a
@@ -277,6 +305,13 @@ async def _run_async(
                 path=sys.prefix,
                 read_only=True,
                 description="Python interpreter and installed packages (incl. pymunk if the physics extra is installed)",
+            ),
+            SandboxPathGrant(
+                path=os.environ["INFINIENV_MODEL_CACHE_DIR"],
+                read_only=False,
+                description="Shared, project-level cache for local diffusion/background-removal model "
+                "weights -- read-write so a first-time download persists across runs instead of "
+                "re-downloading multi-GB weights inside each sandboxed run's ephemeral filesystem",
             ),
         )
     )
@@ -419,7 +454,7 @@ def run_sandbox_generation(
     out_dir: str,
     *,
     model: str | None = None,
-    max_turns: int = 40,
+    max_turns: int = 60,
     max_repair_attempts: int | None = None,
     assets_mode: str = "none",
     require_runs_dir: bool = False,

@@ -133,7 +133,14 @@ GenInt/                            # repo root
 │   │   ├── state.py                # GameState/ObjectState (mutable runtime state)
 │   │   ├── actions.py               # apply_action: move/pick_up/drop/unlock/wait + routes to...
 │   │   ├── interactions.py          # ...the custom-interaction effect interpreter
-│   │   └── physics.py               # deterministic grid-physics: push + slide (section 5b)
+│   │   ├── physics.py               # deterministic grid-physics: push + slide (section 5b)
+│   │   ├── action_registry.py       # ActionSpace: generic closed-action dispatch (section 11)
+│   │   ├── motion_patterns.py       # generic patrol/pulse_cycle/pursue (section 11)
+│   │   ├── animation.py             # generic phase_of/oscillate/cycle_variant (section 11)
+│   │   ├── platformer_physics.py    # generic integrate_grounded_2d/climb_step (section 11)
+│   │   ├── grid_collision.py        # generic segment_blocked/move_with_collision (section 11)
+│   │   ├── level_generation.py      # generic generate_organic_region/region_is_connected (section 11)
+│   │   └── puzzle_state.py          # generic PuzzleState/Gate: named state + declarative gating (section 11)
 │   ├── validation/
 │   │   ├── errors.py                # ValidationIssue/ValidationResult
 │   │   ├── reachability.py          # BFS reachability pre-check
@@ -150,7 +157,9 @@ GenInt/                            # repo root
 │   │   ├── placeholder_gen.py       # generates the checked-in base/*.png (run once, committed)
 │   │   ├── base/*.png               # local placeholder sprites, no key/network needed
 │   │   ├── generator_openai.py      # real sprite generation via the OpenAI Images API
-│   │   ├── resolver.py              # resolve_assets(): none/local/generated/auto modes
+│   │   ├── generator_diffusion.py   # local on-device sprite generation (opt-in, no rate limit)
+│   │   ├── resolver.py              # resolve_assets(): none/local/generated/auto modes,
+│   │   │                            # INFINIENV_SPRITE_BACKEND picks openai vs. diffusion
 │   │   └── manifest.py              # AssetEntry, asset_plan.json / asset_manifest.json builders
 │   ├── evaluation/
 │   │   ├── runner.py                # run_generation(): the full generate->...->artifacts pipeline
@@ -621,6 +630,143 @@ sandbox run that session had ever passed `--assets` at all. Live-verified end to
 turtle sprites with an actual shell pattern, replacing the crude hand-drawn circles/rectangles
 every prior run had used.
 
+**A generation failure's reason used to be silently discarded.** `resolve_assets()` has always
+returned `(entries, notes)`, `notes` carrying the real per-type failure reason -- but both the
+reference sandbox `run_scene.py` template and every sandbox-agent-authored rewrite of it captured
+`notes` and then threw it away, so a sprite that silently fell back to a hand-drawn primitive left
+zero trace of why. A user-reported "the graphics look so poor" screenshot (two of eight sprites in
+a Mario-style scene were crude primitives while the rest were real art) led to fixing this: the
+reference template (`sandbox/workspace.py::_RUN_SCENE_TEMPLATE`) now records `asset_notes` in
+`metrics.json` unconditionally (empty list when there's nothing to report), and `sandbox_agent.md`
+tells the agent to do the same if it rewrites `run_scene.py`. This immediately paid off: re-running
+the same prompt surfaced the *real* cause in `asset_notes` -- genuine `429 rate_limit_exceeded`
+errors from `gpt-image-1` ("Rate limit reached... Limit 5, Used 5, Requested 1"). The account's
+real limit is 5 images/minute; a scene with several novel object types resolved concurrently
+(`DEFAULT_ASSET_CONCURRENCY = 4`) can exceed that routinely, and `--assets generated`'s "no silent
+fallback" design means those sprites just... don't exist, with no diagnostic anywhere before this
+fix. This is a real, load-bearing example of why `asset_notes` matters, not a hypothetical.
+
+### Sprite generation backend: OpenAI (default) or local diffusion
+
+The rate-limit finding above led directly to `assets/generator_diffusion.py`: a second
+`generate_sprite(object_type, cache_dir, *, model=, quality=, description=)` implementation with
+the *exact same contract* as `generator_openai.py`'s, so it's a drop-in alternate backend, not a
+parallel code path callers need to know about. Selected via `INFINIENV_SPRITE_BACKEND` --
+deliberately an env var, not a fifth `--assets` mode value, matching
+how every other asset-generation knob in this project already works
+(`INFINIENV_IMAGE_MODEL`/`INFINIENV_IMAGE_QUALITY`/`INFINIENV_ASSET_CONCURRENCY` are all env-only)
+and keeping `--assets {none,local,generated,auto}`'s meaning stable regardless of which pipeline
+actually produces a "generated" sprite. `resolver.py::_select_sprite_generator()` is the seam;
+`resolve_assets()` records which backend actually ran in `AssetEntry.note` (`"backend: openai"` /
+`"backend: diffusion"`) for provenance. Note the naming choice: "local" was already taken
+(`--assets local` means the checked-in static placeholders in `assets/base/`), so the new backend
+is called "diffusion" throughout (mode value, env var, extra name) to avoid colliding with that
+existing, load-bearing meaning.
+
+**Default was briefly flipped from `openai` to `diffusion`, then reverted -- both changes for real,
+live-verified reasons, not speculation.** After a second real OpenAI failure mode surfaced on top
+of the rate limit (a later run's hero sprite, `agent_run_1`/`agent_run_2`, was rejected outright by
+OpenAI's moderation system, `400 moderation_blocked`, "Your request was rejected by the safety
+system" -- almost certainly because a character description like "an Italian man in green
+clothing" reads as a request to depict a copyrighted character) and the user's direction (*"make
+it use the local image gen not openai anymore"*), the default became `diffusion`. Live-verifying
+that change (see the follow-up entries below: a sandbox-cache bug, then a CLIP-truncation bug,
+both found and fixed) eventually produced a genuinely working pipeline end-to-end -- but the
+*character/hero sprite quality itself*, once actually looked at in a real rendered scene, was
+poor: a small, fast, 2-step distilled model is only weakly prompt-adherent, and even with the
+truncation fix, a narrative-heavy player-character description doesn't reliably produce one clean
+isolated character. User's verdict on the real rendered output: *"this is shit go back to
+openai."* `_select_sprite_generator()`'s default is back to
+`os.environ.get("INFINIENV_SPRITE_BACKEND", "openai")`; `diffusion` remains fully available as an
+explicit opt-in (`INFINIENV_SPRITE_BACKEND=diffusion`) -- it still worked well for textures and
+simple objects (see the live-verification entries below), and is a real option when OpenAI's rate
+limit or moderation is specifically the blocker for a given run. None of the infrastructure built
+along the way was reverted -- the backend-selection seam, `generator_diffusion.py` itself, the
+project-level model cache, and the prompt-ordering fix are all still real, tested, working code;
+only which backend runs *by default* changed back.
+
+- **Model**: `stabilityai/sd-turbo` by default (1-4 step inference, `guidance_scale=0.0`,
+  deliberately a small/fast turbo model given these end up as 64x64 sprites regardless of source
+  fidelity), overridable via `INFINIENV_DIFFUSION_MODEL`. **License disclosure**: SD-Turbo ships
+  under the Stability AI Community License (free for research/personal/small-business use, a
+  revenue threshold applies beyond that) -- not as permissive as this repo's other dependencies;
+  the env var override exists specifically so a different, more permissively licensed model can
+  replace it with zero code changes.
+- **Device**: auto-detects `cuda` -> `mps` -> `cpu` (`float16` on `cuda` only; `float32`
+  elsewhere, since `float16` on MPS has a history of being unreliable in `diffusers`). Pipeline is
+  a lazily-loaded, lock-guarded module-level singleton -- loaded once per process, actual
+  inference calls serialized through the same lock (local generation is compute-bound, unlike the
+  network-bound OpenAI path, so there's no latency-hiding argument for true concurrency here, and
+  diffusers pipeline objects aren't guaranteed safe for concurrent `__call__`).
+- **Transparency: two designs tried, the second one live-verified to actually work.** Local
+  diffusion pipelines have no request-time "transparent background" feature the way OpenAI's
+  Images API does (no alpha channel at all).
+  - *First attempt*: prompt discrete objects against a solid magenta chroma-key background, then
+    threshold by color distance to alpha 0. Live-verified NOT reliable: a hard single-threshold
+    cutoff left a visible magenta fringe around every sprite (anti-aliased edge pixels are a real
+    RGB blend of object color and background, so no single cutoff handles them cleanly); a softer
+    ramp between an inner/outer threshold reduced but didn't eliminate it; then, decisively, a
+    real generated sprite for "a wooden table" came back as pink corrugated stripes with a
+    red-framed square -- SD-Turbo at 2 inference steps simply doesn't reliably paint a clean solid
+    background at all, so there was nothing correct to key against no matter how the threshold was
+    tuned. Confirmed by dumping the raw pre-processed image directly, not by guessing.
+  - *Second, shipped design*: `_remove_background()` runs `rembg` (a U2Net-based background-removal
+    model, requires `rembg[cpu]` for the `onnxruntime` backend -- a bare `rembg` install raises at
+    call time without it) on the raw generated image, which segments foreground from background
+    regardless of what the generator actually painted -- it doesn't depend on prompt adherence at
+    all. `DIFFUSION_SPRITE_PROMPT_TEMPLATE` no longer asks for any specific background color,
+    just "a plain simple background clearly distinct from the object." Live-verified after the
+    swap: both the "can" and "table" sprites came back with clean transparent backgrounds and no
+    fringe, confirmed visually in an actual `render.png` (no tinted patches behind either sprite,
+    unlike the chroma-key attempts), and a `wall` texture tile (which skips background removal
+    entirely, same as the OpenAI backend's texture branch) produced a genuine seamless brick
+    pattern. `_crop_to_content` (from `generator_openai.py`, reused unchanged) still runs after
+    background removal to trim margin, same as the OpenAI path.
+  - *Third finding, live-caught during the physics-fix verification below*: a long player-character
+    description (`_scene_descriptions()` embeds up to 220 characters of the scene prompt for the
+    `"agent"` key) silently exceeded SD-Turbo's CLIP text encoder's 77-token hard limit, truncating
+    away the *trailing* "isolated object... plain background" instructions in the original
+    desc-first template -- confirmed by dumping the raw pre-`rembg` image directly: SD-Turbo drew
+    an entire multi-element scene (floating islands, water, several small figures) instead of one
+    character, which `rembg` then had no single foreground object to cleanly segment, producing a
+    nearly-blank sprite. Fixed by reordering both templates so the fixed style/framing instructions
+    come *before* `{desc}`, not after -- truncation (which still happens for long descriptions) now
+    only ever drops the tail of the description text, never the formatting instructions the rest of
+    the pipeline depends on. Also installed `accelerate` (added to the `diffusion` extra) after
+    noticing every pipeline load printed "Cannot initialize model with low cpu memory usage because
+    `accelerate` was not found" -- confirmed gone after installing it. **Net honest result**:
+    reordering fixed the "draws an entire scene" failure mode, but character-sprite quality for
+    narrative-heavy descriptions is still visibly weaker than the OpenAI backend's -- SD-Turbo is a
+    small, fast, weakly-prompt-adherent model, and a description built by embedding a full scene
+    prompt verbatim (reasonable for the much larger OpenAI model) isn't necessarily the right shape
+    of input for it. Not treated as fully solved; flagged here rather than overclaimed.
+- **Optional dependency**: `pip install infinienv[diffusion]` (`torch`, `diffusers`,
+  `transformers`, `rembg[cpu]`) -- lazy-imported only inside `_get_pipeline()`/`_run_pipeline()`/
+  `_remove_background()`, following this project's standard pattern (`llm/providers/anthropic.py`,
+  `gui/app.py::launch()`): an `ImportError` from any of them becomes a `ProviderError` naming the
+  exact install command. No other code path needs these installed; `mock`-only usage, and
+  `--assets none`, are completely unaffected. `sandbox/runner.py::_interpreter_briefing()` gained
+  a matching availability note (mirroring the existing `pymunk` one) so a sandbox agent knows
+  whether the extra is present in its interpreter without guessing.
+- **Sandbox mode needed real new plumbing after all -- a live-caught bug, not a hypothetical.**
+  `assets/` being fully copied and the `SandboxPathGrant(path=sys.prefix, read_only=True, ...)`
+  added for `pymunk` were enough for the *package* to be importable inside a sandboxed run, but
+  not for the *model weights* to be found: `HOME` resolves within that one sandboxed run's own
+  ephemeral, per-attempt workspace filesystem, not the host's real home directory, so
+  `diffusers`/`rembg`'s default cache locations (normally under `~/.cache/huggingface`, `~/.u2net`)
+  landed inside the sandbox instead -- one real run's `sandbox_workspace` grew to 1.2GB from a
+  full from-scratch SD-Turbo + U2Net download that vanished with the workspace, and would have
+  repeated on every subsequent sandboxed run using this backend. Fixed with
+  `generator_diffusion.py::model_cache_dir()` (`INFINIENV_MODEL_CACHE_DIR`, default
+  `.infinienv_model_cache/` next to `.infinienv_asset_cache/`, setting `HF_HOME`/`U2NET_HOME`
+  underneath it) plus a second `SandboxPathGrant` in `sandbox/runner.py` -- read-write, for that
+  exact host path, with the env var explicitly set in the outer process before session creation
+  so the sandboxed subprocess inherits the identical absolute path rather than each recomputing
+  its own from a `cwd` that doesn't correspond to the host repo. One download, by any run
+  (sandboxed or not), is now reused by every run after it -- the same reuse guarantee
+  `.infinienv_asset_cache/` already gives individual sprites, just for the underlying model
+  weights.
+
 ---
 
 ## 10. Creativity systems: mutation, curriculum, dataset export
@@ -1000,6 +1146,245 @@ the first attempt with a genuine 56-frame animated GIF (agent visibly moving acr
 spawn to exit while the robot trails behind) — visually confirmed by extracting and inspecting the
 first and last frames, not just checking `success: true`.
 
+### Generic reusable game-dev primitives, not per-case prompt instructions (2026-07-09)
+
+A user-reported screenshot of a Mario-style prompt ("...moving plants try to eat him from below
+like a side-scrolling platform game") showed the "chomping plants" drifting side to side along the
+ground on a sine wave, with a static mouth shape, and asked "where are the animations and the full
+feature set that a later stage project has." Reading the actual generated code
+(`runs/gui_1783629196/sandbox_workspace/run_scene.py`, not just the agent's self-report) confirmed
+both complaints: `plant_position()` moved every plant purely horizontally, and `draw_frame()` drew
+the exact same three fixed primitives at the plant's current position every frame — nothing about
+any entity's *drawn state* ever varied with time, only its position.
+
+**First attempt (rejected by the user):** worked-example prose in `sandbox_agent.md` — a sentence
+naming "the canonical Piranha-Plant pattern," and a code snippet keyed on
+`plant_open`/`plant_closed`. The user explicitly rejected this: *"i dont want you to add that
+stuff to the sandbox prompt, i need you to engineer it in a way that makes that behavior possible
+without specifying specific cases into it... new info/sprite costumes etc should be in our sandbox
+already, new types of characters/actions too should be makable easily."* This is the same lesson
+already learned one level up in this same section (five bug-specific prompt patches consolidated
+into general "closed action space" principles) — applied here to conclude that a worked example
+in prose doesn't scale, but real importable code does.
+
+**Structural fix.** Three small, generic, reusable pure-function modules were added under
+`engine/` (already copied verbatim into every sandbox workspace by
+`sandbox/workspace.py::_COPIED_PACKAGES` — no workspace-builder change needed, and its existing
+`_rewrite_internal_imports()` already rewrites any `.py` file's `infinienv.X` imports generically):
+
+- `engine/action_registry.py` — `ActionSpace`: `register()`/`.action()` decorator/`dispatch()`,
+  raising `UnknownActionError` on an unregistered name. Makes "state may only change through a
+  declared action" (principle 1) structural rather than a discipline upheld by memory.
+- `engine/motion_patterns.py` — `patrol()` (sinusoidal back-and-forth), `pulse_cycle()` (a
+  rise/hold/fall/idle timing curve for anything that emerges and retracts on a cycle — the
+  general form of what a Piranha-Plant-style hazard needs, without the module knowing or caring
+  what kind of hazard it is), `pursue()` (step toward a target at capped speed, snapping instead
+  of overshooting).
+- `engine/animation.py` — `phase_of()` (time to a repeating `[0, 1)` phase), `oscillate()` (sweep
+  a drawn parameter between two values by phase), `cycle_variant()` (pick a named sprite/pose by
+  phase).
+
+`assets/resolver.py` gained `variant_types()`/`variant_descriptions()` (a canonical
+`{base}__{state}` naming convention) and `resolve_assets(scene, mode, cache_dir, *, extra_types=,
+extra_descriptions=)` (keyword-only, backward compatible) — closing a real gap found during
+design: `scene_asset_types()` only scans placed `SceneObject`s, so an animation-variant sprite
+type with no placed object instance was previously never requested by the automatic scan.
+`sandbox_agent.md` now only *points at* these modules (a short "Reusable building blocks" section,
+plus one inline sentence each at principles 3 and 6 naming the specific function names) — no
+worked creature/game example anywhere in the prompt.
+
+**Live verification, round 1 (honest null result).** A prompt describing an unrelated mechanic
+(a factory floor with an erupting steam vent and a chasing security drone —
+`runs/factory_infra_test`) produced a working, correct run, but reading the synced `run_scene.py`
+showed the agent had *not* imported any of the three new modules — it hand-rolled its own
+`vent_active()` (a phase-cycle function functionally identical to `pulse_cycle`), `step_toward()`
+(identical to `pursue`), and inline sine-driven animation (identical to `oscillate`). The good
+news: an independent agent converged on nearly the same three primitives from scratch, validating
+the library's shape. The bad news: it never looked at the library — the pointer existed but wasn't
+prominent enough to change behavior under the same turn-budget pressure that was already driving
+many iterative fix-and-rerun cycles in that run.
+
+**Visibility fix, live verification round 2 (confirmed).** Per this section's own standing rule
+("increase visibility, not prescriptiveness" — never re-add a worked example), the "Reusable
+building blocks" section's framing was strengthened from "none of these are required" to "prefer
+these over writing the same math yourself," and principles 3/6 were changed from a "see below"
+cross-reference to naming the actual function signatures inline at the point of relevance — still
+fully generic, no creature or game named. Re-run with a second, again-unrelated prompt (a
+submarine cave with blooming stinging anemones and a pursuing eel — `runs/cave_infra_test`):
+reading the synced code confirmed genuine, correct reuse this time — `ActionSpace` gates all
+motion through registered `thrust`/`hold` actions via real `register()`/`dispatch()` calls (not
+decorative), `pulse_cycle()`'s return value drives both the sting-gating logic *and* the anemone's
+drawn bloom radius/spike angle (real animation, not just internal math), and `pursue()` drives the
+eel's distance-gated chase-vs-return-to-rest behavior. Confirmed visually, not just from the
+agent's summary: extracted frames show the submarine's health dropping from 5 to 3 (a real hazard
+contact) and the same anemone in genuinely different bloom states between frames.
+
+Separately, `sandbox/runner.py`'s `max_turns` default was bumped from 40 to 60 (the original
+bug-report run had already hit the 40-turn ceiling once on its first attempt).
+
+### Grounded-character physics: `engine/platformer_physics.py` (2026-07-09)
+
+A user-reported screenshot on a Mario-rescue prompt ("really bad character asset, runs off the
+screen, flys on a place it cant and teleports") led to reading `runs/gui_1783638533`'s real
+`metrics.json` and agent-authored `run_scene.py` directly, surfacing four concrete, distinct bugs:
+
+1. **Bad character asset**: `asset_notes` (this session's earlier fix, immediately paying off
+   again) showed the hero's two sprite variants both failed with a real OpenAI
+   `400 moderation_blocked` ("Your request was rejected by the safety system... category:
+   other") — very likely "an Italian man in green clothing" reading as a request to depict a
+   copyrighted character. `tower`/`wall` separately hit the same rate limit found earlier. Every
+   custom type in the scene fell back to a hand-drawn primitive; the hero's fallback was visibly
+   cruder than the plant's. Addressed by flipping the default sprite backend, above.
+2. **Runs off the screen**: `vx` was set to a constant run speed unconditionally every step,
+   including during the `climb_tower` branch — nothing ever zeroed it while climbing, so the
+   character kept drifting horizontally off the tower's face the entire time it was supposedly
+   climbing straight up. No world/screen-bounds clamp existed anywhere in the file.
+3. **"Flies in a place it can't"**: the climb condition was gated by a *lower* x-bound only, no
+   upper bound tied to the tower's actual right edge — once bug 2 drifted the character past the
+   tower into open air, the condition was still true, so it kept "climbing" (rising) while
+   floating beside the structure in empty space. A direct violation of principle 3 ("climbing a
+   real structure," not a loosely-gated condition).
+4. **Teleports**: a post-rescue "celebration" tail appended frames at a hardcoded literal position
+   regardless of where the trace's actual last simulated position was — given bugs 2-3, often far
+   from that literal, so the very next frame snapped instantly. A violation of principle 5 ("can
+   you name the declared action that produced this state change?").
+
+Also notable: this run's code imported `engine/motion_patterns.py`/`engine/animation.py`
+(genuinely used, for the plants and flag) but **not** `engine/action_registry.py` — the player's
+own movement was a hand-rolled ad hoc if-chain, not routed through discrete, mutually-exclusive
+registered actions. That's the structural root of bugs 2-3: nothing prevented "run" and "climb"
+from both partially mutating state in the same frame.
+
+Consistent with this session's now twice-confirmed rule (fix root causes with real code, don't
+patch the prompt with this incident's specific name): `engine/platformer_physics.py` generalizes
+*player-locomotion* physics the same way `motion_patterns.py`/`animation.py` generalized *hazard*
+motion — gravity/ground/climbing/world-bounds are needed by nearly every platformer-style sandbox
+scene and were exactly where these bugs came from being hand-rolled fresh, unbounded, and
+overlapping.
+
+- `integrate_grounded_2d(pos, vel, *, gravity, dt, ground_y, bounds=None)` — one physics step:
+  gravity, integration, ground clamp, and (if given) a silent world/screen-bounds clamp — directly
+  targets bug 2's missing bounds check.
+- `climb_step(pos, climb_speed, dt, *, structure_bounds)` — moves *only* `y`; structurally cannot
+  also apply a horizontal run velocity in the same call, which is what makes bug 2's climb-drift
+  impossible if this is used instead of hand-integrating `y` during a climb branch. Raises
+  `ValueError` if `x` is outside the structure's bounds — bug 3's exact shape becomes a loud
+  failure during the agent's own testing, not a silent floating character, following the same
+  "structurally unable to do that" philosophy as `engine/action_registry.py`'s
+  `UnknownActionError`.
+- `clamp_to_bounds(pos, bounds)` — the standalone form, usable every frame regardless of which
+  action fired.
+
+Prompt changes were deliberately minimal and principle-level only, no named incident: one line in
+the "Reusable building blocks" list, one clause added to principle 3's existing grounded-movement
+sentence (pointing at the two functions, phrased generically — "a run action," "a climb branch,"
+no mention of Mario/towers), and "world/screen bounds" added to principle 2's existing list of
+rules that must apply unconditionally. Bug 4 (the teleport) isn't a new principle — it's already
+squarely covered by principles 1 and 5, which this run simply didn't fully apply (its own
+self-check asserted success and hazard proximity but not "no unexplained position jump between
+consecutive frames," despite that exact check being one of the self-review section's suggested
+examples).
+
+### Grid-wall collision and procedural terrain: `engine/grid_collision.py` /
+### `engine/level_generation.py` (2026-07-09)
+
+A user-reported screenshot on a cave-navigation prompt ("A cave explorer chooses among uneven
+rocky tunnels... collects at least two glowing gems, then exits") flagged two complaints: the
+agent visibly phased through solid rock, and the level had no uneven terrain or multiple paths
+despite the prompt explicitly asking for a "procedurally generated cave... multiple possible
+paths." Reading the actual generated code confirmed both, precisely:
+
+- **Phasing through walls**: the agent's movement wasn't a real simulation at all — a hardcoded
+  `route` list of waypoint cells was interpolated in a straight line, cell-center to cell-center,
+  with **no check against the scene's own `walls` array** the same script had just generated. A
+  direct reproduction against the actual `route`/`floors` data found the bug was not hypothetical:
+  one waypoint, `(7,6)`, routed straight into a cell that was never a floor cell at all, and two
+  consecutive-waypoint segments cut diagonally through a wall corner where *both* adjacent cells
+  were blocked (`(6,6)`/`(7,7)` and `(11,8)`/`(12,9)`). This is the same "animation, not
+  simulation" anti-pattern already named in this section's history, just for grid navigation
+  instead of platformer physics: a route was planned to *look* like it avoids walls, then trusted,
+  never actually checked.
+- **No procedural generation, no real branching**: `floors`/`path_cells` was a hand-listed set of
+  specific grid cells forming essentially one winding corridor with a couple of one-cell alcoves —
+  nothing procedural, and no gameplay-relevant choice between distinct routes, regardless of what
+  the prompt asked for.
+
+Two new generic modules, same reasoning as every prior addition in this section — a real, tested
+capability the agent can import, not a worked example in prose:
+
+- `engine/grid_collision.py` — `segment_blocked(p0, p1, blocked, tile_size)` checks a straight-line
+  move at sub-tile sampling resolution (not just its endpoints), which is exactly what would have
+  caught the diagonal-corner-cut bug; `move_with_collision(pos, target, speed, dt, blocked,
+  tile_size)` is a drop-in replacement for hand-rolled waypoint interpolation that stops at a wall
+  instead of moving through it, mirroring `motion_patterns.pursue()`'s shape with real collision
+  awareness added.
+- `engine/level_generation.py` — `generate_organic_region(width, height, start, *, steps, seed,
+  branch_chance, max_walkers)`, a seeded branching random-walk ("drunkard's walk") cave carver:
+  every carved cell is connected to `start` by construction, and real branch points emerge from
+  the algorithm itself rather than needing to be hand-designed, directly answering "procedurally
+  generated... multiple possible paths." `region_is_connected(region, start)` is a general BFS
+  reachability check, useful for verifying *any* level (generated or hand-authored) is actually
+  fully navigable — the motivating bug's out-of-floor waypoint would have failed this check
+  immediately instead of surfacing as a visual glitch.
+
+Prompt changes stayed principle-level: both new modules added to "Reusable building blocks";
+principle 2 (rules must apply unconditionally) gained a clause naming grid-wall collision as one
+of the rules that must actually be checked, not just planned around; principle 3 (build what the
+task describes) gained a clause extending its existing "read the task's language, don't default to
+the easiest pattern" idea from hazard motion to level structure itself; the self-review section's
+invariant-check example list gained "no consecutive position pair in the trace crosses a wall
+cell" alongside its existing examples. No mention of caves/gems/this specific run anywhere in the
+prompt.
+
+### Generic state and gating: `engine/puzzle_state.py` (2026-07-09)
+
+Feedback on the cave-navigation fix above wasn't about it being wrong — it worked, verified live.
+It was about a capability ceiling: every sandbox run this session (a Mario-style rescue, a cave, a
+factory floor, a submarine cave) had produced *static navigation* — walk through a space, avoid or
+reach things — with the win condition collapsing to whatever single check is simplest (a bare
+position, a raw item count), never real state-dependent puzzle logic: a locked exit that only
+opens once several conditions are jointly satisfied, an ordering between sub-objectives. The
+user's own graded difficulty table named this precisely (open room → maze → maze+hazards →
+**maze+lock/key/gems+required order** → moving hazards+switches+crates+NPCs+backtracking) and
+asked for a *generic* fix, explicitly not another round of tuning the cave prompt specifically.
+
+Root cause, consistent with every module added in this section: no reusable primitive existed for
+*state-dependent gating* the way `action_registry.py` gave closed action dispatch and
+`grid_collision.py` gave real wall collision. The base engine's schema already models locks/keys
+and ordered `sequence` goals, but that's wired through `GameState`/`solve_scene()`, which no
+sandbox run observed this session actually uses (every one writes its own custom simulation loop).
+New module, same shape as the others — pure, dependency-free, mirrors `action_registry.py`'s
+"declare once, check structurally" philosophy applied to preconditions instead of actions:
+
+- `PuzzleState` — a named flag/counter store: `set()`, `increment()`, `get()`, `snapshot()`.
+- `Gate` — a declarative precondition over several flags/counters jointly, e.g.
+  `Gate(requires={"gems": 2, "plate_pressed": True})`, with `is_open()`/`missing()`. Numeric
+  thresholds are satisfied by `>=` (composes with `increment`); boolean thresholds by equality; an
+  unset flag defaults to `0`/`False`, so a gate starts closed by default.
+
+Prompt changes: one "Reusable building blocks" entry, and a genuinely new principle 7 (state/
+sequencing the task describes must be real dependency structure, not collapsed to the simplest
+true check) — a new principle rather than folded into principle 3 again, since this is a different
+category of concern (win-condition *structure*, not motion/terrain/rendering), the same reasoning
+that justified principle 6 (animation) as its own addition earlier. The self-review invariant list
+gained one more example: if a `Gate` was declared, assert it was actually closed at some point in
+the trace before it opened.
+
+**Live-verified on the user's own suggested harder prompt** (not the cave prompt this fix was
+explicitly not meant to over-fit to): *"Create a cave maze where the exit is locked until the
+player collects two gems, avoids spikes, presses a pressure plate, and then reaches the exit."*
+First attempt, no visibility-tuning round needed this time. Confirmed from the synced code, not
+the agent's summary: `Gate({"gems": 2, "plate_pressed": True})` gates the exit directly
+(`if pos==exitc and gate.is_open(pstate) and not state["lost"]`), and the agent went further than
+asked — the pressure plate itself only activates *after* 2 gems are collected
+(`pos==plate and pstate.get("gems",0)>=2`), a real ordering dependency on top of the joint gate,
+unprompted. Confirmed with the actual trace data, not assumed: `gate_open` was `False` for 28 of
+36 steps and only flipped to `True` once every condition was met, staying open through the end —
+the gate was genuinely tested, not decorative. The run also used `action_registry.py` (closed
+action dispatch) and `grid_collision.py`/`animation.py` alongside `puzzle_state.py` in the same
+file — four of the session's reusable primitives composed together in one run. `render.png` showed
+a coherent branching maze with gems, spikes, a visible pressure plate, and the exit.
+
 ### Explicitly out of scope for this mode (for now)
 
 Making sandbox mode the default; the `docker`-backed sandbox client (Unix-local was the pragmatic
@@ -1143,6 +1528,20 @@ test_interactions.py      - the effect interpreter: precondition enforcement, ea
                              routing from apply_action for an unrecognized verb
 test_physics.py            - push/slide engine (section 5b): shove one cell, slide-until-blocked,
                              blocked push raises, live collision (walk through a vacated cell)
+test_action_registry.py    - generic closed-action dispatch (section 11): register/dispatch,
+                             decorator registration, unregistered-name raises, duplicate raises
+test_motion_patterns.py    - generic patrol/pulse_cycle/pursue (section 11): range/periodicity,
+                             rise/hold/fall/idle timing, capped-speed step incl. snap-to-target
+test_animation.py          - generic phase_of/oscillate/cycle_variant (section 11): wrapping,
+                             sweep bounds, phase-to-variant bucketing
+test_platformer_physics.py - generic integrate_grounded_2d/climb_step/clamp_to_bounds (section 11):
+                             gravity+ground+bounds clamp, climb moves only y and raises off-structure
+test_grid_collision.py     - generic segment_blocked/move_with_collision (section 11): sub-tile
+                             sampling catches a diagonal wall-corner cut, stops instead of crossing
+test_level_generation.py   - generic generate_organic_region/region_is_connected (section 11):
+                             determinism, bounds, always-connected-by-construction, BFS reachability
+test_puzzle_state.py       - generic PuzzleState/Gate (section 11): flags/counters, numeric and
+                             boolean thresholds, unset-flag defaults, joint/mixed requirements
 test_replay_export.py       - per-action frames + smooth interpolation of a multi-cell slide
 test_mechanics_cache.py    - persist/reload, no duplication or overwrite on repeated calls
 test_mock_generation.py     - mock provider is deterministic and always valid
@@ -1150,7 +1549,9 @@ test_assets.py               - scene_asset_types includes wall+agent; none/local
                                  resolution modes; concurrent generation actually overlaps in
                                  time (not just faster-looking sequential calls) and respects
                                  INFINIENV_ASSET_CONCURRENCY; one type's generation failure is
-                                 isolated and doesn't block the rest; auto-mode local fallback
+                                 isolated and doesn't block the rest; auto-mode local fallback;
+                                 variant_types/variant_descriptions naming (section 11); extra_types/
+                                 extra_descriptions resolve without a placed SceneObject
 test_generator_openai.py      - mocked OpenAI client (no network): texture vs. discrete-object
                                  branching (background param, prompt template, crop applied only
                                  for discrete types); quality defaults to "low", overridable via
@@ -1224,10 +1625,15 @@ section 11 for the full design and what it does and doesn't verify.
 
 ## 18. Roadmap: GPU and 3D
 
-Not required for the CPU/2D core. GPU becomes relevant for local LLM inference (an
-OpenAI-compatible endpoint, e.g. `LLM_PROVIDER=vllm`, `LLM_BASE_URL=http://localhost:8000/v1`),
-batch prompt-suite generation, or future vision-policy training — none of this should make the
-basic CLI require a GPU.
+Not required for the CPU/2D core. GPU (or Apple Silicon MPS) becomes relevant for local LLM
+inference (an OpenAI-compatible endpoint, e.g. `LLM_PROVIDER=vllm`,
+`LLM_BASE_URL=http://localhost:8000/v1`), batch prompt-suite generation, future vision-policy
+training, or — as of section 9's `generator_diffusion.py` — optional local sprite generation
+(`pip install infinienv[diffusion]`, `INFINIENV_SPRITE_BACKEND=diffusion`). None of this should
+make the *basic* CLI require a GPU: `--assets` defaults to `none` and `INFINIENV_SPRITE_BACKEND`
+defaults to `openai`, so a GPU/MPS device is only ever touched by an explicit, opt-in choice. (An
+earlier design briefly made `diffusion` the default sprite backend too; reverted after
+live-verified character-sprite quality problems — see section 9.)
 
 3D: the schema is deliberately flat 2D (`x`/`y`, not `position`/`rotation`/`scale`) so validation
 stays simple. A future 3D path would add those fields and exporters (Godot, Unity ML-Agents,
