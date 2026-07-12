@@ -22,16 +22,18 @@ from typing import Callable
 
 from infinienv.artifacts.writer import resolve_out_dir
 from infinienv.llm.base import ProviderError
+from infinienv.sandbox.auditor import audit_run
 from infinienv.sandbox.workspace import (
     ARTIFACT_FILES,
     build_workspace_dir,
+    deterministic_validation_summary,
     extract_artifacts,
     outer_sanity_check,
     sync_full_workspace,
     tar_directory,
 )
 
-DEFAULT_SANDBOX_MODEL = "gpt-5.5"
+DEFAULT_SANDBOX_MODEL = "gpt-5.6-terra"
 DEFAULT_SANDBOX_MAX_REPAIR_ATTEMPTS = int(os.environ.get("INFINIENV_SANDBOX_MAX_REPAIR_ATTEMPTS", "2"))
 
 _PATCH_OP_RE = re.compile(r"^\*\*\* (Add File|Delete File|Update File): (.+)$", re.MULTILINE)
@@ -222,19 +224,43 @@ def _describe_stream_event(event: object) -> str | None:
         return None
 
 
-def _repair_message(*, run_error: str | None, sanity_error: str | None) -> str:
+def _repair_message(
+    *, run_error: str | None, sanity_error: str | None, audit_findings: str | None = None
+) -> str:
     if run_error is not None:
+        # Point the agent at the concrete fix for a known crash-inducing tool misuse: calling the
+        # `view_image` tool with an absolute path fails with "manifest path must be relative" and
+        # crashes the whole attempt. The raw error alone wasn't enough for the agent to self-correct
+        # (it repeated the mistake on repair in a real run), so spell out the fix.
+        hint = ""
+        if "view_image" in run_error and "must be relative" in run_error:
+            hint = (
+                " The crash was a `view_image` call with an ABSOLUTE path -- that tool needs a "
+                "workspace-RELATIVE path. Write your review frames into the workspace and call it "
+                'like `view_image("review_start.png")`, never with an absolute /private/var/... path.'
+            )
         return (
-            f"Your previous attempt in this same workspace did not finish cleanly: {run_error}. "
+            f"Your previous attempt in this same workspace did not finish cleanly: {run_error}.{hint} "
             "Any files you already produced are still on disk -- inspect them (ls, cat), pick up "
             "from where you left off, and finish producing valid scene.json/metrics.json/"
             "replay.json/render.png/replay.gif."
         )
+    if sanity_error is not None:
+        return (
+            "A previous attempt in this same workspace did not pass an independent outer check "
+            f"using the real, unmodified schema: {sanity_error}. Your existing files from that "
+            "attempt are still on disk -- inspect them, fix the specific problem described, and "
+            "re-run to produce all five artifact files again."
+        )
     return (
-        "A previous attempt in this same workspace did not pass an independent outer check "
-        f"using the real, unmodified schema: {sanity_error}. Your existing files from that "
-        "attempt are still on disk -- inspect them, fix the specific problem described, and "
-        "re-run to produce all five artifact files again."
+        "Your previous attempt in this same workspace produced valid artifacts but an independent "
+        "reviewer found that it does not faithfully implement the spec -- it fakes a requirement "
+        "rather than really doing it:\n"
+        f"{audit_findings}\n"
+        "Your existing files are still on disk -- inspect them and fix the simulation logic so the "
+        "flagged requirement is genuinely implemented (not just made to look right in the render), "
+        "then re-run to produce all five artifacts again. Do not paper over it by editing the "
+        "reported success value or a threshold."
     )
 
 
@@ -248,6 +274,7 @@ async def _run_async(
     max_repair_attempts: int,
     assets_mode: str = "none",
     require_runs_dir: bool = False,
+    refine_prompt: bool = True,
     on_stage: Callable[[str], None] | None = None,
 ) -> dict:
     def stage(msg: str) -> None:
@@ -255,6 +282,26 @@ async def _run_async(
             on_stage(msg)
 
     out_dir = resolve_out_dir(out_dir, require_runs_dir=require_runs_dir)
+
+    # Best-effort prompt enrichment: expand the user's raw prompt into a fuller, buildable spec
+    # before handing it to the agent. Never fatal -- degrades to the original prompt on any
+    # failure (see sandbox/prompt_refiner.py). The original and the refined text are both recorded
+    # in metrics.json below for transparency.
+    original_prompt = prompt
+    refine_note: str | None = "prompt refinement disabled"
+    prompt_was_refined = False
+    if refine_prompt:
+        from infinienv.sandbox.prompt_refiner import refine_prompt as _refine
+
+        stage("Refining prompt into a detailed spec...")
+        refine_result = _refine(prompt)
+        prompt = refine_result.refined
+        refine_note = refine_result.note
+        prompt_was_refined = refine_result.used_refinement
+        if prompt_was_refined:
+            stage(f"Refined prompt handed to the agent:\n{prompt}")
+        else:
+            stage(f"Prompt not refined ({refine_note}); using the original.")
 
     try:
         from agents import Runner
@@ -334,6 +381,10 @@ async def _run_async(
     artifact_paths: dict[str, str] = {}
     sane = False
     sanity_error: str | None = None
+    audited = False
+    audit_passed = True
+    audit_findings: str | None = None
+    audit_note: str | None = None
     missing: list[str] = list(ARTIFACT_FILES)
     repair_history: list[dict] = []
     message = f"Seed: {seed}\nTask: {prompt}\nAssets mode: {assets_mode}\n{_interpreter_briefing()}"
@@ -386,28 +437,58 @@ async def _run_async(
                     else "scene.json missing"
                 )
 
+            # Only worth the independent semantic audit once the artifacts are mechanically sound;
+            # a malformed run already needs repair for a more basic reason. audited=False means the
+            # auditor couldn't run (no key/disabled/error) -- never blocks, audit_passed stays True.
+            audited = False
+            audit_passed = True
+            audit_findings = None
+            audit_note = None
+            if run_error is None and sane and not missing:
+                stage("Independent reviewer auditing the run for faithfulness to the spec...")
+                audit = audit_run(out_dir, prompt)
+                audited, audit_passed = audit.audited, audit.passed
+                audit_findings, audit_note = audit.findings, audit.note
+                if audited and not audit_passed:
+                    stage("Auditor: the run fakes a required mechanic rather than implementing it.")
+                elif audited:
+                    stage("Auditor: the run faithfully implements the spec.")
+                else:
+                    stage(f"Auditor: skipped, run NOT independently audited ({audit_note}).")
+
             repair_history.append(
                 {
                     "attempt": attempt,
                     "run_error": run_error,
                     "outer_sanity_passed": sane,
                     "outer_sanity_error": sanity_error,
+                    "audited": audited,
+                    "audit_passed": audit_passed,
+                    "audit_findings": audit_findings,
+                    "audit_note": audit_note,
                     "missing_artifacts": missing,
                 }
             )
 
-            if run_error is None and sane and not missing:
-                stage(f"Attempt {attempt + 1} passed the outer sanity check.")
+            if run_error is None and sane and not missing and audit_passed:
+                if audited:
+                    stage(f"Attempt {attempt + 1} passed the outer sanity check and the faithfulness audit.")
+                else:
+                    stage(f"Attempt {attempt + 1} passed the outer sanity check (audit skipped, not verified).")
                 break
+            fail_reason = audit_findings if (audited and not audit_passed) else sanity_error
             if attempt >= max_repair_attempts:
-                stage(f"Attempt {attempt + 1} failed and the repair budget is exhausted: {sanity_error}")
+                stage(f"Attempt {attempt + 1} failed and the repair budget is exhausted: {fail_reason}")
                 break
-            stage(f"Attempt {attempt + 1} failed an outer check, repairing: {sanity_error}")
-            message = _repair_message(run_error=run_error, sanity_error=sanity_error)
+            stage(f"Attempt {attempt + 1} failed a check, repairing: {fail_reason}")
+            if audited and not audit_passed:
+                message = _repair_message(run_error=None, sanity_error=None, audit_findings=audit_findings)
+            else:
+                message = _repair_message(run_error=run_error, sanity_error=sanity_error)
     finally:
         await session.aclose()
 
-    success = not missing and sane and run_error is None
+    success = not missing and sane and run_error is None and audit_passed
 
     # Merge the outer verdict into the sandbox's own metrics.json (rather than overwriting
     # it) so both the sandbox's self-report and the outer, real-schema-based check are
@@ -424,14 +505,28 @@ async def _run_async(
         {
             "source": "sandbox",
             "provider": "openai_agents_sandbox",
+            "model": model,
             "seed": seed,
             "success": success,
             "sandbox_self_reported_success": metrics.get("success"),
             "outer_sanity_passed": sane,
             "outer_sanity_error": sanity_error,
+            "audited": audited,
+            "audit_passed": audit_passed,
+            "audit_findings": audit_findings,
+            "audit_note": audit_note,
+            # The real deterministic validator's verdict on the sandbox scene (geometry enforced by
+            # the outer check, the rest recorded -- see workspace.deterministic_validation_summary).
+            "deterministic_validation": deterministic_validation_summary(out_dir),
             "missing_artifacts": missing,
             "repair_attempts": len(repair_history) - 1,
             "repair_history": repair_history,
+            # Prompt-enrichment provenance: what the user typed vs. what the agent was actually
+            # given, so a reviewer always sees the exact handoff (see sandbox/prompt_refiner.py).
+            "original_prompt": original_prompt,
+            "refined_prompt": prompt,
+            "prompt_refined": prompt_was_refined,
+            "prompt_refine_note": refine_note,
         }
     )
     with open(metrics_path, "w") as f:
@@ -458,6 +553,8 @@ def run_sandbox_generation(
     max_repair_attempts: int | None = None,
     assets_mode: str = "none",
     require_runs_dir: bool = False,
+    refine_prompt: bool = True,
+    backend: str | None = None,
     on_stage: Callable[[str], None] | None = None,
 ) -> dict:
     """Sync entrypoint: run a sandboxed generation end to end, repairing via the same agent
@@ -469,12 +566,45 @@ def run_sandbox_generation(
     agent's reference run_scene.py resolves real sprites instead of flat colored cells.
     `require_runs_dir`, when set, requires `out_dir` to resolve under `runs/` (raises
     `ValueError` otherwise) -- the CLI sets this, the GUI deliberately doesn't (see
-    `artifacts/writer.py::resolve_out_dir`).
+    `artifacts/writer.py::resolve_out_dir`). `refine_prompt` (default on) runs a best-effort LLM
+    pass to expand the raw prompt into a fuller spec before handing it to the agent -- see
+    `sandbox/prompt_refiner.py`; degrades to the original prompt on any failure.
+
+    The agent runtime is selected by `backend`: `openai` (OpenAI Agents SDK, this module) or
+    `claude` (Anthropic's Claude Agent SDK, `sandbox/claude_runner.py`). When `backend` is None
+    (the default), it falls back to `INFINIENV_SANDBOX_BACKEND`, then to `openai` -- so the CLI/GUI
+    can pass an explicit per-run choice while the env var stays the default for anyone who doesn't.
+    Selecting the runtime this way (rather than a new `--sandbox` sub-mode) keeps `--sandbox`'s
+    meaning stable: the two backends are interchangeable -- same workspace copy, same five
+    artifacts, same outer sanity check and repair loop, same `metrics.json` shape (only `provider`/`model`
+    differs).
     """
-    model = model or os.environ.get("INFINIENV_SANDBOX_MODEL", DEFAULT_SANDBOX_MODEL)
     attempts = (
         DEFAULT_SANDBOX_MAX_REPAIR_ATTEMPTS if max_repair_attempts is None else max_repair_attempts
     )
+    backend = (backend or os.environ.get("INFINIENV_SANDBOX_BACKEND", "openai")).strip().lower()
+    if backend == "claude":
+        from infinienv.sandbox import claude_runner
+
+        model = model or os.environ.get(
+            "INFINIENV_SANDBOX_MODEL", claude_runner.DEFAULT_SANDBOX_CLAUDE_MODEL
+        )
+        return asyncio.run(
+            claude_runner._run_async(
+                prompt,
+                seed,
+                out_dir,
+                model=model,
+                max_turns=max_turns,
+                max_repair_attempts=attempts,
+                assets_mode=assets_mode,
+                require_runs_dir=require_runs_dir,
+                refine_prompt=refine_prompt,
+                on_stage=on_stage,
+            )
+        )
+
+    model = model or os.environ.get("INFINIENV_SANDBOX_MODEL", DEFAULT_SANDBOX_MODEL)
     return asyncio.run(
         _run_async(
             prompt,
@@ -485,6 +615,7 @@ def run_sandbox_generation(
             max_repair_attempts=attempts,
             assets_mode=assets_mode,
             require_runs_dir=require_runs_dir,
+            refine_prompt=refine_prompt,
             on_stage=on_stage,
         )
     )

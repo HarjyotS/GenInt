@@ -21,6 +21,69 @@ from infinienv.llm.base import ProviderError
 _jobs: dict[str, "Job"] = {}
 _jobs_lock = threading.Lock()
 
+# Selectable sandbox-agent models per backend, first entry is the default. Kept in sync with the
+# frontend picker in templates/index.html (SANDBOX_MODELS). Passing an unlisted string is rejected
+# rather than forwarded to the API. The OpenAI variants (terra/sol/luna) and the Claude tiers are
+# what's actually available on this account (see notes.md); a run may still override via the
+# INFINIENV_SANDBOX_MODEL env var, which these override in turn when the frontend sends one.
+SANDBOX_MODELS: dict[str, tuple[str, ...]] = {
+    "openai": ("gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.5", "gpt-5.5-pro"),
+    "claude": ("claude-sonnet-5", "claude-opus-4-8", "claude-fable-5"),
+}
+
+
+def _classify_stage(msg: str) -> str:
+    """Tag a live narration line with a `kind` so the frontend can render it structured/pretty
+    instead of as raw scrolling text. Keys off the stable narration prefixes emitted by
+    sandbox/runner.py's `_describe_stream_event` and the repair-loop `stage()` calls (documented in
+    CLAUDE.md section 11). An unrecognized line falls through to `status`, so this never breaks a run
+    -- worst case a line is shown in the generic style."""
+    s = (msg or "").strip()
+    low = s.lower()
+    if s.startswith(("$ ", "Running a shell command", "Calling tool:")):
+        return "command"
+    if s.startswith("Editing"):
+        return "edit"
+    if s.startswith("Viewing an image"):
+        return "image"
+    if s.startswith("Thinking:"):
+        return "decision"
+    if s.startswith("Agent:"):
+        return "agent"
+    if s.startswith("Auditor:") or "auditing the run" in low:
+        return "audit"
+    if s.startswith(("Refining prompt", "Refined prompt")):
+        return "refine"
+    if "isolated sandbox workspace" in low:
+        return "workspace"
+    if s.startswith(("Running sandbox agent", "Running Claude sandbox agent", "Repairing", "Attempt ")):
+        return "attempt"
+    if "command failed" in low or "tool failed" in low or low.startswith("error"):
+        return "error"
+    return "status"
+
+
+def _sandbox_assets_summary(out_dir: str) -> dict:
+    """What assets the run actually resolved: each generated/resolved sprite in the sandbox's
+    `asset_cache/` (served via the path-safe /artifact route) plus any `asset_notes` (e.g. a
+    rate-limit fallback). Powers the frontend's assets panel."""
+    items: list[dict] = []
+    cache = os.path.join(out_dir, "sandbox_workspace", "asset_cache")
+    if os.path.isdir(cache):
+        for name in sorted(os.listdir(cache)):
+            if name.lower().endswith(".png"):
+                rel = os.path.relpath(os.path.join(cache, name), os.getcwd())
+                items.append({"type": name[:-4], "url": "/artifact/" + rel})
+    notes: list = []
+    metrics_path = os.path.join(out_dir, "metrics.json")
+    if os.path.isfile(metrics_path):
+        try:
+            with open(metrics_path) as f:
+                notes = json.load(f).get("asset_notes") or []
+        except (OSError, json.JSONDecodeError):
+            pass
+    return {"items": items, "notes": notes}
+
 
 class Job:
     def __init__(self) -> None:
@@ -42,7 +105,7 @@ def _run_job(
     from infinienv.evaluation.runner import run_generation
 
     def on_stage(msg: str) -> None:
-        job.events.put({"type": "stage", "message": msg})
+        job.events.put({"type": "stage", "kind": _classify_stage(msg), "message": msg})
 
     try:
         provider = get_provider(provider_name)
@@ -82,11 +145,14 @@ def _run_sandbox_job(
     out_dir: str,
     max_repair_attempts: int | None,
     assets_mode: str,
+    refine_prompt: bool,
+    backend: str,
+    model: str | None,
 ) -> None:
     from infinienv.sandbox.runner import run_sandbox_generation
 
     def on_stage(msg: str) -> None:
-        job.events.put({"type": "stage", "message": msg})
+        job.events.put({"type": "stage", "kind": _classify_stage(msg), "message": msg})
 
     try:
         result = run_sandbox_generation(
@@ -95,6 +161,9 @@ def _run_sandbox_job(
             out_dir,
             max_repair_attempts=max_repair_attempts,
             assets_mode=assets_mode,
+            refine_prompt=refine_prompt,
+            backend=backend,
+            model=model,
             on_stage=on_stage,
         )
         # No SceneSpec/validation-errors payload here (unlike the non-sandbox path): a
@@ -111,6 +180,7 @@ def _run_sandbox_job(
                 "run_error": result["run_error"],
                 "repair_attempts": result["repair_attempts"],
                 "workspace_dir": os.path.relpath(result["workspace_dir"], os.getcwd()),
+                "assets": _sandbox_assets_summary(out_dir),
             }
         )
     except ProviderError as exc:
@@ -161,6 +231,27 @@ def create_app():
         if assets_mode not in ("none", "local", "generated", "auto"):
             return jsonify({"error": f"unknown assets mode {assets_mode!r}"}), 400
 
+        # Prompt enrichment defaults on for sandbox runs; the form sends refine_prompt=false only
+        # when the user unchecks it. Absent key -> default True.
+        refine_prompt = data.get("refine_prompt", True) is not False
+
+        # Which sandbox agent runtime to use (only meaningful when sandbox is checked). Absent ->
+        # None, so run_sandbox_generation falls back to INFINIENV_SANDBOX_BACKEND, then "openai".
+        sandbox_backend = data.get("sandbox_backend") or None
+        if sandbox_backend not in (None, "openai", "claude"):
+            return jsonify({"error": f"unknown sandbox backend {sandbox_backend!r}"}), 400
+
+        # Which model the sandbox agent runs as. Absent -> None, so run_sandbox_generation falls
+        # back to INFINIENV_SANDBOX_MODEL then the backend default. A provided model must be one of
+        # the backend's known-good options (see SANDBOX_MODELS) -- don't forward arbitrary strings.
+        sandbox_model = data.get("sandbox_model") or None
+        if sandbox_model is not None:
+            effective_backend = sandbox_backend or "openai"
+            if sandbox_model not in SANDBOX_MODELS.get(effective_backend, ()):
+                return jsonify(
+                    {"error": f"unknown sandbox model {sandbox_model!r} for backend {effective_backend!r}"}
+                ), 400
+
         job = Job()
         job_id = uuid.uuid4().hex
         with _jobs_lock:
@@ -179,6 +270,9 @@ def create_app():
                     out_dir=out_dir,
                     max_repair_attempts=max_repair_attempts,
                     assets_mode=assets_mode,
+                    refine_prompt=refine_prompt,
+                    backend=sandbox_backend,
+                    model=sandbox_model,
                 ),
                 daemon=True,
             )
@@ -243,39 +337,41 @@ def create_app():
 
     @app.get("/api/runs")
     def api_runs():
-        runs_dir = os.path.abspath(os.path.join(os.getcwd(), "runs"))
-        if not os.path.isdir(runs_dir):
-            return jsonify({"runs": []})
         entries = []
-        for name in sorted(os.listdir(runs_dir), reverse=True):
-            run_path = os.path.join(runs_dir, name)
-            scene_path = os.path.join(run_path, "scene.json")
-            if not os.path.isfile(scene_path):
+        # Scan examples/ (committed example worlds) first so a no-key reviewer always sees a real
+        # generated world in the gallery, then runs/ (live runs). Examples lead so the 50-item cap
+        # can't hide them on a machine with many runs.
+        for base in ("examples", "runs"):
+            base_dir = os.path.abspath(os.path.join(os.getcwd(), base))
+            if not os.path.isdir(base_dir):
                 continue
-            metrics_path = os.path.join(run_path, "metrics.json")
-            success = None
-            sandbox = False
-            if os.path.isfile(metrics_path):
-                try:
-                    with open(metrics_path) as f:
-                        run_metrics = json.load(f)
-                    success = run_metrics.get("success")
-                    sandbox = run_metrics.get("source") == "sandbox"
-                except (OSError, json.JSONDecodeError):
-                    pass
-            entries.append(
-                {
-                    "name": name,
-                    "success": success,
-                    "sandbox": sandbox,
-                    "render_url": f"/artifact/runs/{name}/render.png"
-                    if os.path.isfile(os.path.join(run_path, "render.png"))
-                    else None,
-                    "replay_url": f"/artifact/runs/{name}/replay.gif"
-                    if os.path.isfile(os.path.join(run_path, "replay.gif"))
-                    else None,
-                }
-            )
+            for name in sorted(os.listdir(base_dir), reverse=True):
+                run_path = os.path.join(base_dir, name)
+                if not os.path.isfile(os.path.join(run_path, "scene.json")):
+                    continue
+                success, sandbox = None, False
+                metrics_path = os.path.join(run_path, "metrics.json")
+                if os.path.isfile(metrics_path):
+                    try:
+                        with open(metrics_path) as f:
+                            run_metrics = json.load(f)
+                        success = run_metrics.get("success")
+                        sandbox = run_metrics.get("source") == "sandbox"
+                    except (OSError, json.JSONDecodeError):
+                        pass
+                entries.append(
+                    {
+                        "name": name if base == "runs" else f"example: {name}",
+                        "success": success,
+                        "sandbox": sandbox,
+                        "render_url": f"/artifact/{base}/{name}/render.png"
+                        if os.path.isfile(os.path.join(run_path, "render.png"))
+                        else None,
+                        "replay_url": f"/artifact/{base}/{name}/replay.gif"
+                        if os.path.isfile(os.path.join(run_path, "replay.gif"))
+                        else None,
+                    }
+                )
         return jsonify({"runs": entries[:50]})
 
     return app

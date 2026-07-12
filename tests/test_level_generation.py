@@ -3,7 +3,14 @@
 
 import pytest
 
-from infinienv.engine.level_generation import generate_organic_region, region_is_connected
+from infinienv.engine.level_generation import (
+    carve_gaps,
+    generate_organic_region,
+    generate_platform_layout,
+    generate_terrain_profile,
+    region_is_connected,
+    scatter_on_supports,
+)
 
 
 def test_generate_organic_region_is_deterministic_for_a_given_seed():
@@ -69,3 +76,71 @@ def test_region_is_connected_false_for_a_disconnected_island():
 
 def test_region_is_connected_false_when_start_not_in_region():
     assert region_is_connected({(1, 1)}, (0, 0)) is False
+
+
+# --- side-view seeded generators (the anti-cheese capability) ---------------------------------
+
+
+def test_terrain_profile_deterministic_and_varies_by_seed():
+    a = generate_terrain_profile(40, seed=1, base_row=10, min_row=4, max_row=14)
+    assert a == generate_terrain_profile(40, seed=1, base_row=10, min_row=4, max_row=14)  # deterministic
+    b = generate_terrain_profile(40, seed=2, base_row=10, min_row=4, max_row=14)
+    assert a != b  # the anti-cheese property: a different seed is a different level
+
+
+def test_terrain_profile_respects_bounds_and_max_step():
+    heights = generate_terrain_profile(60, seed=5, base_row=10, min_row=4, max_row=14, max_step=2)
+    assert len(heights) == 60
+    assert all(4 <= h <= 14 for h in heights)
+    assert all(abs(b - a) <= 2 for a, b in zip(heights, heights[1:]))  # never jumps more than max_step
+
+
+def test_carve_gaps_deterministic_avoids_margins_and_varies():
+    g1 = carve_gaps(40, seed=1, count=3, margin=3)
+    assert g1 == carve_gaps(40, seed=1, count=3, margin=3)
+    assert all(3 <= c <= 40 - 1 - 3 for c in g1)  # never within the margin of either end
+    assert carve_gaps(40, seed=1, count=3) != carve_gaps(40, seed=9, count=3)
+
+
+def test_platform_layout_shapes_deterministic_and_varies():
+    p1, l1 = generate_platform_layout(60, 22, seed=1, rows=5)
+    p2, l2 = generate_platform_layout(60, 22, seed=1, rows=5)
+    assert (p1, l1) == (p2, l2)  # deterministic
+    assert all(len(p) == 3 and p[0] <= p[2] for p in p1)  # (left, row, right)
+    assert all(len(l) == 3 and l[1] < l[2] for l in l1)  # (col, top_row, bottom_row)
+    p3, _ = generate_platform_layout(60, 22, seed=2, rows=5)
+    assert p1 != p3  # different seed -> different layout
+
+
+def test_platform_layout_every_adjacent_level_is_ladder_connected():
+    platforms, ladders = generate_platform_layout(60, 22, seed=7, rows=5)
+    rows_used = sorted({row for _, row, _ in platforms})
+    # each ladder's endpoints land on a platform of both the top and bottom level it joins
+    for col, top, bottom in ladders:
+        assert any(l <= col <= r and row == top for l, row, r in platforms)
+        assert any(l <= col <= r and row == bottom for l, row, r in platforms)
+    # every adjacent pair of occupied levels has at least one ladder joining them (connectivity)
+    joined = {(t, b) for _, t, b in ladders}
+    for a, b in zip(rows_used, rows_used[1:]):
+        assert (a, b) in joined
+
+
+def test_scatter_on_supports_spacing_avoids_pits_and_ends():
+    supports = [(0, 10, 20)]  # one platform spanning cols 0..20 on row 10
+    pits = frozenset({5, 6})
+    placed = scatter_on_supports(supports, seed=3, count=4, spacing=3, avoid=pits)
+    cols = [c for c, _ in placed]
+    assert all(r == 10 for _, r in placed)  # sits on the support row
+    assert all(c not in pits for c in cols)  # never on a pit column
+    assert 0 not in cols and 20 not in cols  # spawn/exit ends kept clear
+    assert all(abs(a - b) >= 3 for i, a in enumerate(cols) for b in cols[i + 1:])  # spacing respected
+    assert scatter_on_supports(supports, seed=3, count=4, spacing=3, avoid=pits) == placed  # deterministic
+
+
+def test_side_view_generators_reject_bad_parameters():
+    with pytest.raises(ValueError):
+        generate_terrain_profile(0, seed=1, base_row=5, min_row=0, max_row=10)
+    with pytest.raises(ValueError):
+        generate_terrain_profile(10, seed=1, base_row=99, min_row=0, max_row=10)  # base outside range
+    with pytest.raises(ValueError):
+        generate_platform_layout(60, 22, seed=1, rows=1)  # need >= 2 levels to connect

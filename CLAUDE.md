@@ -62,19 +62,26 @@ system grows:
   checks, reachability, pathfinding, inventory transitions, goal completion, and scoring are
   always deterministic and testable. If model output and deterministic validation conflict, the
   validator wins, full stop.
-- **No model-authored code execution in the default path.** Every `generate` run other than the
-  explicit, opt-in `--sandbox` mode never lets the model write or run code: not `eval`/`exec`, not
-  shell commands, not dynamically imported/chosen packages, not arbitrary file writes outside the
-  selected output directory. This is why section 5's extended mechanics are a *declarative effect
-  system* (a fixed, finite vocabulary of effect ops interpreted by real, tested Python in
-  `engine/interactions.py`) and not "let the model write and run a handler function." **The one
-  disclosed exception is section 11's sandbox mode** — built after the user explicitly requested
-  general model-authored engine code (not just a fixed set of effects) and, when asked to resolve
-  the highest-risk design question, chose an isolated per-run workspace copy over touching the
-  real installation. That mode does not pretend the validator-wins guarantee survives it — it
-  labels every affected run `"source": "sandbox"` and documents exactly what's lost. See section
-  11 and `notes.md` for the full history, including the two earlier rounds where this was
-  proposed and declined before the user's explicit, informed redirect.
+- **Sandbox is the only `generate` mode, and the deterministic engine is its substrate — including
+  running the real validator on every sandbox scene.** As of the user's explicit decision, `generate`
+  *only* runs section 11's sandbox agent (a plain `generate --prompt ...`; `--sandbox` is an accepted
+  no-op, and there is no non-sandbox `generate` path). The deterministic engine is *not* deleted — it
+  can't be: `build_workspace_dir` copies `schema/engine/navigation/validation/render/assets` into
+  every workspace (the agent imports them), and the outer check runs the **real deterministic
+  validator** (`validation/validator.py::validate_scene`) on the sandbox's `scene.json`, enforcing the
+  vocabulary-agnostic geometry checks (`OUT_OF_BOUNDS`, `DUPLICATE_ID` — a real bug for any mechanics)
+  and recording the rest in `metrics.json`'s `deterministic_validation`. So sandbox runs *do* have the
+  validator's checks, not "traded away." The one thing that genuinely can't transfer is fixed-
+  vocabulary **solvability** — the A*/symbolic planner can't play a game the agent wrote in its own
+  code — so that's covered by the outer image check + the independent faithfulness audit + the agent's
+  own trace invariants instead of a planner guarantee, every affected run labeled `"source":
+  "sandbox"` so nothing is pretended. The deterministic path's guarantees still live on in the
+  *tooling*: `validate`/`solve`/`mutate`/`curriculum`/`benchmark`/`export-dataset` still run the fixed-
+  vocabulary validator + solver over any scene (e.g. `examples/*.json`), which is the code-defined-
+  truth / programmatic-reward machinery — kept deliberately, since it's what best matches the brief's
+  "code-level objectives beat a VLM" claim. See section 11 and `notes.md` for the full history (two
+  earlier rounds where model-authored code was proposed and declined, then chosen, then made the
+  default, then made the only mode).
 - **Movement and physics stay deterministic code, not per-step LLM calls — outside sandbox mode.**
   The model plans task *semantics* (which goals exist, what a custom interaction's effects are);
   A* pathfinding and the primitive action executor (`engine/actions.py`) are always plain Python,
@@ -121,7 +128,10 @@ GenInt/                            # repo root
 │   │   └── prompts/
 │   │       ├── scene_planner.md   # includes the mechanics worked example + rules
 │   │       ├── repair_agent.md
-│   │       └── mutation_agent.md
+│   │       ├── mutation_agent.md
+│   │       ├── sandbox_agent.md   # the sandbox agent's system prompt (section 11)
+│   │       ├── sandbox_auditor.md # the independent faithfulness auditor's prompt (section 11)
+│   │       └── prompt_refiner.md  # enrich a raw prompt into a fuller spec pre-handoff (section 11)
 │   ├── generation/
 │   │   ├── compiler.py            # generate_and_validate: propose -> validate -> repair -> fallback
 │   │   ├── templates.py           # mock provider's deterministic scene templates
@@ -140,7 +150,13 @@ GenInt/                            # repo root
 │   │   ├── platformer_physics.py    # generic integrate_grounded_2d/climb_step (section 11)
 │   │   ├── grid_collision.py        # generic segment_blocked/move_with_collision (section 11)
 │   │   ├── level_generation.py      # generic generate_organic_region/region_is_connected (section 11)
-│   │   └── puzzle_state.py          # generic PuzzleState/Gate: named state + declarative gating (section 11)
+│   │   ├── puzzle_state.py          # generic PuzzleState/Gate: named state + declarative gating (section 11)
+│   │   ├── pushables.py             # generic Sokoban crate/block pushing (section 11)
+│   │   ├── pathfinding.py           # generic BFS find_path/next_step_toward over a walls set (section 11)
+│   │   ├── vision.py                # generic line-of-sight/range/cone perception (section 11)
+│   │   ├── perception.py            # generic KnowledgeMap: closed perception / fog-of-war (section 11)
+│   │   ├── agent_behavior.py        # generic BehaviorMachine: reactive-NPC state graph (section 11)
+│   │   └── rendering.py             # generic feet_anchor/SpriteBook/paste_column render helpers (section 11)
 │   ├── validation/
 │   │   ├── errors.py                # ValidationIssue/ValidationResult
 │   │   ├── reachability.py          # BFS reachability pre-check
@@ -566,8 +582,16 @@ rendering, unchanged unless opted into):
   `assets/placeholder_gen.py`, simple Pillow-drawn icons). No key or network needed.
 - `generated` — real sprites via the OpenAI Images API (`assets/generator_openai.py`). No silent
   fallback if generation fails.
-- `auto` — generated, falling back to the local placeholder (noted in `asset_manifest.json`) if
-  generation is unavailable.
+- `auto` — **combine both, routed per type**: the simple structural types
+  (`resolver.py::SIMPLE_LOCAL_TYPES` = wall/floor/box/door/exit/key/hazard/distractor) resolve to
+  their checked-in local placeholder with **no image-API call** (note `"auto: simple type drawn
+  locally"`), and only the types that actually benefit from generation — characters (`agent`) and
+  novel/custom types (creatures, plants, props) — are OpenAI-generated, still falling back to a local
+  placeholder if a generation fails (note `"fallback: generated unavailable"`). This is deliberate:
+  wall/floor are placed in nearly every cell and were the exact types repeatedly hitting the image
+  API's 5-images/min rate limit (429), so drawing them locally is both faster and far more reliable,
+  while `agent`/custom sprites still get real generated art. `generated` mode is unchanged (generates
+  everything, no fallback).
 
 **Model:** `gpt-image-1`, not `gpt-image-2` — per OpenAI's own docs, `gpt-image-2` explicitly does
 not support `background: "transparent"`; `gpt-image-1`/`1.5`/`1-mini` do. Overridable via
@@ -584,6 +608,17 @@ shapes, chosen by whether the type is a discrete object or a tile *texture*:
   seamless, zero-margin, edge-to-edge texture, and **no** crop step (cropping a texture meant to
   already fill 100% of the frame is a no-op at best, clips a busy pattern at worst). Getting this
   distinction wrong was a real, user-reported bug — see `notes.md`.
+
+Both prompt templates (and the `generator_diffusion.py` equivalents, for parity) explicitly demand a
+**cohesive blocky retro-16-bit pixel-art style** — chunky visible square pixels, a small flat
+palette, a bold dark outline, flat cel shading, and explicitly *no* smooth gradients / photorealism /
+3D / soft shading — so every generated sprite reads as the same tile-game aesthetic and sits
+seamlessly next to the others and the square tiles (a user ask: "make sure all images generated are
+block style so that it fits seamlessly"). Live-verified against the real Images API: a brick tile,
+coin, green-tunic hero, plant monster, and round enemy all came back as consistent chunky pixel-art
+that tiles together cleanly (see `notes.md`). Note the pre-existing, unrelated moderation caveat is
+unchanged — a *description* that reads as a copyrighted character (e.g. "Italian plumber") still
+returns `400 moderation_blocked` regardless of style; that's a description problem, not a style one.
 
 Sprites are cached **by object type**, not per-scene or per-run, in `.infinienv_asset_cache/` at
 the repo root (gitignored) — generating "table" once means every future scene with a table reuses
@@ -883,7 +918,19 @@ precedent as sandbox-authored mechanics below).
   but malformed LZW-compressed pixel data in every single frame, because `Image.verify()`
   validates GIF *container* structure, not that the pixel data inside actually decodes. All three
   are now caught before `success` can be `true`: the check forces a real per-frame `.load()` on
-  both `render.png` and every frame of `replay.gif`, not just `verify()` plus a frame count.
+  both `render.png` and every frame of `replay.gif`, not just `verify()` plus a frame count. It
+  also applies one **heuristic motion floor**: it best-effort-parses `replay.json`, extracts the
+  main entity's per-frame position (trying the shapes agents actually write), and fails a run whose
+  entity makes an egregious single-frame jump -- a scale-free outlier (`> 6x` the 90th-percentile
+  step), which catches a `pos = target` teleport (a 10-30x spike) while leaving normal run/jump
+  motion well under the bar. This modestly widens the check from "the artifacts are well-formed" to
+  "the motion isn't physically absurd" -- still explicitly **not** a semantic-correctness guarantee
+  (it can't judge whether the game's *rules* are real), just a floor against the specific,
+  repeatedly-observed failure of an agent assigning a position straight to a target. Best-effort:
+  an unrecognized `replay.json` shape skips the motion floor rather than failing (see the
+  "harness-enforced no-teleport floor" subsection below). It's the one enforced correctness floor
+  the agent can't skip by writing a weak self-check, added after prompt guidance alone repeatedly
+  failed to stop teleports reaching a user.
 - **An agent conversation that doesn't finish cleanly (e.g. hits its turn budget) still gets a
   full, honest report.** `sandbox/runner.py` captures that failure as `run_error` rather than
   letting it propagate past artifact extraction, workspace sync, and the sanity check — whatever
@@ -1102,11 +1149,13 @@ disagreed:
 
 ```json
 {
-  "source": "sandbox", "provider": "openai_agents_sandbox", "seed": 2,
+  "source": "sandbox", "provider": "openai_agents_sandbox", "model": "gpt-5.5", "seed": 2,
   "success": true, "sandbox_self_reported_success": true,
   "outer_sanity_passed": true, "outer_sanity_error": null,
+  "audited": true, "audit_passed": true, "audit_findings": null,
+  "deterministic_validation": {"ran": true, "valid": false, "errors": ["UNSOLVABLE"], "enforced_codes": ["DUPLICATE_ID", "OUT_OF_BOUNDS"]},
   "missing_artifacts": [], "repair_attempts": 0,
-  "repair_history": [{"attempt": 0, "run_error": null, "outer_sanity_passed": true, "outer_sanity_error": null, "missing_artifacts": []}]
+  "repair_history": [{"attempt": 0, "run_error": null, "outer_sanity_passed": true, "outer_sanity_error": null, "audited": true, "audit_passed": true, "audit_findings": null, "missing_artifacts": []}]
 }
 ```
 
@@ -1385,9 +1434,571 @@ action dispatch) and `grid_collision.py`/`animation.py` alongside `puzzle_state.
 file — four of the session's reusable primitives composed together in one run. `render.png` showed
 a coherent branching maze with gems, spikes, a visible pressure plate, and the exit.
 
+### Completing the primitive vocabulary: crates, reactive NPCs, perception, pathfinding (2026-07-10)
+
+The previous round's report closed with "crates (pushable objects) and reactive NPCs aren't
+addressed -- not claimed as solved," and the user objected to leaving that hanging: *"I need you
+to fully flesh out it so it becomes really really strong and able to handle any prompt."* This
+round closes the remaining categories in the user's own graded difficulty table so its top tier
+(moving hazards, switches, crates, NPCs, backtracking) is covered by tested, composable
+primitives. Honest framing kept: "any prompt" is aspirational, not a provable claim; the
+defensible claim earned here is that **no common structural 2D-game mechanic is left for the agent
+to hand-roll from scratch.**
+
+Two coupling facts drove the design (same relationship `grid_collision.py` already had to the base
+engine): `navigation/astar.py::find_path` needs a full `Grid` (unusable from a sandbox custom loop
+with only a wall-cell set -- the cave run hand-rolled BFS because of this), and
+`engine/physics.py::try_push` mutates `ObjectState` against a `Grid` (unusable for a crate tracked
+as a plain `{id: (x,y)}` dict). Four new dependency-free `engine/` modules, auto-copied into every
+workspace, close the gaps -- crates map to `pushables`; a genuinely reactive NPC needs all three
+of `agent_behavior` + `vision` + `pathfinding` (the decision, the perception, and maze navigation
+respectively; a half-version with distance-only triggers and straight-line motion is the same
+"collapsed to the simplest thing" failure this session keeps fixing):
+
+- `engine/pushables.py` -- `try_push_block()` (a crate can't be shoved through a wall, another
+  block, or off-grid), `cell_is_free()` (so a block obstructs the agent), `all_targets_satisfied()`
+  (the "every crate on its switch" win check).
+- `engine/pathfinding.py` -- `find_path()` (BFS shortest path over a plain wall-cell set) and
+  `next_step_toward()` (per-frame first step) -- lets a chasing NPC navigate *around* walls in a
+  maze instead of straight-lining into them.
+- `engine/vision.py` -- `has_line_of_sight()` (reuses `grid_collision.segment_blocked`, no
+  duplicated raycast), `within_range()`, `within_cone()`, and `can_see()` composing them -- makes
+  "chases on sight" a real occluded-line check, not a distance check that sees through walls.
+- `engine/agent_behavior.py` -- `BehaviorMachine`: a reactive NPC's decision logic as a declared,
+  testable state graph (patrol -> chase -> return) instead of an ad-hoc if-chain that gets stuck
+  in one state. A pure FSM -- the caller wires `vision`/`pathfinding` into its conditions/actions.
+
+Prompt changes stayed at the level the session settled on -- no new principle (reactive NPCs and
+crates are both "build what the task describes, don't collapse to the simplest version," already
+covered by principles 2 and 3): four "Reusable building blocks" entries; a clause on principle 2
+(a pushable obeys collision -- use `try_push_block`, don't reassign the coordinate); a clause on
+principle 3 (a described-as-reactive NPC needs a real behavior machine + perception + pathfinding,
+not one fixed motion or a see-through-walls distance check); and one self-review invariant example
+(a reactive NPC's behavior state must actually change across the trace).
+
+**Live-verified on a composite "very hard"-tier prompt** (not a re-run of any prior prompt): a
+dungeon where the player pushes a crate onto a switch to open a locked gate while a guard patrols
+and chases on sight, then backtracks to the opened gate and exits. First attempt, no
+visibility-tuning round. Confirmed from the synced code, not the summary: all four new modules
+imported and load-bearing -- `try_push_block`/`cell_is_free`/`all_targets_satisfied` (crate
+pushing + the crate-on-switch gate condition + the crate obstructing the agent), `BehaviorMachine`
+with real `patrol<->chase` transitions gated on `sees`/`lost`, `can_see` with a real sight radius
+(and even the closed gate as a vision occluder), and `next_step_toward` routing the guard around
+walls+crate in both patrol and chase. Confirmed from the actual trace, not a glance: the guard's
+behavior state genuinely changed (14 patrol frames, 6 chase frames -- not stuck in one), the gate
+was closed for every frame before the crate reached the switch (opened at frame 5), and the player
+exited uncaught. Five of the session's reusable primitives (`action_registry`, `pushables`,
+`agent_behavior`, `vision`, `pathfinding`) composed in one run. One honest note: it used a plain
+`gate_open` boolean + `all_targets_satisfied` for the single crate->switch condition rather than
+wrapping it in `puzzle_state.Gate` -- which is correct, not a gap: `Gate` is for *multiple* jointly
+-required conditions, and the single-condition dependency here is genuinely enforced (the gate
+blocks movement and occludes vision until the crate lands). Still honestly out of the "very hard"
+tier: an NPC with richer internal goals than patrol/chase/flee, and multi-crate coordination
+puzzles, aren't specifically primitive-backed -- the building blocks compose toward them, but that
+isn't claimed as proven.
+
+### Prompt enrichment before the handoff: `sandbox/prompt_refiner.py` (2026-07-10)
+
+A one-line prompt leaves the expected feature set implicit ("mario-style" without saying jump/
+gravity/pipes; "procedural cave" without saying branching/uneven), and several runs this session
+showed the agent under-building against it. Per the user's request -- *"we know what it needs to
+meet the users expectations so we should take their prompt improve it and then hand that off"* --
+`--sandbox` runs now run a **best-effort LLM pass that expands the raw prompt into a fuller,
+intent-preserving build spec** (`sandbox/prompt_refiner.py`, system prompt in
+`llm/prompts/prompt_refiner.md`) and hand *that* to the agent instead of the bare prompt. This is
+pure semantic generation -- it improves an instruction, runs no code, touches no validator-wins
+guarantee (and only ever runs on the already-disclosed sandbox path) -- the same shape as the
+existing `scene_planner.md`/`repair_agent.md` LLM steps, producing enriched natural language rather
+than a `SceneSpec`.
+
+- **Best-effort, never fatal** (same posture as sandbox live narration): no key, missing `openai`
+  package, API error, or empty output all degrade to the original prompt with the reason recorded
+  -- refinement is an enhancement layer, not a dependency.
+- **Transparent**: `metrics.json` records `original_prompt`, `refined_prompt`, `prompt_refined`,
+  and `prompt_refine_note`, and the refined text streams as an `on_stage` line so a reviewer sees
+  the exact handoff (what the user typed vs. what the agent was given). The refiner's system prompt
+  hard-rule is "preserve the user's core intent -- expand and clarify, never replace the game or
+  add contradictory mechanics"; it deliberately points at the mechanic vocabulary the sandbox has
+  primitives for (moving/emerging hazards, reactive NPCs, crates, switches/locked gates, procedural
+  terrain, animation) without dictating implementation or naming modules.
+- **Default-on, opt-out**: `--no-refine-prompt` (CLI) / a "Refine prompt" checkbox (GUI, default
+  checked) disables it; `INFINIENV_REFINER_MODEL` overrides the model (defaults to the sandbox
+  model). Sandbox-only -- the non-sandbox path already has the schema-aware `ScenePlannerAgent`.
+  Wired in `sandbox/runner.py::_run_async` just before the agent message is built.
+
+Live-verified: the deliberately terse `"a ninja platformer"` (3 words) was expanded into a
+three-paragraph spec that preserved the genre and added concrete win/lose conditions (collect
+three scrolls, reach the rooftop, health/damage/restart), specific mechanics the sandbox can
+deliver (switch/key-gated locks, guards that patrol and chase on sight, moving platforms, timed
+traps), level structure, and a pixel-art visual style -- recorded in `metrics.json` alongside the
+original, and the run built and passed the outer check. The enrichment leaned naturally toward the
+exact primitive vocabulary the `engine/` modules back, without being told to.
+
+### The render must reflect the simulation: `engine/rendering.py` + principle 8 (2026-07-10)
+
+A user-reported screenshot showed the hero floating a tile above the grass in a Mario-rescue run,
+with two more asks: "we should also monitor collisions and win cases should be displayed." Reading
+the actual code (`runs/gui_1783691768/sandbox_workspace/run_scene.py`) found three related root
+causes, all the same underlying failure -- *the render not faithfully reflecting the simulation*:
+
+1. **Physics ground line ≠ drawn ground line**: physics clamped the hero to `GROUND_Y = 8.0` (tile
+   units) but the grass was drawn from pixel row `9*TILE` -- a full tile of mismatch between the
+   number the sim uses and the number the render uses.
+2. **Center-anchored sprite**: the hero was pasted centered at its position (`top-left = center -
+   size/2` on both axes), so a standing sprite's feet land half its height below its center --
+   floating it above the ground even ignoring (1).
+3. **No outcome or collision shown**: `rescued`/`lost` and plant contact were computed but
+   `draw_frame` only drew the title -- no win/lose banner, no health/hit HUD; a viewer couldn't
+   see collisions register or whether the run was won.
+
+Fix, per this session's discipline (generic reusable code + principle + self-review, never a
+per-prompt worked example): new `engine/rendering.py` with `feet_anchor(center_x, ground_y_px,
+size)` / `feet_anchor_rect(...)` -- the paste top-left so a sprite's *bottom* edge sits on the
+ground line, fixing cause (2) correct-by-construction (center-anchoring floats a standing sprite
+by half its height). New **principle 8** ("the render must legibly reflect the simulation, not
+float free of it"): a grounded entity drawn feet-on-ground using the *same* shared ground constant
+the physics clamps to; the win/lose outcome visibly rendered; collision/health state shown (HUD,
+hit-flash). A requirements bullet and both self-review passes gained matching checks (physics-
+ground == draw-ground and feet-on-line programmatically; feet-touch-ground, banner-present,
+collision-visible visually).
+
+**Live-verified on the exact reported prompt** (`--no-refine-prompt`, to match the reported run's
+conditions): all three fixed, confirmed from the code and the render, not the agent's summary.
+`GROUND_Y = 288` is now a *single pixel constant* used by both `integrate_grounded_2d(..., ground_y
+=GROUND_Y)` and the drawn grass (`d.rectangle([0, GROUND_Y, ...])`), and the hero is drawn with its
+feet at that line -- the render shows the hero standing firmly on the grass, no float. A "Health: N"
+HUD and a "Plant bites flash yellow" indicator make collisions legible (the hero visibly ended at
+Health 1 after two hits), and a "RESCUED! YOU WIN" banner displays the outcome. The agent also
+added a trace invariant `assert hero.y <= GROUND_Y + 1` unprompted. A second run with `--assets
+local` (seed 7) confirmed the *pasted-sprite* path too: the hero is a real pasted placeholder
+sprite, pasted at `cy = y - PLAYER_SIZE/2` so its bottom lands exactly on `GROUND_Y` (the same
+constant physics clamps to) -- an early frame shows it standing feet-on-grass, with a "Health: N /
+Plants threatened: 3/3" HUD and the "RESCUED! YOU WIN" banner. **Honest finding**: neither run
+actually *imported* `engine/rendering.py`'s `feet_anchor` -- both hand-rolled the correct
+feet-anchor from principle 8's guidance (shift the paste center up by half the sprite so the bottom
+sits on the shared ground line). So the fix is real and verified in both asset modes, but it's the
+*principle* doing the work here, not the helper; the helper remains available for when an agent
+reaches for it, and its pointer wasn't escalated because the outcome was already correct (a future
+run that floats a center-anchored sprite would justify escalating it -- none did).
+
+### Harness-enforced no-teleport floor + climb-gating + assets-resolved-but-not-pasted (2026-07-10)
+
+A user-reported GUI run (`runs/gui_1783698976`, `--assets auto`) had the character teleport, climb
+where there were no ladders, and use no real art despite auto mode -- read the actual code, three
+root causes: (1) the controller assigned the hero's position straight to a waypoint (`st.x=tx`;
+`st.x=st.x-100` on a fall) -- a teleport, not movement; (2) it computed `on_ladder` but gated the
+climb on "target within 70px of any ladder" instead, so it climbed in open air; (3) `resolve_assets`
+ran and the run's `asset_cache/` held 11 genuinely nice generated sprites, but `draw_frame` drew
+flat primitives and pasted none of them (the "resolve then ignore" bug, confirmed by the user: "it
+has an asset cache of what it could have used, really nice assets, but it didn't"). The run imported
+none of the reusable primitives and wrote a self-check (`assert won and lives>0 and key`) that
+caught none of this.
+
+Since prompt guidance alone has repeatedly failed to stop teleports, the user chose a
+**harness-enforced floor**: `outer_sanity_check` now best-effort-parses `replay.json`, extracts the
+main entity's position series, and fails a run with an egregious single-frame jump (scale-free,
+`> 6x` the p90 step) -- so a teleporting run fails the outer check and enters the repair loop, the
+one correctness floor the agent can't skip with a weak self-check (`_positions_from_replay` /
+`_teleport_frame` in `sandbox/workspace.py`, both unit-tested; unparseable traces skip the floor,
+never false-fail). The climb-gating and asset-usage fixes stay prompt/self-review-side (the user
+chose "require + self-review" for assets): principle 3 now spells out that a climb must be gated on
+the character being ON the structure (use `climb_step`, which raises off-structure), not on
+proximity to a waypoint; principle 5 names the teleport anti-pattern explicitly; the assets bullet
+now names the resolve-then-ignore bug and requires pasting the cached sprites; and self-review step
+1 was reworked from a loose "e.g." list into a **required checklist** (no-teleport, gated-change,
+no-wall-crossing, hazard-mattered, NPC-state-changed, feet-on-ground, assets-actually-pasted) so a
+compliant agent's own repair catches these first.
+
+**Honest framing**: the teleport floor is a heuristic, not a guarantee -- it can in principle miss a
+degenerate all-teleport trace or a trace whose shape it can't parse, and it slightly widens the
+outer check's role (documented in the outer-check paragraph and the scope note). It's the strongest
+lever available without reintroducing the fixed-vocabulary constraint this mode exists to escape.
+Climb-gating and asset-usage remain agent-discretionary (the agent can still write arbitrary code);
+this raises the floor and the self-review bar, it doesn't make them impossible -- reported as-is.
+**Live-verified (`runs/cave_verify`, a procedural-cave prompt):** the agent drove the hero entirely
+through `ActionSpace` actions with real gravity + a jump arc + a `terrain_y` ground clamp (no
+waypoint interpolation -- the only `route` list in the file is used to *draw* the ledge, not to move
+the hero), and its self-check asserted the step cap (<=26), that every trace action was in the
+declared action set, that a hazard actually hit the hero (health 3->2 from a triggered falling
+rock), and that the reactive creature changed state -- confirmed from the synced code and the
+extracted frames, not the agent's summary.
+
+### A second agent runtime: the Claude Agent SDK backend (2026-07-10)
+
+The user has an Anthropic key and asked to run the sandbox with Anthropic's **Claude Agent SDK**
+(`claude-agent-sdk` -- Claude Code packaged as a library, distinct from the plain `anthropic`
+Messages-API SDK). This adds a *second, interchangeable agent runtime* for sandbox mode, selected
+by `INFINIENV_SANDBOX_BACKEND` (default `openai`, or `claude`) -- an env var, not a new flag, the
+same precedent as `INFINIENV_SPRITE_BACKEND` (§9), so `--sandbox`'s meaning stays stable regardless
+of which agent produces the artifacts. Both backends are genuinely interchangeable: the same
+isolated `sandbox_workspace/` copy of the engine, the same five artifacts, the same
+`outer_sanity_check` (including the teleport floor above), the same self-repair loop against it, the
+same prompt enrichment, and the same `metrics.json` shape -- only `provider`/`model` differ
+(`openai_agents_sandbox` vs `claude_agent_sandbox`). `sandbox/claude_runner.py` reuses
+`sandbox/runner.py`'s shared helpers (`_interpreter_briefing`, `_repair_message`, prompt refiner,
+`build_workspace_dir`, `outer_sanity_check`) rather than forking the pipeline; `run_sandbox_generation`
+dispatches on the env var.
+
+- **The two SDKs have structurally different execution models**, which is the whole reason this is a
+  second backend and not a drop-in model swap. The OpenAI Agents SDK copies the workspace into a
+  *separate ephemeral filesystem* (`hydrate_workspace`), runs the agent's shell/file tools there under
+  a macOS Seatbelt profile, then syncs that filesystem back onto disk (`sync_full_workspace`) and
+  extracts the artifacts from it -- the isolation boundary is a real, OS-enforced separate FS. The
+  Claude Agent SDK (Claude Code as a library) instead runs its built-in Read/Write/Edit/Bash tools
+  *directly on a working directory* (`cwd`). So here `cwd` **is** `sandbox_workspace/` on disk: the
+  agent edits it in place, there is no tar hydrate/sync round trip, and "extract artifacts" is a plain
+  copy of the five files out of that directory (`_copy_artifacts_from_dir`). Isolation is by
+  working-directory convention on a throwaway copied workspace (built from the *installed* package,
+  never this repo's real source), configured with `permission_mode="bypassPermissions"` (autonomous:
+  no human to approve each tool call) and `setting_sources=[]` (so Claude Code does **not** walk up
+  and load this repo's own `CLAUDE.md`/settings, which would confuse the sandbox agent with
+  instructions meant for the outer project). The sandbox_agent.md prompt is appended to Claude Code's
+  own `claude_code` system-prompt preset (not replacing it), keeping the built-in file/bash competence
+  plus this task's rules.
+- **Honest disclosure of the isolation difference.** The Claude backend does **not** apply the OpenAI
+  backend's Seatbelt confinement -- isolation is by `cwd` on a throwaway copied workspace, weaker than
+  a separate OS-enforced filesystem. This is consistent with §11's standing posture (sandbox mode is a
+  *disclosed* trade-off, not a hidden one), and the one guarantee both backends keep is the load-bearing
+  one: **the outer (trusted) process still never imports or executes the agent-written `.py` files** --
+  it only ever reads back the five named artifact files, exactly as the OpenAI backend does. The
+  Claude Agent SDK does expose its own OS-level `SandboxSettings`; wiring that in to recover
+  Seatbelt-grade confinement is a reasonable follow-up, deliberately left out of this first cut to keep
+  it a minimal, working "try it" -- flagged here rather than overclaimed.
+- **Auth -- login-first, `ANTHROPIC_API_KEY` deliberately left unset.** The Claude Agent SDK spawns
+  the `claude` CLI, whose credential order is `ANTHROPIC_API_KEY` -> `ANTHROPIC_AUTH_TOKEN` -> the
+  stored `claude.ai` login. An *earlier* version of this backend promoted `CL_KEY` (InfiniEnv's own
+  name for the Anthropic key) to `ANTHROPIC_API_KEY` in `cli._load_dotenv`. That turned out to be
+  actively harmful: setting `ANTHROPIC_API_KEY` forces the CLI onto the API-key account **in
+  preference to the working claude.ai login** -- confirmed live by the CLI's own warning
+  ("connectors are disabled because ANTHROPIC_API_KEY ... takes precedence over your claude.ai
+  login") -- and when that API account was out of credit (a hard 400 "credit balance is too low"),
+  every Claude run failed even though the login itself was fine. So the mapping was **removed** at
+  the user's direction: `cli._load_dotenv` and `claude_runner` no longer set `ANTHROPIC_API_KEY` at
+  all, and the backend does not require a key -- it lets the CLI use the login, and if there's no
+  auth at all the SDK surfaces that as a normal `run_error`. `CL_KEY` stays under its own name for
+  code that explicitly wants the raw key (the `anthropic` provider reads `CL_KEY` -> then a
+  user-set `ANTHROPIC_API_KEY`, and passes it *directly* to `anthropic.Anthropic(api_key=...)` --
+  never via the global env var, so it can't clobber the CLI's login). The default model for this
+  backend is `claude-sonnet-5` (`DEFAULT_SANDBOX_CLAUDE_MODEL` --
+  Sonnet, not Opus, chosen deliberately: sandbox runs are long and iterative, doing many
+  build-and-rerun cycles, so the cheaper Sonnet tier is the sensible default and stays plenty
+  capable at driving the closed-action-space discipline; use Opus via the override for the hardest
+  prompts),
+  overridable via `INFINIENV_SANDBOX_MODEL`, distinct from the OpenAI backend's `gpt-5.5` default.
+- **Live narration** works the same as the OpenAI backend: `_describe_claude_message` maps the SDK's
+  streamed `AssistantMessage`/`ResultMessage` blocks to the same `on_stage` lines (`$ <command>` for a
+  Bash tool call, `Editing: <path>` for Write/Edit, `Agent:`/`Thinking:` for text, a failure line for
+  an errored tool result; Read/Glob/Grep stay silent) -- duck-typed against the block shapes, wrapped
+  so a future SDK shape change degrades to silence rather than crashing, same best-effort discipline as
+  the OpenAI `_describe_stream_event`. So the CLI and GUI show live progress identically for both
+  backends with no new plumbing.
+- **Dependency.** `pip install infinienv[claude]` (`claude-agent-sdk`); the `claude` CLI must be on
+  PATH (the SDK spawns it). Lazy-imported inside `claude_runner._run_async`, following the project's
+  optional-dependency pattern -- a missing package becomes a `ProviderError` naming the install command,
+  and the default `openai` backend is entirely unaffected.
+
+**Live-verification (2026-07-10, honest partial result).** Exercised end to end against the real
+Claude Agent SDK + `claude` CLI on a maze/patrolling-enemy prompt (`--assets none`,
+`--no-refine-prompt`). *Confirmed working from the run's own output, not the agent's self-report:*
+CL_KEY authentication (the CLI's own precedence warning -- "connectors are disabled because
+ANTHROPIC_API_KEY ... takes precedence over your claude.ai login" -- confirms the key, not a stored
+subscription login, is in use); workspace prep; the agent genuinely reading the copied engine
+primitives (`grid_collision`/`motion_patterns`/`animation`/`pathfinding`/`vision`) and iterating on
+`run_scene.py` via the absolute venv interpreter (the interpreter briefing worked -- it never hunted
+for a different python); live-narration parity; and -- validated *by* this run -- the graceful
+mid-run failure path: when the Anthropic account's API credit was exhausted partway through, the SDK
+error was caught as `run_error`, the repair loop tried all three attempts against it, and
+`metrics.json` recorded an honest failure (`success:false`, `source`/`provider`/`outer_sanity_error`
+populated) instead of crashing -- exactly the designed behavior. *Not yet confirmed:* a **successful**
+run emitting all five artifacts, because the CL_KEY account ran out of credit (a 400 "credit balance
+is too low", reproduced on a trivial one-token call) -- an account/billing state no code change can
+fix. A full sandbox run makes many API calls over many minutes, so it needs a funded account; once
+topped up, re-run `INFINIENV_SANDBOX_BACKEND=claude` to confirm a green end-to-end. The default
+`openai` backend is unaffected. Reported as found rather than overclaimed, per this project's
+standing verification discipline.
+
+### `SpriteBook`: make "every generated sprite got used" a one-line assertion (2026-07-10)
+
+A user compared two sandbox runs of the same Mario-rescue prompt. The earlier one
+(`runs/gui_1783691768`) looked great: its agent-authored `run_scene.py` pasted *every* element
+(hero, tower, princess, plants, coins, walls) from the generated art via one clean
+`paste_sprite(key, cx, cy, size)` loop at consistent tile-aligned sizes (`TILE`, `TILE*3`). The
+later one (`runs/gui_1783714443`) looked much worse despite all 15 sprites generating fine into
+`sandbox_workspace/asset_cache/` -- diagnosed by reading both files' actual code, not the agents'
+summaries. The later `draw_frame`: (1) asked for key `'hero'` when the player's resolved key is
+`'agent'`, so the hero silently fell back to a primitive; (2) drew ~10 types as primitives anyway
+(coins, pipes, tower, gate, fireball, bricks) despite each having a generated sprite -- the
+"resolve then ignore" bug; (3) rescaled sprites to arbitrary per-entity pixel sizes (54/42/44...)
+on a large canvas, so they read small and inconsistent (the user's "it scales generated sprites"
+complaint). `sandbox_agent.md` *already* warned about resolve-then-ignore and shipped a
+`paste_sprite` example, and the later run still reproduced it -- prompt-only guidance is
+insufficient, the same lesson this section keeps relearning.
+
+**Scope correction from the user:** the HUD (health/lives/score + win/lose outcome, principle 8)
+**stays** -- the user explicitly wants it (my first read of "doesn't show health+score" as *praise*
+of the clean run was wrong; the clean run's advantage is its *art*, not the missing HUD). So
+principle 8 is untouched; this change is only about actually using the generated sprites at a
+sensible scale.
+
+The durable fix follows this section's standing discipline (a reusable, tested primitive + a
+self-review invariant, never a per-case worked example): `engine/rendering.py` gained a small
+`SpriteBook(asset_paths)` class -- `paste(img, key, cx, cy, size, anchor="center"|"feet")` (cached
+load/resize/alpha-paste; records the key as used; returns `False` so the per-key primitive fallback
+still runs) and `unused_keys()` (resolved keys the draw loop never pasted). That turns "every
+generated sprite actually got drawn" into a one-line `assert not book.unused_keys()` that catches
+**both** failure modes at once -- an ignored sprite is unused, and a mismatched key leaves the real
+key (`'agent'`) unused. `sandbox_agent.md` now points at `SpriteBook` in the reusable-building-blocks
+list and the asset-usage section (with the assertion and a "paste at consistent tile-tied sizes, not
+arbitrary per-entity sizes" clause), and self-review step 1's asset bullet was upgraded from a soft
+"confirm asset_cache isn't full of ignored sprites" to the concrete `assert not unused_keys()`.
+`engine/rendering.py` is already copied into every workspace, so no workspace-builder change was
+needed; the reference `run_scene.py` template (which delegates to the real renderer and has no
+hand-rolled draw loop, so it was never the bug site) just gained a comment pointing *rewrites* at
+`SpriteBook`. Honest scope: `unused_keys()` is agent-discretionary (the agent must actually build
+and assert it), not a harness floor -- detecting "primitives instead of sprites" from `render.png`
+isn't reliable, so this stays self-review-enforced, same posture as the climb-gating/asset fixes
+above. Obstacle-avoidance quality (the third complaint) is covered by existing principle 4 + the
+hazard-threat self-review invariant, not a new mechanism. [Live-verification result appended after
+the verification run.]
+
+### Movement must be physics-verified, not a smooth scripted route (2026-07-10)
+
+A follow-on user report on a "CLIMB TOWER" platformer run (`runs/gui_1783727953`) -- "it doesn't
+have floors, the plants are static moving upside down when you KNOW they should have functionality."
+This run *did* adopt the `SpriteBook`/animation changes above (sprites used well), but reading its
+actual `run_scene.py` showed the "animation, not simulation" failure §11 documents, in platformer
+form: `build_trace()` moves the hero along a **hardcoded waypoint `route`** via linear `interp`
+(`hero.x, hero.y = interp(sx, target, t)`) -- **no gravity, no platform collision**; `scene.walls`
+(the drawn platforms) are decorative and never collided with, so the hero glides between scripted
+points through open air. It even caps and asserts step size, so the teleport floor passes -- but
+nothing ever checks the hero is *supported*. The plants translate the whole sprite up by
+`oscillate(...)*42` (a mid-air bob) instead of emerging from their pipe, and never use `pulse_cycle`.
+
+The user's sharpening: **"all movements need to be verified possible by the physics environment."**
+That's stronger than "a floor is under the hero" -- a *smooth* precomputed route clears every
+existing check (no teleport, bounded step) yet is exactly as wrong as a teleport, because the
+positions were assigned from a pre-decided path, not produced by physics; no floor/wall/structure
+was ever consulted. Per the user's choice (self-review, not a harness floor -- a "grounded"
+outer-check heuristic is too coupled to each run's coordinate system and would false-fail legit
+jumps/falls), the fix is principle-level, following this section's standing discipline (reusable
+primitives already exist -- `integrate_grounded_2d`, `move_with_collision`, `climb_step`,
+`pulse_cycle` -- the gap was guidance + a mechanical invariant, never a per-case example):
+
+- **Principle 5** now names the *smooth scripted route* explicitly as the same defect as a teleport
+  wearing a smooth costume, and states the real rule: every movement must be one the physics
+  permits, guaranteed by making the physics functions the *only* thing that moves an entity (drive
+  locomotion through `integrate_grounded_2d`/`move_with_collision`/`climb_step` so it's valid by
+  construction, with no separate route to drift out of sync with the drawn floors).
+- **Self-review step 1** gained a comprehensive invariant: walk the trace and assert each
+  consecutive position pair is a legal physics transition (supported by a floor/platform, or falling
+  under gravity, or on a ladder within its span, or inside a declared jump arc -- never hovering over
+  a gap, never crossing a wall). A waypoint-interpolated hero fails this; it's the check that
+  exposes a route the physics never produced.
+- **Principle 3** (emerging hazards) now says an emerge must *reveal/grow from its base* (out of the
+  pipe/hole), `pulse_cycle`-driven with `active` tied to how far it's out -- not translate the whole
+  sprite up through open air (which reads as a detached floating shape, the "static/upside-down"
+  complaint).
+
+Honest scope: this is self-review-enforced (agent-discretionary), not a harness guarantee -- the
+outer check still can't distinguish a stepped simulation from a convincing animation (§11's standing
+blind spot). It raises the bar and points every lever at the right primitives; it doesn't make a
+scripted route impossible.
+
+Follow-up on the very next run (`runs/gui_1783730799`, a Donkey-Kong-style 5-floor climb): the
+movement/logic was genuinely improved (gated `walk`/`climb` actions, real `Gate`-based rescue,
+bounded steps -- the physics guidance landed), and the user confirmed "it actually worked." The
+remaining complaint was pure watchability: "im blind but its soo quick" -- the whole 5-floor climb
+compressed into a ~5-second, 50-frame GIF (the sim wins in ~168 steps, sampled every 4th at
+`duration=100`). A correct run that blurs past in a few seconds reads as "nothing happened, it just
+says you won." Fixed with a `replay.gif` **watchability requirement** in `sandbox_agent.md` (a hard
+artifact-requirement bullet + a self-review step-2 check): aim for ~8-20 s total, ~70-110 ms/frame,
+don't over-subsample (one gif frame per 1-3 sim steps), and hold the final win/lose frame ~1.5-2 s
+so the outcome is readable; if the sim ends in very few steps, slow the motion rather than ship a
+blur. The base renderer's `save_replay_gif` already defaults to a watchable 220 ms/frame, so this is
+scoped to the sandbox custom draw loops that subsample hard -- no base-renderer change.
+**Live-verified (`runs/cave_verify`):** the run's `replay.gif` came back at 194 frames / ~17.5 s at
+90 ms/frame with the final win frame held ~1.6 s -- comfortably watchable, not the 5-second blur that
+prompted this.
+
+### A ladder must be drawn as one contiguous floor-to-floor span (2026-07-10)
+
+User report on `runs/gui_1783731619` (a ladder-tower rescue): "why are the ladders separated, this
+cannot happen." Diagnosed from the actual code: the *data* was correct -- `FLOORS`/`LADDERS` had each
+ladder spanning exactly one floor-to-floor gap and the `climb` action used the full span -- but the
+*render* (`for y in range(upper+1, lower): if y % 2 == 0: draw ladder`) trimmed off both floor cells
+and skipped every other remaining cell, so a continuous climbable ladder was drawn as sparse rungs
+floating in the gap, touching neither floor. Pure render fidelity, same class as the `feet_anchor`/
+`SpriteBook` fixes (an agent hand-rolls structure rendering and a `+1`/`% 2` flourish breaks it).
+
+Fix per the standing discipline (reusable primitive + self-review invariant, never a per-case
+example): `SpriteBook.paste_column(img, key, cx, y_top, y_bottom, tile)` (`engine/rendering.py`)
+tiles a sprite contiguously across the whole inclusive vertical span so a ladder/pipe/column meets
+both endpoints by construction -- no `range(top+1, bottom)` trim or `% 2` gap possible. Principle 8
+gained a "structure drawn as a continuous connecting span" clause pointing at it; the reusable-blocks
+list mentions it; and self-review step 1 gained an invariant (a ladder's drawn cell span equals its
+climbable span and includes both floor rows; secondary: every ladder's endpoints lie on real floors).
+Honest scope: self-review-enforced render fidelity, not a harness guarantee -- the outer check can't
+inspect whether a ladder visually connects floors. `paste_column` is unit-tested in
+`test_rendering.py`. **Live-verified (`runs/cave_verify`):** the cave's "ROCK HOLDS" climbable
+structure rendered as one solid contiguous vertical column meeting both ledges -- no separated/
+dashed segments, the exact failure this fix targets. (The run didn't call `paste_column` by name --
+it drew the full contiguous span itself -- so, as with `feet_anchor`, the *principle* did the work
+and the helper stays available; pointer not escalated since the outcome was already correct.)
+
+### Don't cheese "procedural": seeded side-view generators + an anti-cheese principle (2026-07-10)
+
+A user pointed at `runs/gui_1783735401` (a procedurally-generated *open-world* cave whose viewbox
+follows the player): "it needs to have the capability to do that and many other things in the
+similar realm, it cant be cheesing the prompt." Reading the synced code gave a split verdict: the
+**open-world camera is genuinely real** (world `W=70` tiles / 2240px vs an 800px view; `camera_x`
+smoothly follows the hero, clamped to world bounds, with a world->screen transform), but
+**"procedurally generated" was cheesed** -- the entire level is hardcoded (`platforms = [(1,21,18),
+(7,13,19), ...]` plus fixed ladders/gems/hazards), and the only `random.Random(42)` in the file
+draws *background ambience dots*: a decorative RNG with a fixed seed used as camouflage so the run
+looks generative while nothing structural depends on the seed. (`runs/cave_verify` cheesed the same
+way with a hand-authored continuous `terrain_y`.)
+
+Two root causes: (1) **capability gap** -- the only generator that existed, `generate_organic_region`,
+is a *top-down* grid carver; the refiner turns these prompts into *side-view* platformers whose
+levels are a continuous ground profile or discrete platforms+ladders, neither of which it produces,
+so hardcoding was the path of least resistance; (2) **enforcement gap** -- principle 3 literally
+permitted it ("hand-authored or generated, just verify connected") and no self-review proved the
+layout varies by seed.
+
+Fix (real primitives + a general principle + a mechanical self-review invariant, per the standing
+discipline): `engine/level_generation.py` gained seeded side-view generators alongside the unchanged
+top-down `generate_organic_region` -- `generate_terrain_profile` (uneven ground heightmap),
+`carve_gaps` (fatal pit columns clear of the ends), `generate_platform_layout` (returns
+`(platforms, ladders)` in the exact `(left,row,right)`/`(col,top,bottom)` shapes these runs use, with
+every adjacent level ladder-connected *by construction*), and `scatter_on_supports` (seeded gem/hazard
+placement on real supports, spaced, off pits/ends). `sandbox_agent.md` gained **principle 9**
+("implement the capability, don't hardcode a fixed instance of its output -- don't cheese the
+prompt"), naming the decorative-RNG-as-camouflage tell and the self-test "if you can't change the
+seed and get a different-but-valid level, you hardcoded it"; principle 3's loophole was closed (when
+the prompt asks for generation, hand-listing the layout is cheesing); and self-review step 1 gained a
+**seed-variance invariant** (generate with two seeds, assert the results differ and each is valid) --
+the check a hardcoded layout can never pass. Honest scope: this is self-review-enforced, **no harness
+lever** -- detecting hardcoded-vs-generated needs comparing two seeds, and the outer process never
+executes the sandboxed code (a load-bearing isolation invariant), so a harness seed-variance check
+isn't possible without breaking it. New generators unit-tested in `test_level_generation.py`
+(determinism, varies-by-seed, bounds, ladder-connectivity, scatter constraints).
+**Live-verified (`runs/procgen_verify`, the same open-world cave prompt): the cheese is gone.** The
+agent imported the new generators and built the whole level from the seed via a `build_layout(seed)`
+that calls `generate_terrain_profile`/`carve_gaps`/`generate_platform_layout` -- and, unprompted by
+any worked example, adopted the seed-variance self-check verbatim in spirit: `alternate =
+build_layout(SEED + 1); assert (TERRAIN, PITS, PLATFORMS) != alternate[:3], "seeded cave layout did
+not vary"`. The run passed that assert, so the layout genuinely varies by seed. Independently
+confirmed (not the agent's word): running the generators with the agent's exact params for seed 5 vs
+6 gives different terrain, gaps, and platform sets. The render shows a real generated uneven cavern
+(jagged multi-level terrain, pits, a contiguous ladder, scattered gems + falling-rock/lava/spike
+hazards) -- nothing like the hardcoded five-platform layout of `gui_1783735401`; the open-world
+camera it already got right is preserved.
+
+### The systemic anti-cheese layer: an independent faithfulness auditor (2026-07-10)
+
+By this point the session had fixed ~six sandbox issues one at a time (sprite usage, physics
+movement, ladder render, watchability, procedural-gen, perception), each with a per-incident triple:
+a reusable primitive + a prompt principle + a self-review invariant. The user named the real problem:
+this is whack-a-mole -- every fix is the *same* failure (the agent produces something that passes the
+mechanical outer check and looks right, but fakes the requirement), and the prompt keeps accreting a
+named bug per incident. The latest instance was a fog-of-war minecraft run (`gui_1783742552`) whose
+solver navigates straight to the ground-truth `game.layout.diamond` while line-of-sight is applied
+*only* in the render -- cosmetic fog, an omniscient player.
+
+Root cause is structural: sandbox mode has no external semantic validator by design, so the only
+enforcement is prompt principles the agent may ignore and **the agent grading its own work** with a
+self-review it can make vacuous. The author is the judge. Deterministic semantic checking is ruled
+out (it would reintroduce the fixed vocabulary this mode exists to escape), so the only thing that
+can judge open-ended intent is an LLM -- and the lever is *who* judges. The user chose an
+**independent auditor**.
+
+`sandbox/auditor.py::audit_run(out_dir, refined_prompt)` runs after the outer sanity check passes,
+before `success` is finalized. A fresh LLM instance (adversarial system prompt in
+`llm/prompts/sandbox_auditor.md`, no shared context with the author, OpenAI Responses API directly --
+so it's cross-model whenever the author is the Claude backend) reads the synced `run_scene.py` **as
+text (never executed)** plus the trace and the agent's declared `rules` block, and hunts for
+requirements faked rather than implemented. It returns `PASS` or `FAIL` + concrete findings; a `FAIL`
+feeds the *same* repair loop an outer-check failure does (`_repair_message` gained an `audit_findings`
+branch), so the author gets the specific cheat and must fix it. `success` now also requires
+`audit_passed`; `metrics.json` carries `audited`/`audit_passed`/`audit_findings` beside the
+`outer_sanity_*` fields, and each `repair_history` entry records the audit verdict. Both backends
+share it (`runner.py` and `claude_runner.py`). Best-effort/disclosed, same posture as the prompt
+refiner: no `OPENAI_API_KEY`, `INFINIENV_SANDBOX_AUDIT=0`, an API error, or unparseable output all
+yield `audited=False, passed=True` (a run is never failed because the auditor couldn't run);
+`INFINIENV_SANDBOX_AUDITOR_MODEL` overrides the model.
+
+Two supporting pieces landed with it: (1) a **rules contract** -- `sandbox_agent.md` now asks the
+agent to write a machine-readable `rules` block (`{requirement, enforced_by}`) into `metrics.json`,
+giving the auditor a coverage target and making a dropped/vacuous rule visible; (2) the per-incident
+principles are now framed under **one faithful-implementation meta-principle** ("implement the spec,
+never fake it -- could you change the seed/perceived cells/physics and still be correct, or did you
+hardcode the appearance?"), with the specific principles kept as concrete examples, so the prompt
+stops growing a named bug per incident. The perception cheat also got its own capability +
+principle: `engine/perception.py` (`KnowledgeMap` -- the solver's fog-of-war memory it plans over
+instead of ground truth; `visible_cells` -- one LOS+radius rule) and **principle 10** (a closed
+perception model, the read-side twin of the closed action space: the solver may only read what it
+has observed). The auditor is what makes "the solver follows the author's perception rules" enforced
+*generally*, not per-mechanic.
+
+**Honest bounds, stated plainly:** the auditor is a probabilistic reviewer, not a guarantee -- it can
+miss a real cheat or false-flag a clean run; the repair budget caps it. It does **not** violate §2's
+default-path invariants: it's sandbox-only (which already trades away the deterministic guarantee),
+and it *reads the code as text, never executes it* (the outer process still never runs sandboxed
+code). It's the honest best available for open-ended sandbox mode -- it reintroduces a verifier, but
+a semantic LLM one instead of the fixed-vocabulary deterministic one, and crucially it separates the
+author from the grader. Hermetic tests in `test_auditor.py` (verdict parsing, payload building,
+best-effort skips) and `test_sandbox_runner.py` (an audit FAIL forces a repair and is recorded; a
+persistent FAIL fails the run; a skip never blocks).
+
+**Live-verified against two already-captured runs (real OpenAI auditor), and it earned its keep
+immediately.** On `runs/gui_1783742552` (the fog-of-war minecraft cheat) it returned FAIL and named
+the exact perception cheat found by hand -- `run_policy()` navigates using ground-truth
+`game.layout.diamond`/`coal`/`iron_cells` while `visible_cells()` is used only in `draw_frame` --
+plus a second real defect the hand review had missed (the "PRESS R TO RESTART" is cosmetic; no
+restart action exists). More tellingly, on `runs/procgen_verify` -- a run this file had earlier
+recorded as a clean success -- it returned FAIL for a cheat the **hand review genuinely missed**: the
+procedural *generation* was real (varies by seed, which was verified), but the generated upper
+platforms/ladders are cosmetic backdrop -- `advance()` only collides with the lower terrain profile,
+the "optional" upper gem is unreachable and absent from collection logic, so the prompt's "multiple
+possible paths / route choice" was faked. An independent reviewer caught what a careful human reviewer
+(deliberately reading the synced code, not the summary) overlooked -- which is exactly the value the
+mode is for. The earlier `procgen_verify` "clean success" note stands corrected: its *generation* was
+honest, its *navigable multiple paths* were not. [End-to-end result -- auditor forcing a repair
+inside a fresh run -- appended after that run.]
+
+### Sandbox is the only `generate` mode, and it runs the deterministic validator (2026-07-11)
+
+At the user's explicit direction, sandbox is the **only** `generate` mode. `cmd_generate` always calls
+the sandbox runner; the `--no-sandbox`/`--provider`/`--no-fallback` flags are gone (`--sandbox` stays
+as an accepted no-op), and the GUI form dropped its sandbox toggle + provider fields (always sandbox).
+The deterministic engine is **not** deleted — the sandbox is built on it (copies
+`schema/engine/navigation/validation/render/assets`), and the `validate`/`solve`/`mutate`/`curriculum`/
+`benchmark`/`export-dataset` tools still run the fixed-vocabulary validator + solver over any scene
+(that's the retained code-defined-truth / programmatic-reward machinery; `app.py` also keeps a
+non-form non-sandbox API route so the hermetic mock test still works).
+
+Paired with the mode change, the user's "sandbox should not trade away the validator checks" is now
+real: `outer_sanity_check` runs `validate_scene` on the sandbox scene.json and **enforces** the
+vocabulary-agnostic geometry codes (`_ENFORCED_VALIDATION_CODES = {OUT_OF_BOUNDS, DUPLICATE_ID}` —
+genuine bugs regardless of mechanics; failing them feeds the repair loop), while
+`deterministic_validation_summary` records the full validator verdict (valid + all error codes +
+which were enforced) in `metrics.json`. The vocabulary-*specific* checks (`UNSUPPORTED_OBJECT_TYPE`,
+`MECHANICS_*`, `UNREACHABLE_OBJECT`, `NO_GOALS`, `ILLEGAL_OVERLAP`) and fixed-vocabulary `UNSOLVABLE`
+are recorded, **not** enforced — a sandbox scene legitimately escapes the fixed vocabulary (custom
+types, code win-conditions, custom movement), and requiring them would false-fail legitimate runs.
+Fixed-vocabulary solvability is the one guarantee that genuinely can't transfer to agent-authored
+gameplay; the outer image checks + the faithfulness audit + the agent's own trace invariants stand in
+for it. No-key consequence: sandbox needs an OpenAI key, so `README.md`'s no-key path is now
+`solve examples/*.json` (the deterministic tools, offline) plus a committed `examples/example_world/`
+run the GUI surfaces in its gallery. Honest note for the GI submission: the challenge's headline claim
+is that code-defined objectives beat a VLM checking pixels, and a sandbox-only `generate` softens that
+(its reliability leans on the agent's own code + geometry validation + the LLM auditor, not a full
+solvability guarantee) — which is why the deterministic `solve`/`mutate`/`export-dataset` machinery is
+kept first-class for the reward-data use case.
+
 ### Explicitly out of scope for this mode (for now)
 
-Making sandbox mode the default; the `docker`-backed sandbox client (Unix-local was the pragmatic
+The `docker`-backed sandbox client (Unix-local was the pragmatic
 first choice); having the outer layer verify sandbox-authored mechanics beyond basic
 well-formedness (not achievable without reintroducing the fixed-vocabulary constraint this mode
 exists to escape — the repair loop above strengthens *that* check's pass rate, it doesn't add a
@@ -1402,19 +2013,35 @@ own repair loop internally).
 ## 12. CLI reference
 
 ```bash
-python -m infinienv generate --prompt "..." --provider {mock,openai_agents,openai_responses,anthropic} \
-  --seed 42 --out runs/demo [--max-repair-attempts N] [--no-fallback] \
-  [--assets {none,local,generated,auto}]
+# `generate` is sandbox-only (section 11): a model writes and runs its own engine code in an
+# isolated per-run workspace copy. Needs an OpenAI key + `pip install -e ".[openai]"`.
+python -m infinienv generate --prompt "..." --seed 42 --out runs/demo [--max-repair-attempts N] \
+  [--assets {none,local,generated,auto}] [--no-refine-prompt]
 
-python -m infinienv generate --sandbox --prompt "..." --seed 42 --out runs/demo [--max-repair-attempts N] \
-  [--assets {none,local,generated,auto}]
-  # opt-in, section 11: model-authored engine code in an isolated per-run workspace copy.
+# No-key path: the deterministic tools still run offline over any scene (validate/solve/mutate/...):
+python -m infinienv solve examples/kitchen_can.json --out runs/demo
+
+  # --- generate (sandbox only): model-authored engine code in an isolated per-run copy.
   # ignores --provider/--no-fallback (no LLM-repair-agent path or fallback-template path to
   # apply them to); --assets applies the same as any other run, resolved inside the sandbox
   # workspace via a copy of assets/resolver.py; --max-repair-attempts here means repair
   # attempts against the outer sanity check (default 2), not the LLM repair agent; trades
   # away the validator-guaranteed solvability check every other run has -- see metrics.json's
-  # outer_sanity_* fields.
+  # outer_sanity_* fields. By default a best-effort LLM step first expands the raw prompt into a
+  # fuller build spec handed to the agent (--no-refine-prompt disables it; both the original and
+  # refined prompt are recorded in metrics.json). See section 11's prompt-enrichment subsection.
+  # INFINIENV_SANDBOX_BACKEND selects the agent runtime: openai (default, OpenAI Agents SDK) or
+  # claude (Anthropic's Claude Agent SDK -- authenticates via the `claude` CLI's own claude.ai
+  # login; ANTHROPIC_API_KEY is deliberately NOT set from CL_KEY, see section 11's auth note. Needs
+  # the `claude` CLI on PATH and `pip install infinienv[claude]`; default model claude-sonnet-5).
+  # Interchangeable:
+  # same workspace, artifacts, outer check, and metrics.json shape -- only `provider`/`model` differ.
+  # See section 11's Claude Agent SDK backend subsection.
+  # After the outer check passes, an independent faithfulness auditor (a separate LLM instance)
+  # reviews the run for cheese and can force a repair; INFINIENV_SANDBOX_AUDIT=0 disables it,
+  # INFINIENV_SANDBOX_AUDITOR_MODEL overrides its model. Best-effort (no OpenAI key -> skipped,
+  # audited=false); records audited/audit_passed/audit_findings in metrics.json. See section 11's
+  # faithfulness-auditor subsection.
 
 python -m infinienv validate runs/demo/scene.json
 python -m infinienv solve runs/demo/scene.json [--out runs/demo]
@@ -1447,7 +2074,20 @@ in the project depends on `flask`. The GUI also has a `--sandbox` toggle that ca
 `sandbox/runner.py::run_sandbox_generation` the same way the CLI does (not a second
 implementation) — checking it disables the provider/`--no-fallback` fields (ignored by sandbox
 mode, same as the CLI); the Assets field stays enabled and applies to sandbox runs exactly as it
-does to non-sandbox ones, same as the CLI's `--assets`. Streams the same per-attempt `on_stage`
+does to non-sandbox ones, same as the CLI's `--assets`. When `--sandbox` is checked, the GUI also
+reveals an **Agent runtime** selector (OpenAI Agents SDK / Claude Agent SDK) -- the frontend
+equivalent of `INFINIENV_SANDBOX_BACKEND` (section 11's Claude Agent SDK backend). It POSTs
+`sandbox_backend`, which `run_sandbox_generation`'s `backend` parameter accepts as a per-run
+override (falling back to the env var, then `openai`, when the frontend doesn't send one) -- so the
+choice is a GUI control, not a second code path, same discipline as every other sandbox field.
+Alongside it is an **Agent model** picker whose options track the selected runtime -- OpenAI
+(`gpt-5.6-terra`/`sol`/`luna`, `gpt-5.5`/`-pro`) or Claude (`claude-sonnet-5`/`-opus-4-8`/`-fable-5`),
+the account's actually-available variants. It POSTs `sandbox_model`, validated against
+`gui/app.py::SANDBOX_MODELS` for the chosen backend (an unlisted/mismatched model is a 400, not
+forwarded) and threaded to `run_sandbox_generation`'s existing `model` parameter -- the frontend
+equivalent of `INFINIENV_SANDBOX_MODEL`, a per-run override of the backend's default. First option is
+the default (`gpt-5.6-terra` / `claude-sonnet-5`); absent -> the env/default fallback, unchanged.
+Streams the same per-attempt `on_stage`
 progress messages
 (`sandbox/runner.py`'s repair loop now takes an `on_stage` callback mirroring
 `evaluation/runner.py`'s), and renders results distinctly: both verdicts side by side
@@ -1455,6 +2095,23 @@ progress messages
 "sandbox" badge on both the live result banner and that run's entry in the recent-runs gallery —
 so a reviewer browsing past runs in the GUI can never mistake a sandbox result for a
 validator-guaranteed one, the same requirement the CLI output already met.
+
+Those live messages are **not shown as a raw scrolling log** — they render as a **structured
+activity view**. `gui/app.py::_classify_stage(msg)` tags each `on_stage` line with a `kind` (keyed
+off the stable narration prefixes: `command`/`edit`/`decision`/`agent`/`audit`/`attempt`/`refine`/
+`workspace`/`image`/`error`, else `status`) carried on the SSE `stage` event; the frontend renders
+each as an icon+chip row, color-coded, with **decisions and the audit verdict emphasized** and the
+feed **segmented by attempt**. A sticky phase header tracks Refine → Build → Audit → Done with an
+attempt counter and elapsed timer. On completion it shows **verdict cards** (Result / Outer sanity /
+Faithfulness audit — Passed·Cheat-found·Not-verified from `audited`/`audit_passed`/`audit_note` /
+Repair attempts) and an **Assets used** panel: a thumbnail grid of the sprites the run actually
+resolved (`gui/app.py::_sandbox_assets_summary` lists `sandbox_workspace/asset_cache/*.png`, served
+via the `/artifact` route, plus any `asset_notes` like a rate-limit fallback), included in the
+`done` payload as `assets`. render.png/replay.gif and collapsibles (refined prompt, agent summary,
+scene.json, all metrics, raw log) sit below. The raw log stays available as a collapsible for power
+users; the classifier degrades any unrecognized line to `status`, so it never breaks a run. This
+directly answers a user ask — surface the decisions, code writes, commands, assets, and audit as a
+readable, pretty view, not one text blob.
 
 Artifacts written per successful `generate` run:
 
@@ -1539,9 +2196,42 @@ test_platformer_physics.py - generic integrate_grounded_2d/climb_step/clamp_to_b
 test_grid_collision.py     - generic segment_blocked/move_with_collision (section 11): sub-tile
                              sampling catches a diagonal wall-corner cut, stops instead of crossing
 test_level_generation.py   - generic generate_organic_region/region_is_connected (section 11):
-                             determinism, bounds, always-connected-by-construction, BFS reachability
+                             determinism, bounds, always-connected-by-construction, BFS reachability;
+                             seeded side-view generators (section 11): generate_terrain_profile
+                             (bounds/max_step, varies by seed), carve_gaps (avoids margins),
+                             generate_platform_layout (tuple shapes, every adjacent level ladder-
+                             connected, varies by seed), scatter_on_supports (spacing/pits/ends)
 test_puzzle_state.py       - generic PuzzleState/Gate (section 11): flags/counters, numeric and
                              boolean thresholds, unset-flag defaults, joint/mixed requirements
+test_pushables.py          - generic Sokoban push (section 11): push into free cell, blocked by
+                             wall/block/bounds, cell_is_free, all_targets_satisfied
+test_pathfinding.py        - generic BFS find_path/next_step_toward (section 11): straight path,
+                             routes around a wall, None when walled off, shortest, first-step
+test_vision.py             - generic perception (section 11): line-of-sight clear/blocked, range,
+                             facing-cone half-angle, can_see composing range+cone+LOS
+test_perception.py         - closed perception model (section 11): KnowledgeMap only knows what it
+                             observed, find() can't reach an unseen target, memory persists out of
+                             view; visible_cells radius + occlusion + bounds
+test_auditor.py            - independent faithfulness auditor (section 11), hermetic (faked OpenAI):
+                             verdict parsing (PASS/FAIL/garbage/code-fence), payload includes spec+
+                             code+rules, best-effort skips (no key / AUDIT=0 / unparseable / no code /
+                             API error) return audited=False,passed=True
+test_agent_behavior.py     - generic BehaviorMachine (section 11): transitions fire only from the
+                             current state, registration-order wins, one transition per update
+test_rendering.py          - generic feet_anchor/feet_anchor_rect (section 11): sprite bottom edge
+                             lands on the ground line (feet-anchored, not center-anchored/floating);
+                             SpriteBook: paste present/missing key (fallback), unused_keys() reports
+                             ignored sprites and the 'hero'-vs-'agent' key mismatch, caches by
+                             (path,size), feet-anchor sits the sprite bottom on the ground line;
+                             paste_column tiles a ladder/column contiguously across the full
+                             inclusive floor-to-floor span (no % 2 gaps / trimmed endpoints)
+test_sandbox_workspace.py  - ...also the teleport floor (section 11): _positions_from_replay parses
+                             common trace shapes / None on unknown; _teleport_frame flags an
+                             outlier jump but not smooth motion; outer_sanity_check fails a
+                             teleporting replay, passes a smooth one, skips an unparseable one;
+                             the deterministic validator on sandbox scenes: enforces OUT_OF_BOUNDS
+                             + DUPLICATE_ID, does NOT enforce vocabulary-specific errors (records
+                             them), deterministic_validation_summary shape
 test_replay_export.py       - per-action frames + smooth interpolation of a multi-cell slide
 test_mechanics_cache.py    - persist/reload, no duplication or overwrite on repeated calls
 test_mock_generation.py     - mock provider is deterministic and always valid
@@ -1563,6 +2253,17 @@ test_dataset_export.py           - per-goal programmatic_reward, not a flattened
 test_compiler.py                  - --no-fallback raises with the real root cause surfaced, not
                                      just the last (often generic) history entry
 test_cli.py                        - generate/validate/solve write expected artifacts
+test_prompt_refiner.py             - sandbox prompt enrichment (section 11): mocked OpenAI client
+                                     returns enriched text; graceful fallback to the original on
+                                     no-key/API-error/empty-output; INFINIENV_REFINER_MODEL override
+test_claude_runner.py              - Claude Agent SDK sandbox backend (section 11): duck-typed
+                                     narration mapping (Bash/Write/Edit/text/thinking/errored-result;
+                                     Read/Grep silent; malformed shapes degrade to silence),
+                                     _copy_artifacts_from_dir, INFINIENV_SANDBOX_BACKEND dispatch
+                                     (claude routes with the claude-sonnet default; default stays
+                                     openai/gpt), and the no-key path proceeds via CLI login (never
+                                     sets ANTHROPIC_API_KEY); test_cli.py asserts CL_KEY is NOT
+                                     promoted to ANTHROPIC_API_KEY. All hermetic (no CLI/network)
 test_gui.py                         - Flask test client (no live server needed): index page,
                                        validation errors, a full generate job consumed as real SSE
                                        events (stage + done), artifact serving incl. path-traversal
@@ -1602,24 +2303,26 @@ always, for anything non-obvious).
 
 ## 17. Safety and sandboxing
 
-The runtime LLM must not execute arbitrary generated code **in the default path** (section 2).
-Concretely, for every `generate` run other than `--sandbox`:
+Sandbox mode — where the runtime LLM writes and runs its own code — is now the **default** `generate`
+path (the MVP; see section 11 and the §2 rewrite). The deterministic, no-model-authored-code path is
+opt-in via **`--no-sandbox`**, and on *that* path (section 2's guarantee) the following holds:
 
 Allowed: emitting `SceneSpec`/mechanics JSON, calling the deterministic read-only/validate-only
 tools (`get_scene_schema`, `get_supported_mechanics`, `get_known_mechanics`, `validate_scene_tool`),
 requesting validation, requesting repair.
 
-Not allowed: shell execution from model output, arbitrary file writes from model output
-(`artifacts/writer.py::resolve_out_dir` rejects path traversal outside the working directory),
+Not allowed (on `--no-sandbox`): shell execution from model output, arbitrary file writes from model
+output (`artifacts/writer.py::resolve_out_dir` rejects path traversal outside the working directory),
 importing packages chosen by the model at runtime, unrestricted `eval`/`exec`.
 
-**Section 11's `--sandbox` mode is the one disclosed exception**, built after the user explicitly
-asked for it following two earlier rounds where the same idea was proposed and declined on these
-exact grounds. It does let the model write and run real code — scoped to an isolated per-run
-workspace copy (never this repo's real source, never another run's workspace), opt-in via an
-explicit flag, with the outer process never importing or executing the sandboxed code itself and
-every affected run labeled `"source": "sandbox"` so the lost guarantee is visible, not hidden. See
-section 11 for the full design and what it does and doesn't verify.
+**The default sandbox path is the disclosed trade** (built after two earlier rounds where the idea
+was proposed and declined, then explicitly chosen, then made the default). It lets the model write
+and run real code — scoped to an isolated per-run workspace copy (never this repo's real source,
+never another run's workspace), with the outer process never importing or executing the sandboxed
+code itself, an independent faithfulness auditor reviewing each run, and every affected run labeled
+`"source": "sandbox"` so the lost solvability guarantee is visible, not hidden. Use `--no-sandbox`
+whenever the hard code-defined-truth guarantee matters. See section 11 for the full design and what
+it does and doesn't verify.
 
 ---
 

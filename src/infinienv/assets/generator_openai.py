@@ -13,12 +13,15 @@ import os
 from infinienv.llm.base import ProviderError
 
 SPRITE_PROMPT_TEMPLATE = (
-    "Top-down 2D game sprite of: {desc}. Style: clean pixel art, readable at 32x32, "
-    "centered object, no text, no labels, isolated object on a transparent background, "
-    "suitable for a tile-based game. The object should fill nearly the entire frame "
-    "edge-to-edge with minimal empty margin -- no small icon floating in a large blank "
-    "canvas; it needs to read clearly when scaled down and tiled edge-to-edge with other "
-    "sprites."
+    "Retro 16-bit platformer game sprite of: {desc}. Style: BLOCKY pixel art built from "
+    "chunky, clearly visible square pixels, a small flat color palette, a bold dark outline, "
+    "and flat cel shading -- absolutely NO smooth gradients, NO photorealism, NO 3D render, "
+    "NO soft or airbrushed shading, NO anti-aliased curves. Readable at 32x32, centered, "
+    "no text, no labels, isolated object on a transparent background, suitable for a "
+    "tile-based game whose world is made of square blocks. The object should fill nearly the "
+    "entire frame edge-to-edge with minimal empty margin -- no small icon floating in a large "
+    "blank canvas -- and must read clearly when scaled down and sit seamlessly next to other "
+    "blocky sprites and square tiles in the same 16-bit style."
 )
 
 # Some types aren't "an object sitting on a tile" -- they ARE the tile's surface
@@ -28,8 +31,10 @@ SPRITE_PROMPT_TEMPLATE = (
 TEXTURE_TILE_TYPES: set[str] = {"wall", "floor"}
 
 TEXTURE_PROMPT_TEMPLATE = (
-    "Top-down 2D game texture tile of: {desc}. Style: seamless tileable texture, "
-    "pixel art, no text, no labels. The texture must cover the ENTIRE square canvas "
+    "Retro 16-bit platformer game texture tile of: {desc}. Style: seamless tileable "
+    "BLOCKY pixel art built from chunky, clearly visible square pixels, a small flat "
+    "color palette, and flat shading -- absolutely NO smooth gradients, NO photorealism, "
+    "NO soft shading. No text, no labels. The texture must cover the ENTIRE square canvas "
     "edge-to-edge with zero border, zero margin, and zero transparency -- an opaque "
     "surface filling 100% of the frame, not an isolated object floating in empty "
     "space. It will be tiled edge-to-edge with identical copies to form a continuous "

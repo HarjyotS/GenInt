@@ -17,37 +17,39 @@ completion are all deterministic and testable.
 ## Run it in 60 seconds
 
 ```bash
-pip install -e .
+pip install -e ".[openai]"
 
-# No API key required:
+# `generate` -- a model writes and runs a small game for your prompt, plays it, and an
+# independent reviewer checks it didn't fake the mechanic. The scene it declares is run
+# through the real deterministic validator (bounds/ids enforced). Needs an OpenAI key
+# (OPENAI_API_KEY or OP_KEY in .env):
 python -m infinienv generate \
-  --provider mock \
-  --prompt "Create a kitchen where the agent picks up a can from the table and drops it in the sink." \
-  --seed 42 \
-  --out runs/kitchen_can
+  --prompt "Create a procedurally generated cave with spike hazards and glowing gems; pick a safe route, collect at least two gems, and reach the exit." \
+  --seed 42 --assets generated \
+  --out runs/cave
 
-# With an OpenAI key (OPENAI_API_KEY or OP_KEY in .env):
-python -m infinienv generate \
-  --provider openai_agents \
-  --prompt "Create a warehouse where the agent must find a key, unlock a door, pick up a package, and deliver it to the exit." \
-  --seed 7 \
-  --out runs/warehouse_key
+# No API key? The deterministic tools run offline over any scene. `solve` renders a
+# playable environment and a replay of the agent completing a code-defined objective:
+python -m infinienv solve examples/kitchen_can.json --out runs/kitchen_can
 ```
 
-Either command prints stage-by-stage progress and writes:
+No key at all? A committed example world lives in `examples/example_world/` (open `render.png` /
+`replay.gif`, or launch the GUI and it shows up in the gallery).
+
+A `generate` (sandbox) run writes:
 
 ```text
 runs/<run_id>/
-├── scene.json           # structured SceneSpec ground truth
-├── validation.json      # validator checks + repair history
-├── metrics.json         # solvability, path length, success, timings
-├── replay.json          # action trace + per-goal completion (goal_results)
-├── render.png           # static top-down visualization
-├── replay.gif           # animated replay of the agent solving the task
-├── report.md            # human-readable run summary
-├── asset_plan.json      # (only with --assets != none) requested sprite types
-└── asset_manifest.json  # (only with --assets != none) resolved sprite source per type
+├── scene.json           # the static SceneSpec layout (run through the real validator)
+├── metrics.json         # source, success, outer_sanity_*, audit_*, deterministic_validation, ...
+├── replay.json          # the agent's own trace + declared rules
+├── render.png           # a rendered frame of the world
+├── replay.gif           # animated replay of the agent playing its game
+└── sandbox_workspace/   # the exact code the agent wrote and ran (the audit trail)
 ```
+
+(`solve <scene.json>` writes `replay.json` + `replay.gif` — the deterministic agent completing a
+code-defined objective, no key needed.)
 
 ## Pipeline
 

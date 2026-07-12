@@ -3,142 +3,284 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>InfiniEnv</title>
+<title>InfiniEnv — World Foundry</title>
 <style>
   :root {
-    color-scheme: light dark;
-    --bg: #f7f7f8; --panel: #ffffff; --border: #e2e2e6; --text: #1a1a1e;
-    --muted: #6b6b74; --accent: #3b5bfd; --accent-text: #ffffff;
-    --ok: #1a9c5f; --err: #d33b3b; --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg: #17171b; --panel: #202024; --border: #333338; --text: #ececee; --muted: #9a9aa2; }
+    color-scheme: dark;
+    --void:#060812; --bg:#0a0e1b; --surface:#101636; --surface-2:#0c1128; --raise:#141b40;
+    --line:#232c50; --line-soft:#1a2140;
+    --ink:#eaeefb; --dim:#8b95bd; --faint:#59628f;
+    --gem:#3ae0d4; --coin:#ffc24a; --life:#4bdd8f; --lava:#ff5c6c; --plasma:#a684ff;
+    /* aliases so shared rules read cleanly */
+    --panel:var(--surface); --border:var(--line); --text:var(--ink); --muted:var(--dim);
+    --accent:var(--gem); --ok:var(--life); --err:var(--lava);
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --body: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    --grid: rgba(120,150,255,.045);
   }
   * { box-sizing: border-box; }
+  html, body { height: 100%; }
   body {
-    margin: 0; background: var(--bg); color: var(--text);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    margin: 0; color: var(--ink); font-family: var(--body); font-size: 14px; line-height: 1.5;
+    background:
+      radial-gradient(1000px 640px at 82% -12%, rgba(58,224,212,.11), transparent 62%),
+      radial-gradient(760px 520px at -6% 108%, rgba(166,132,255,.08), transparent 60%),
+      var(--bg);
+    background-attachment: fixed;
   }
-  header { padding: 20px 28px; border-bottom: 1px solid var(--border); }
-  header h1 { margin: 0; font-size: 20px; }
-  header p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
-  .layout { display: grid; grid-template-columns: 380px 1fr; gap: 0; min-height: calc(100vh - 73px); }
-  .panel { padding: 24px; }
-  .panel.settings { border-right: 1px solid var(--border); }
-  label { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin: 16px 0 6px; text-transform: uppercase; letter-spacing: .03em; }
+  /* signature: the coordinate grid every generated world lives on */
+  .substrate {
+    position: fixed; inset: 0; z-index: 0; pointer-events: none; opacity: .55;
+    background-image:
+      linear-gradient(var(--grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size: 32px 32px;
+    -webkit-mask-image: radial-gradient(120% 90% at 70% 0%, #000 30%, transparent 78%);
+            mask-image: radial-gradient(120% 90% at 70% 0%, #000 30%, transparent 78%);
+    transition: opacity .6s ease;
+  }
+  body.building .substrate { opacity: 1; animation: gridpulse 3.4s ease-in-out infinite; }
+  @keyframes gridpulse { 50% { opacity: .7; } }
+
+  /* ---------- device header ---------- */
+  header {
+    position: relative; z-index: 2; display: flex; align-items: center; gap: 20px;
+    padding: 15px 26px; border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, rgba(20,27,64,.72), rgba(12,17,40,.35));
+    backdrop-filter: blur(6px);
+  }
+  .wordmark { display: flex; align-items: center; gap: 3px; font-family: var(--mono);
+    font-weight: 800; font-size: 18px; letter-spacing: .18em; text-transform: uppercase; color: var(--ink); }
+  .wordmark .cur { width: 8px; height: 16px; margin-left: 6px; background: var(--gem);
+    box-shadow: 0 0 10px rgba(58,224,212,.5); }
+  .tagline { font-family: var(--mono); font-size: 10.5px; letter-spacing: .07em; color: var(--faint);
+    text-transform: uppercase; border-left: 1px solid var(--line); padding-left: 20px; }
+  .tagline b { font-weight: 600; }
+  .tagline .p1 { color: var(--gem); } .tagline .p2 { color: var(--coin); } .tagline .p3 { color: var(--plasma); }
+  .status { margin-left: auto; display: flex; align-items: center; gap: 8px; font-family: var(--mono);
+    font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); }
+  .status .dot { width: 8px; height: 8px; background: var(--life); box-shadow: 0 0 10px var(--life); }
+
+  /* ---------- layout ---------- */
+  .layout { position: relative; z-index: 1; display: grid; grid-template-columns: 404px 1fr;
+    align-items: start; min-height: calc(100vh - 63px); }
+  .deck { padding: 22px 24px; border-right: 1px solid var(--line);
+    background: linear-gradient(180deg, rgba(16,22,54,.55), rgba(10,14,27,0) 340px); }
+  .stage { padding: 22px 26px; display: flex; flex-direction: column; gap: 16px; }
+
+  /* ---------- console controls ---------- */
+  label { display: block; font-family: var(--mono); font-size: 10.5px; font-weight: 600;
+    color: var(--faint); margin: 18px 0 7px; text-transform: uppercase; letter-spacing: .12em; }
   label:first-of-type { margin-top: 0; }
   textarea, input[type=text], input[type=number], select {
-    width: 100%; padding: 9px 10px; border-radius: 8px; border: 1px solid var(--border);
-    background: var(--panel); color: var(--text); font-size: 14px; font-family: inherit;
+    width: 100%; padding: 10px 11px; border-radius: 4px; border: 1px solid var(--line);
+    background: var(--surface-2); color: var(--ink); font-size: 14px; font-family: inherit;
+    transition: border-color .15s, box-shadow .15s;
   }
-  textarea { min-height: 90px; resize: vertical; }
-  .row { display: flex; gap: 12px; }
-  .row > div { flex: 1; }
-  .checkbox-row { display: flex; align-items: center; gap: 8px; margin-top: 16px; }
-  .checkbox-row input { width: auto; }
-  .checkbox-row label { margin: 0; text-transform: none; font-weight: 500; font-size: 13px; color: var(--text); }
-  button#generate {
-    margin-top: 20px; width: 100%; padding: 12px; border: none; border-radius: 8px;
-    background: var(--accent); color: var(--accent-text); font-size: 15px; font-weight: 600; cursor: pointer;
-  }
-  button#generate:disabled { opacity: .5; cursor: default; }
-  .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
-  .results { padding: 24px; }
-  .log {
-    font-family: var(--mono); font-size: 12.5px; background: var(--panel); border: 1px solid var(--border);
-    border-radius: 8px; padding: 12px 14px; white-space: pre-wrap; min-height: 40px; margin-bottom: 18px;
-  }
-  .log .line { padding: 2px 0; }
-  .banner { padding: 10px 14px; border-radius: 8px; font-weight: 600; margin-bottom: 18px; display: none; }
-  .banner.success { background: rgba(26,156,95,.12); color: var(--ok); display: block; }
-  .banner.fail { background: rgba(211,59,59,.12); color: var(--err); display: block; }
-  .media { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 18px; }
-  .media figure { margin: 0; }
-  .media img { width: 100%; border: 1px solid var(--border); border-radius: 8px; display: block; background: var(--panel); }
-  .media figcaption { font-size: 12px; color: var(--muted); margin-top: 6px; }
-  table.metrics { border-collapse: collapse; font-size: 13px; margin-bottom: 18px; }
-  table.metrics td { padding: 4px 10px 4px 0; }
-  table.metrics td:first-child { color: var(--muted); }
-  details { margin-bottom: 18px; }
-  details summary { cursor: pointer; font-size: 13px; color: var(--muted); }
-  pre.scene { font-family: var(--mono); font-size: 12px; background: var(--panel); border: 1px solid var(--border);
-    border-radius: 8px; padding: 12px; overflow: auto; max-height: 360px; }
-  .runs { margin-top: 8px; }
-  .runs h2 { font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; margin-bottom: 10px; }
-  .run-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 10px; }
-  .run-item { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; cursor: pointer; background: var(--panel); }
-  .run-item img { width: 100%; aspect-ratio: 4/3; object-fit: cover; display: block; }
-  .run-item .name { font-size: 11px; padding: 5px 6px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .run-item .name.ok::before { content: "\2713 "; color: var(--ok); }
-  .run-item .name.bad::before { content: "\2717 "; color: var(--err); }
-  .run-item .name.sandbox::after { content: " \1F9EA"; }
-  .empty { color: var(--muted); font-size: 13px; }
+  textarea:focus, input:focus, select:focus { outline: none; border-color: var(--gem);
+    box-shadow: 0 0 0 3px rgba(58,224,212,.14); }
+  select { -webkit-appearance: none; appearance: none; cursor: pointer;
+    background-image: linear-gradient(45deg, transparent 50%, var(--dim) 50%), linear-gradient(135deg, var(--dim) 50%, transparent 50%);
+    background-position: calc(100% - 15px) 17px, calc(100% - 10px) 17px; background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; }
+  /* the prompt is the command field */
+  #prompt { min-height: 116px; resize: vertical; font-size: 15px; line-height: 1.5;
+    border-left: 3px solid var(--gem); border-radius: 4px; }
+  .row { display: flex; gap: 12px; } .row > div { flex: 1; }
+  .checkbox-row { display: flex; align-items: flex-start; gap: 9px; margin-top: 16px; }
+  .checkbox-row input { width: auto; margin-top: 2px; accent-color: var(--gem); }
+  .checkbox-row label { margin: 0; font-family: var(--body); text-transform: none; letter-spacing: 0;
+    font-weight: 500; font-size: 13px; color: var(--ink); }
+  .hint { font-size: 12px; color: var(--faint); margin-top: 5px; }
+  .hint code { font-family: var(--mono); font-size: 11px; color: var(--dim); }
   fieldset { border: none; padding: 0; margin: 0; }
-  fieldset:disabled { opacity: .4; }
-  .sandbox-note {
-    font-size: 12px; color: var(--muted); margin-top: 16px; padding: 10px 12px;
-    border: 1px solid var(--border); border-radius: 8px; display: none;
+  fieldset:disabled { opacity: .35; }
+  button#generate {
+    margin-top: 22px; width: 100%; padding: 13px; border: none; border-radius: 4px; cursor: pointer;
+    background: var(--gem); color: #041416; font-family: var(--mono); font-size: 14px; font-weight: 800;
+    letter-spacing: .14em; text-transform: uppercase; box-shadow: 0 0 0 1px rgba(58,224,212,.4), 0 8px 24px -10px var(--gem);
+    transition: transform .1s, box-shadow .15s, background .15s;
   }
+  button#generate:hover { background: #55efe4; box-shadow: 0 0 0 1px var(--gem), 0 10px 30px -8px var(--gem); }
+  button#generate:active { transform: translateY(1px); }
+  button#generate:disabled { opacity: .45; cursor: default; box-shadow: none; }
+  .sandbox-note { font-size: 12px; color: var(--dim); margin-top: 14px; padding: 11px 13px;
+    border: 1px dashed var(--line); border-radius: 4px; background: rgba(166,132,255,.05); display: none; }
   .sandbox-note.visible { display: block; }
-  .badge {
-    display: inline-block; font-size: 11px; font-weight: 700; text-transform: uppercase;
-    letter-spacing: .03em; padding: 2px 8px; border-radius: 999px; margin-left: 8px;
-    background: rgba(59,91,253,.15); color: var(--accent); vertical-align: middle;
+
+  /* recent runs — a cartridge shelf */
+  .runs { margin-top: 26px; padding-top: 20px; border-top: 1px solid var(--line-soft); }
+  .runs h2 { font-family: var(--mono); font-size: 10.5px; color: var(--faint); text-transform: uppercase;
+    letter-spacing: .12em; margin: 0 0 12px; }
+  .run-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 9px; }
+  .run-item { border: 1px solid var(--line); border-radius: 4px; overflow: hidden; cursor: pointer;
+    background: var(--surface-2); transition: border-color .15s, transform .1s; }
+  .run-item:hover { border-color: var(--gem); transform: translateY(-2px); }
+  .run-item img { width: 100%; aspect-ratio: 4/3; object-fit: cover; display: block; image-rendering: pixelated; }
+  .run-item .name { font-family: var(--mono); font-size: 10px; padding: 5px 6px; color: var(--dim);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .run-item .name.ok::before { content: "\25B8 "; color: var(--life); }
+  .run-item .name.bad::before { content: "\25B8 "; color: var(--lava); }
+  .run-item .name.sandbox::after { content: " \25A3"; color: var(--plasma); }
+  .empty { color: var(--faint); font-size: 12.5px; line-height: 1.6; grid-column: 1/-1;
+    font-family: var(--mono); }
+
+  /* ---------- phase bar ---------- */
+  .phasebar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    position: sticky; top: 0; z-index: 3; padding: 8px 0; background: linear-gradient(var(--bg) 70%, transparent); }
+  .phase-steps { display: flex; gap: 0; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+  .phase-step { font-family: var(--mono); font-size: 10.5px; font-weight: 600; padding: 6px 13px;
+    color: var(--faint); text-transform: uppercase; letter-spacing: .1em; position: relative;
+    border-right: 1px solid var(--line); background: var(--surface-2); }
+  .phase-step:last-child { border-right: none; }
+  .phase-step.active { color: #041416; background: var(--gem); }
+  .phase-step.done { color: var(--life); background: rgba(75,221,143,.10); }
+  .phase-meta { margin-left: auto; display: flex; gap: 16px; align-items: center;
+    font-family: var(--mono); font-size: 11px; color: var(--dim); letter-spacing: .04em; }
+  .spinner { width: 12px; height: 12px; border: 2px solid var(--line); border-top-color: var(--gem);
+    border-radius: 50%; animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .banner { display: none; align-items: center; gap: 10px; padding: 12px 16px; border-radius: 4px;
+    font-family: var(--mono); font-weight: 700; letter-spacing: .06em; text-transform: uppercase; font-size: 13px; }
+  .banner.success { display: flex; background: rgba(75,221,143,.10); color: var(--life); border: 1px solid rgba(75,221,143,.3); }
+  .banner.fail { display: flex; background: rgba(255,92,108,.10); color: var(--lava); border: 1px solid rgba(255,92,108,.3); }
+  .badge { font-family: var(--mono); font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .08em; padding: 2px 7px; border-radius: 3px; background: rgba(166,132,255,.16);
+    color: var(--plasma); border: 1px solid rgba(166,132,255,.3); }
+
+  /* ---------- telemetry feed ---------- */
+  .feed { display: flex; flex-direction: column; gap: 5px; max-height: 60vh; overflow: auto; padding-right: 6px; }
+  .feed::-webkit-scrollbar { width: 8px; } .feed::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
+  .attempt-div { display: flex; align-items: center; gap: 12px; margin: 14px 0 4px; }
+  .attempt-div .lbl { font-family: var(--mono); font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .16em; color: var(--gem); white-space: nowrap; }
+  .attempt-div .rule { flex: 1; height: 1px; background: linear-gradient(90deg, var(--gem), transparent); opacity: .4; }
+  .evt { display: flex; gap: 11px; align-items: flex-start; padding: 8px 12px; border-radius: 4px;
+    border: 1px solid var(--line-soft); background: rgba(16,22,54,.32); font-size: 13px; line-height: 1.45;
+    animation: slidein .22s ease; }
+  @keyframes slidein { from { opacity: 0; transform: translateX(-4px); } }
+  .evt .ic { flex: none; width: 16px; text-align: center; font-size: 12px; margin-top: 2px; }
+  .evt .body { flex: 1; min-width: 0; }
+  .evt .k { font-family: var(--mono); font-size: 9.5px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .1em; color: var(--faint); margin-bottom: 2px; }
+  .evt .txt { word-break: break-word; color: var(--ink); }
+  .evt.command { border-color: var(--line); background: var(--surface-2); }
+  .evt.command .txt { font-family: var(--mono); font-size: 12px; color: var(--dim); white-space: pre-wrap; }
+  .evt.decision { border-color: rgba(255,194,74,.28); background: rgba(255,194,74,.07); }
+  .evt.decision { border-left: 3px solid var(--coin); }
+  .evt.decision .k { color: var(--coin); }
+  .evt.edit { border-color: rgba(58,224,212,.26); background: rgba(58,224,212,.06); }
+  .evt.edit .k { color: var(--gem); } .evt.edit .txt { font-family: var(--mono); font-size: 12px; }
+  .evt.audit { border-color: rgba(166,132,255,.3); background: rgba(166,132,255,.08); border-left: 3px solid var(--plasma); }
+  .evt.audit .k { color: var(--plasma); }
+  .evt.audit.fail { border-color: rgba(255,92,108,.32); background: rgba(255,92,108,.09); border-left-color: var(--lava); }
+  .evt.audit.fail .k { color: var(--lava); }
+  .evt.error { border-color: rgba(255,92,108,.28); background: rgba(255,92,108,.07); }
+  .evt.error .k, .evt.error .txt { color: var(--lava); }
+  .evt.image .txt, .evt.status .txt, .evt.workspace .txt, .evt.refine .txt { color: var(--dim); }
+
+  /* ---------- result: verdict gauges + inventory + viewport ---------- */
+  .verdicts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .vcard { border: 1px solid var(--line); border-radius: 4px; padding: 13px 15px; background: var(--surface-2);
+    position: relative; overflow: hidden; }
+  .vcard::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--faint); }
+  .vcard.ok::before { background: var(--life); } .vcard.bad::before { background: var(--lava); } .vcard.warn::before { background: var(--coin); }
+  .vcard .h { font-family: var(--mono); font-size: 9.5px; text-transform: uppercase; letter-spacing: .1em; color: var(--faint); }
+  .vcard .v { font-family: var(--mono); font-size: 17px; font-weight: 800; margin-top: 6px; letter-spacing: .02em; }
+  .vcard.ok .v { color: var(--life); } .vcard.bad .v { color: var(--lava); } .vcard.warn .v { color: var(--coin); }
+  .vcard .sub { font-size: 11.5px; color: var(--dim); margin-top: 5px; }
+  .section-h { font-family: var(--mono); font-size: 10.5px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .12em; color: var(--faint); margin: 4px 0 11px; display: flex; align-items: center; gap: 8px; }
+  .section-h::after { content: ""; flex: 1; height: 1px; background: var(--line-soft); }
+  .assets-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(80px, 1fr)); gap: 11px; }
+  .asset { border: 1px solid var(--line); border-radius: 4px; padding: 7px; background: var(--surface-2); text-align: center; }
+  .asset img { width: 100%; aspect-ratio: 1; object-fit: contain; image-rendering: pixelated; border-radius: 2px;
+    background: repeating-conic-gradient(rgba(255,255,255,.05) 0% 25%, transparent 0% 50%) 50% / 12px 12px; }
+  .asset .t { font-family: var(--mono); font-size: 9.5px; color: var(--dim); margin-top: 6px; word-break: break-word; }
+  .notes { font-size: 12px; color: var(--dim); margin-top: 11px; font-family: var(--mono); }
+  .notes .warn { color: var(--coin); }
+  .media { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .media figure { margin: 0; }
+  .media img { width: 100%; border: 1px solid var(--line); border-radius: 4px; display: block; background: var(--void);
+    image-rendering: pixelated; box-shadow: 0 12px 40px -18px rgba(58,224,212,.4); }
+  .media figcaption { font-family: var(--mono); font-size: 10px; color: var(--faint); margin-top: 7px;
+    text-transform: uppercase; letter-spacing: .1em; }
+  details { border-top: 1px solid var(--line-soft); padding-top: 12px; }
+  details summary { cursor: pointer; font-family: var(--mono); font-size: 11.5px; color: var(--dim);
+    letter-spacing: .04em; list-style: none; }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::before { content: "\25B8 "; color: var(--gem); }
+  details[open] summary::before { content: "\25BE "; }
+  pre.scene, .log { font-family: var(--mono); font-size: 12px; background: var(--surface-2); border: 1px solid var(--line);
+    border-radius: 4px; padding: 12px; overflow: auto; max-height: 340px; margin-top: 10px; color: var(--dim); }
+  .log .line { padding: 1px 0; white-space: pre-wrap; }
+  table.metrics { border-collapse: collapse; font-family: var(--mono); font-size: 12px; margin-top: 10px; }
+  table.metrics td { padding: 4px 12px 4px 0; vertical-align: top; }
+  table.metrics td:first-child { color: var(--faint); }
+
+  @media (max-width: 900px) {
+    .layout { grid-template-columns: 1fr; }
+    .deck { border-right: none; border-bottom: 1px solid var(--line); }
+    .media { grid-template-columns: 1fr; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
   }
 </style>
 </head>
 <body>
+<div class="substrate"></div>
 
 <header>
-  <h1>InfiniEnv</h1>
-  <p>Infinite environment generation via an agent harness — type a prompt, pick your settings, watch it build.</p>
+  <div class="wordmark">Infini<span style="color:var(--gem)">Env</span><span class="cur"></span></div>
+  <div class="tagline">A model <b class="p1">proposes</b> &middot; the harness <b class="p2">verifies</b> &middot; the agent <b class="p3">proves</b></div>
+  <div class="status"><span class="dot"></span> Foundry online</div>
 </header>
 
 <div class="layout">
-  <div class="panel settings">
-    <label for="prompt">Prompt</label>
+  <div class="deck">
+    <label for="prompt">Prompt &middot; compile a world</label>
     <textarea id="prompt" placeholder="Create a museum heist where the agent must find a key, unlock a security door, crack a safe with a stethoscope, and deliver the jewel to the exit."></textarea>
 
-    <div class="checkbox-row" style="margin-top:0">
-      <input type="checkbox" id="sandbox">
-      <label for="sandbox">--sandbox (let an isolated agent write and run its own engine code)</label>
-    </div>
-    <div class="sandbox-note" id="sandbox-note">
-      Trades away the validator-guaranteed solvability check every other run has, in exchange for
-      mechanics the fixed vocabulary can't express (see CLAUDE.md section 11). Ignores
-      provider/--no-fallback below. Assets still applies -- the sandbox agent resolves real sprites
-      the same way any other run does. If the first attempt fails an independent outer sanity
-      check, the same agent gets the concrete failure and repairs its own work, up to max repair
-      attempts.
+    <div class="sandbox-note visible">
+      A model writes and runs its own engine code in an isolated per-run copy, plays through it, and
+      repairs against an independent outer check + faithfulness audit. The scene it declares is run
+      through the real deterministic validator (bounds/ids enforced, the rest recorded). Needs an
+      OpenAI key + <code>pip install -e ".[openai]"</code>.
     </div>
 
-    <div class="row">
-      <div>
-        <label for="assets">Assets</label>
-        <select id="assets">
-          <option value="none" selected>none</option>
-          <option value="local">local</option>
-          <option value="generated">generated</option>
-          <option value="auto">auto</option>
-        </select>
-        <div class="hint">Applies in --sandbox mode too.</div>
-      </div>
+    <div class="checkbox-row" id="refine-row" style="margin-top:14px">
+      <input type="checkbox" id="refine_prompt" checked>
+      <label for="refine_prompt">Refine prompt &middot; expand it into a fuller spec before the handoff</label>
     </div>
 
-    <fieldset id="non-sandbox-fields">
-      <label for="provider">Provider</label>
-      <select id="provider">
-        {% for p in providers %}
-        <option value="{{ p }}" {% if p == "mock" %}selected{% endif %}>{{ p }}</option>
-        {% endfor %}
+    <div id="backend-row">
+      <label for="sandbox_backend">Agent runtime</label>
+      <select id="sandbox_backend">
+        <option value="openai" selected>OpenAI Agents SDK (default)</option>
+        <option value="claude">Claude Agent SDK</option>
       </select>
-      <div class="hint">mock needs no API key. openai_agents is the default full runtime.</div>
+      <div class="hint">Which agent writes and runs the engine code. Interchangeable -- same
+        workspace, artifacts, and checks. Claude needs CL_KEY/ANTHROPIC_API_KEY, the
+        <code>claude</code> CLI on PATH, and <code>pip install infinienv[claude]</code>.</div>
+    </div>
 
-      <div class="checkbox-row">
-        <input type="checkbox" id="no_fallback">
-        <label for="no_fallback">--no-fallback (error instead of silently using the template)</label>
-      </div>
-    </fieldset>
+    <div id="model-row">
+      <label for="sandbox_model">Agent model</label>
+      <select id="sandbox_model"></select>
+      <div class="hint">Which model the agent runs as. Options change with the runtime above.
+        Runs are long and iterative, so a cheaper/faster tier is a fine default; pick a more
+        capable one for the hardest prompts.</div>
+    </div>
+
+    <label for="assets">Assets</label>
+    <select id="assets">
+      <option value="none" selected>none &middot; flat colored cells</option>
+      <option value="local">local &middot; checked-in placeholders</option>
+      <option value="generated">generated &middot; real sprites via the image API</option>
+      <option value="auto">auto &middot; generate the complex, draw simple ones locally</option>
+    </select>
+    <div class="hint">Sprites the agent resolves inside its workspace.</div>
 
     <div class="row">
       <div>
@@ -146,58 +288,161 @@
         <input type="number" id="seed" value="42">
       </div>
       <div>
-        <label for="max_repair_attempts" id="max_repair_label">Max repair attempts</label>
-        <input type="number" id="max_repair_attempts" placeholder="default: 3">
+        <label for="max_repair_attempts">Max repair attempts</label>
+        <input type="number" id="max_repair_attempts" placeholder="default: 2">
       </div>
     </div>
 
     <label for="out">Output directory</label>
     <input type="text" id="out" placeholder="auto: runs/gui_&lt;timestamp&gt;">
 
-    <button id="generate">Generate</button>
+    <button id="generate">Compile world</button>
 
     <div class="runs">
-      <h2>Recent runs</h2>
-      <div class="run-grid" id="run-grid"><div class="empty">No runs yet.</div></div>
+      <h2>Recent worlds</h2>
+      <div class="run-grid" id="run-grid"><div class="empty">No worlds yet.</div></div>
     </div>
   </div>
 
-  <div class="panel results">
-    <div class="log" id="log">Configure a run on the left and hit Generate.</div>
-    <div class="banner" id="banner"></div>
-    <div class="media" id="media" style="display:none">
-      <figure><img id="render-img" alt="render.png"><figcaption>render.png</figcaption></figure>
-      <figure><img id="replay-img" alt="replay.gif"><figcaption>replay.gif</figcaption></figure>
+  <div class="stage results">
+    <div class="phasebar" id="phasebar" style="display:none">
+      <div class="phase-steps" id="phase-steps"></div>
+      <div class="phase-meta" id="phase-meta"></div>
     </div>
-    <table class="metrics" id="metrics-table" style="display:none"></table>
-    <details id="summary-details" style="display:none">
-      <summary>Sandbox agent summary</summary>
-      <pre class="scene" id="agent-summary"></pre>
-    </details>
-    <details id="scene-details" style="display:none">
-      <summary>scene.json</summary>
-      <pre class="scene" id="scene-json"></pre>
-    </details>
+    <div class="banner" id="banner"></div>
+    <div class="feed" id="feed"><div class="empty">Type a prompt on the left and hit Compile.<br>Every decision, command, code edit, asset, and the audit streams here as the world is built.</div></div>
+
+    <div id="result" style="display:none">
+      <div class="verdicts" id="verdicts"></div>
+      <div id="assets-block" style="display:none">
+        <div class="section-h">Assets used</div>
+        <div class="assets-grid" id="assets-grid"></div>
+        <div class="notes" id="asset-notes"></div>
+      </div>
+      <div class="media" id="media" style="display:none">
+        <figure><img id="render-img" alt="render.png"><figcaption>render.png</figcaption></figure>
+        <figure><img id="replay-img" alt="replay.gif"><figcaption>replay.gif</figcaption></figure>
+      </div>
+      <details id="refine-details" style="display:none"><summary>Refined prompt (what the agent was actually given)</summary><pre class="scene" id="refine-text"></pre></details>
+      <details id="summary-details" style="display:none"><summary>Agent summary</summary><pre class="scene" id="agent-summary"></pre></details>
+      <details id="scene-details" style="display:none"><summary>scene.json</summary><pre class="scene" id="scene-json"></pre></details>
+      <details id="metrics-details" style="display:none"><summary>All metrics</summary><table class="metrics" id="metrics-table"></table></details>
+      <details id="rawlog-details" style="display:none"><summary>Raw log</summary><div class="log" id="log"></div></details>
+    </div>
   </div>
 </div>
 
 <script>
 const $ = (id) => document.getElementById(id);
 const logEl = $('log'), bannerEl = $('banner'), mediaEl = $('media');
-const metricsEl = $('metrics-table'), sceneDetails = $('scene-details'), sceneJson = $('scene-json');
+const feedEl = $('feed'), phasebar = $('phasebar'), phaseStepsEl = $('phase-steps'), phaseMetaEl = $('phase-meta');
+const resultEl = $('result'), verdictsEl = $('verdicts');
+const assetsBlock = $('assets-block'), assetsGrid = $('assets-grid'), assetNotesEl = $('asset-notes');
+const metricsEl = $('metrics-table'), metricsDetails = $('metrics-details'), rawlogDetails = $('rawlog-details');
+const sceneDetails = $('scene-details'), sceneJson = $('scene-json');
 const summaryDetails = $('summary-details'), agentSummaryEl = $('agent-summary');
+const refineDetails = $('refine-details'), refineTextEl = $('refine-text');
 const genBtn = $('generate');
-const sandboxCheckbox = $('sandbox'), nonSandboxFields = $('non-sandbox-fields');
-const sandboxNote = $('sandbox-note'), maxRepairLabel = $('max_repair_label');
 
-function syncSandboxUi() {
-  const on = sandboxCheckbox.checked;
-  nonSandboxFields.disabled = on;
-  sandboxNote.classList.toggle('visible', on);
-  maxRepairLabel.textContent = on ? 'Max repair attempts (sandbox, default 2)' : 'Max repair attempts';
+const KINDS = {
+  refine:    {ic:'✦', label:'Refined prompt'},
+  workspace: {ic:'▣', label:'Workspace'},
+  decision:  {ic:'◆', label:'Decision'},
+  command:   {ic:'›', label:'Command'},
+  edit:      {ic:'✎', label:'Wrote code'},
+  image:     {ic:'▤', label:'Reviewed frame'},
+  agent:     {ic:'▸', label:'Agent'},
+  audit:     {ic:'◈', label:'Audit'},
+  error:     {ic:'✕', label:'Failed'},
+  status:    {ic:'·', label:'Status'},
+};
+const PHASES = ['Refine', 'Build', 'Audit', 'Done'];
+let runTimer = null, runStart = 0, curPhase = -1;
+
+function setPhase(name) {
+  const i = PHASES.indexOf(name);
+  if (i < curPhase) return;
+  curPhase = i;
+  phaseStepsEl.querySelectorAll('.phase-step').forEach((el, idx) => {
+    el.className = 'phase-step' + (idx < curPhase ? ' done' : idx === curPhase ? ' active' : '');
+  });
 }
-sandboxCheckbox.addEventListener('change', syncSandboxUi);
-syncSandboxUi();
+function renderPhaseSteps() {
+  phaseStepsEl.innerHTML = PHASES.map((p) => `<span class="phase-step">${p}</span>`).join('');
+}
+function setMeta(attemptText) {
+  const secs = ((Date.now() - runStart) / 1000).toFixed(0);
+  const spin = runTimer ? '<span class="spinner"></span>' : '';
+  phaseMetaEl.innerHTML = `${attemptText ? `<span>${attemptText}</span>` : ''}<span>${secs}s</span>${spin}`;
+}
+function attemptDivider(label) {
+  const d = document.createElement('div');
+  d.className = 'attempt-div';
+  d.innerHTML = `<span class="lbl">${label}</span><span class="rule"></span>`;
+  feedEl.appendChild(d);
+}
+let lastAttemptText = '';
+function pushEvent(kind, message) {
+  logLine(message); // keep the full raw text in the collapsible raw log
+  if (kind === 'refine' && message.startsWith('Refined prompt')) {
+    const body = message.replace(/^Refined prompt[^:]*:\s*/, '');
+    refineTextEl.textContent = body; refineDetails.style.display = 'block';
+    setPhase('Build');
+  }
+  if (kind === 'attempt') {
+    const m = message.match(/attempt (\d+)\/(\d+)/i);
+    if (m) { lastAttemptText = `Attempt ${m[1]} / ${m[2]}`; setMeta(lastAttemptText); }
+    if (/^Running|^Repairing/.test(message)) { setPhase('Build'); attemptDivider(m ? `Attempt ${m[1]}` : 'Attempt'); return; }
+  }
+  if (kind === 'audit') setPhase('Audit');
+  const meta = KINDS[kind] || KINDS.status;
+  let txt = message;
+  if (kind === 'command') txt = message.replace(/^\$\s*/, '');
+  else if (kind === 'decision') txt = message.replace(/^Thinking:\s*/, '');
+  else if (kind === 'agent') txt = message.replace(/^Agent:\s*/, '');
+  else if (kind === 'edit') txt = message.replace(/^Editing:\s*/, '');
+  else if (kind === 'audit') txt = message.replace(/^Auditor:\s*/, '');
+  const row = document.createElement('div');
+  const fail = kind === 'audit' && /fake|does not|not independently/i.test(message);
+  row.className = 'evt ' + kind + (fail ? ' fail' : '');
+  const b = document.createElement('div'); b.className = 'body';
+  const k = document.createElement('div'); k.className = 'k'; k.textContent = meta.label;
+  const t = document.createElement('div'); t.className = 'txt'; t.textContent = txt;
+  b.appendChild(k); b.appendChild(t);
+  row.innerHTML = `<div class="ic">${meta.ic}</div>`;
+  row.appendChild(b);
+  feedEl.appendChild(row);
+  feedEl.scrollTop = feedEl.scrollHeight;
+}
+
+const backendSelect = $('sandbox_backend'), modelSelect = $('sandbox_model');
+
+// Kept in sync with SANDBOX_MODELS in gui/app.py (first entry is the default).
+const SANDBOX_MODELS = {
+  openai: [
+    ['gpt-5.6-terra', 'GPT-5.6 terra (default)'],
+    ['gpt-5.6-sol', 'GPT-5.6 sol'],
+    ['gpt-5.6-luna', 'GPT-5.6 luna'],
+    ['gpt-5.5', 'GPT-5.5'],
+    ['gpt-5.5-pro', 'GPT-5.5 pro'],
+  ],
+  claude: [
+    ['claude-sonnet-5', 'Claude Sonnet 5 (default)'],
+    ['claude-opus-4-8', 'Claude Opus 4.8'],
+    ['claude-fable-5', 'Claude Fable 5'],
+  ],
+};
+function populateModelOptions() {
+  const opts = SANDBOX_MODELS[backendSelect.value] || SANDBOX_MODELS.openai;
+  modelSelect.innerHTML = '';
+  for (const [value, label] of opts) {
+    const o = document.createElement('option');
+    o.value = value; o.textContent = label;
+    modelSelect.appendChild(o);
+  }
+}
+backendSelect.addEventListener('change', populateModelOptions);
+populateModelOptions();
 
 function logLine(text) {
   const div = document.createElement('div');
@@ -209,18 +454,73 @@ function logLine(text) {
 
 function resetLog() {
   logEl.innerHTML = '';
+  feedEl.innerHTML = '';
   bannerEl.style.display = 'none';
+  resultEl.style.display = 'none';
+  assetsBlock.style.display = 'none';
   mediaEl.style.display = 'none';
-  metricsEl.style.display = 'none';
+  refineDetails.style.display = 'none';
   sceneDetails.style.display = 'none';
   summaryDetails.style.display = 'none';
+  metricsDetails.style.display = 'none';
+  rawlogDetails.style.display = 'none';
+  curPhase = -1;
+}
+
+function startRun() {
+  resetLog();
+  renderPhaseSteps();
+  phasebar.style.display = 'flex';
+  document.body.classList.add('building');
+  runStart = Date.now();
+  clearInterval(runTimer);
+  runTimer = setInterval(() => setMeta(lastAttemptText), 500);
+  setPhase('Refine');
+  setMeta('');
+}
+function stopTimer() { clearInterval(runTimer); runTimer = null; document.body.classList.remove('building'); setMeta(lastAttemptText); }
+
+function verdictCard(h, v, cls, sub) {
+  return `<div class="vcard ${cls}"><div class="h">${h}</div><div class="v">${v}</div>${sub ? `<div class="sub">${sub}</div>` : ''}</div>`;
+}
+function buildResult(data) {
+  const m = data.metrics || {};
+  const cards = [verdictCard('Result', data.success ? 'Success' : 'Failed', data.success ? 'ok' : 'bad')];
+  if (data.sandbox) {
+    cards.push(verdictCard('Outer sanity check', m.outer_sanity_passed ? 'Passed' : 'Failed',
+      m.outer_sanity_passed ? 'ok' : 'bad', m.outer_sanity_error || ''));
+    if (m.audited) cards.push(verdictCard('Faithfulness audit', m.audit_passed ? 'Passed' : 'Cheat found',
+      m.audit_passed ? 'ok' : 'bad', m.audit_passed ? 'independently reviewed' : ''));
+    else cards.push(verdictCard('Faithfulness audit', 'Not verified', 'warn', m.audit_note || 'auditor did not run'));
+    cards.push(verdictCard('Repair attempts', (data.repair_attempts || 0), (data.repair_attempts ? 'warn' : ''),
+      (data.repair_attempts ? 'fixed after review' : 'first try')));
+  } else if (data.validation_errors && data.validation_errors.length) {
+    cards.push(verdictCard('Validation', data.validation_errors.length + ' error(s)', 'bad',
+      data.validation_errors.map((e) => e.code).join(', ')));
+  }
+  verdictsEl.innerHTML = cards.join('');
+  if (!m.audit_passed && m.audit_findings) {
+    const d = document.createElement('details');
+    d.innerHTML = `<summary>Audit findings</summary><pre class="scene">${m.audit_findings}</pre>`;
+    verdictsEl.after(d);
+  }
+  resultEl.style.display = 'block';
+}
+function buildAssets(assets) {
+  if (!assets || !assets.items || !assets.items.length) { assetsBlock.style.display = 'none'; return; }
+  assetsGrid.innerHTML = assets.items.map((a) =>
+    `<div class="asset"><img src="${a.url}?t=${Date.now()}" alt="" onerror="this.style.visibility='hidden'"><div class="t">${a.type}</div></div>`).join('');
+  assetNotesEl.innerHTML = (assets.notes && assets.notes.length)
+    ? `<span class="warn">⚠ ${assets.notes.length} asset note(s):</span> ${assets.notes.map((n) => (typeof n === 'string' ? n : JSON.stringify(n))).join(' · ')}`
+    : '';
+  assetsBlock.style.display = 'block';
 }
 
 async function loadRuns() {
   const res = await fetch('/api/runs');
   const data = await res.json();
   const grid = $('run-grid');
-  if (!data.runs.length) { grid.innerHTML = '<div class="empty">No runs yet.</div>'; return; }
+  if (!data.runs.length) { grid.innerHTML = '<div class="empty">No worlds yet.</div>'; return; }
   grid.innerHTML = '';
   for (const run of data.runs) {
     const item = document.createElement('div');
@@ -228,7 +528,7 @@ async function loadRuns() {
     let statusClass = run.success === true ? 'ok' : run.success === false ? 'bad' : '';
     if (run.sandbox) statusClass += ' sandbox';
     item.innerHTML = `
-      <img src="${run.render_url || ''}" onerror="this.style.opacity=0.2" alt="${run.name}">
+      <img src="${run.render_url || ''}" onerror="this.style.opacity=0.15" alt="${run.name}">
       <div class="name ${statusClass}">${run.name}</div>`;
     item.onclick = () => showRun(run);
     grid.appendChild(item);
@@ -237,7 +537,9 @@ async function loadRuns() {
 
 function showRun(run) {
   resetLog();
-  logLine(`Showing existing run: ${run.name}${run.sandbox ? ' (sandbox)' : ''}`);
+  phasebar.style.display = 'none';
+  feedEl.innerHTML = `<div class="empty">Showing existing world: ${run.name}${run.sandbox ? ' (sandbox)' : ''}.<br>Compile a new one to watch the live build.</div>`;
+  resultEl.style.display = 'block';
   if (run.render_url || run.replay_url) {
     mediaEl.style.display = 'grid';
     $('render-img').src = run.render_url || '';
@@ -249,20 +551,22 @@ $('generate').addEventListener('click', async () => {
   const prompt = $('prompt').value.trim();
   if (!prompt) { alert('Enter a prompt first.'); return; }
 
-  resetLog();
+  startRun();
   genBtn.disabled = true;
-  logLine('Submitting job...');
+  lastAttemptText = '';
+  pushEvent('status', 'Submitting job...');
 
-  const sandbox = sandboxCheckbox.checked;
+  const sandbox = true;  // sandbox is the only generate mode
   const payload = {
     prompt,
     sandbox,
-    provider: $('provider').value,
     seed: $('seed').value,
     assets: $('assets').value,
     max_repair_attempts: $('max_repair_attempts').value,
     out: $('out').value,
-    no_fallback: $('no_fallback').checked,
+    refine_prompt: $('refine_prompt').checked,
+    sandbox_backend: $('sandbox_backend').value,
+    sandbox_model: $('sandbox_model').value,
   };
 
   let jobId;
@@ -271,39 +575,37 @@ $('generate').addEventListener('click', async () => {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload),
     });
     const data = await res.json();
-    if (!res.ok) { logLine('Error: ' + data.error); genBtn.disabled = false; return; }
+    if (!res.ok) { pushEvent('error', 'Error: ' + data.error); stopTimer(); genBtn.disabled = false; return; }
     jobId = data.job_id;
   } catch (e) {
-    logLine('Request failed: ' + e); genBtn.disabled = false; return;
+    pushEvent('error', 'Request failed: ' + e); stopTimer(); genBtn.disabled = false; return;
   }
 
   const source = new EventSource('/api/stream/' + jobId);
   source.addEventListener('stage', (ev) => {
     const data = JSON.parse(ev.data);
-    logLine(data.message);
+    pushEvent(data.kind || 'status', data.message);
   });
   source.addEventListener('done', (ev) => {
     const data = JSON.parse(ev.data);
+    stopTimer();
+    setPhase('Done');
     const badge = data.sandbox ? '<span class="badge">sandbox</span>' : '';
     bannerEl.className = 'banner ' + (data.success ? 'success' : 'fail');
-    bannerEl.innerHTML = (data.success ? 'SUCCESS' : 'FAILED (see metrics below)') + badge;
-    if (data.validation_errors && data.validation_errors.length) {
-      for (const err of data.validation_errors) logLine(`  [${err.code}] ${err.message}`);
-    }
-    if (data.sandbox) {
-      logLine(`Sandbox verdicts -- self-reported: ${data.metrics.sandbox_self_reported_success}, ` +
-        `outer sanity check: ${data.metrics.outer_sanity_passed}` +
-        (data.metrics.outer_sanity_error ? ` (${data.metrics.outer_sanity_error})` : ''));
-      if (data.repair_attempts) logLine(`Repaired over ${data.repair_attempts} additional attempt(s).`);
-      if (data.run_error) logLine(`Agent run did not finish cleanly: ${data.run_error}`);
-    }
+    bannerEl.innerHTML = (data.success ? '✓ World compiled' : '✕ Failed — see verdicts below') + badge;
+    if (data.run_error) pushEvent('error', `Agent run did not finish cleanly: ${data.run_error}`);
+
+    buildResult(data);
+    buildAssets(data.assets);
     mediaEl.style.display = 'grid';
     $('render-img').src = '/artifact/' + data.out_dir + '/render.png?t=' + Date.now();
     $('replay-img').src = '/artifact/' + data.out_dir + '/replay.gif?t=' + Date.now();
-    metricsEl.style.display = 'table';
+
+    metricsDetails.style.display = 'block';
     metricsEl.innerHTML = Object.entries(data.metrics).map(
       ([k, v]) => `<tr><td>${k}</td><td>${typeof v === 'object' ? JSON.stringify(v) : v}</td></tr>`
     ).join('');
+    rawlogDetails.style.display = 'block';
     if (data.sandbox) {
       summaryDetails.style.display = data.agent_summary ? 'block' : 'none';
       agentSummaryEl.textContent = data.agent_summary || '';
@@ -323,9 +625,10 @@ $('generate').addEventListener('click', async () => {
   source.addEventListener('error', (ev) => {
     let msg = 'connection error';
     try { msg = JSON.parse(ev.data).message; } catch (e) {}
-    logLine('Error: ' + msg);
+    pushEvent('error', 'Error: ' + msg);
+    stopTimer();
     bannerEl.className = 'banner fail';
-    bannerEl.textContent = 'FAILED';
+    bannerEl.textContent = '✕ Failed';
     source.close();
     genBtn.disabled = false;
   });

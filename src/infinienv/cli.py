@@ -24,47 +24,19 @@ def _load_dotenv() -> None:
     # Some setups export the OpenAI key under OP_KEY instead of OPENAI_API_KEY.
     if os.environ.get("OP_KEY"):
         os.environ["OPENAI_API_KEY"] = os.environ["OP_KEY"]
+    # We deliberately do NOT promote CL_KEY (InfiniEnv's own name for the Anthropic key) to
+    # ANTHROPIC_API_KEY. Setting ANTHROPIC_API_KEY hijacks the `claude` CLI's auth: the Claude
+    # Agent SDK sandbox backend spawns that CLI, and if ANTHROPIC_API_KEY is set the CLI uses it
+    # in preference to the user's claude.ai login -- which broke real runs when that API account
+    # ran out of credit while the login itself was fine. CL_KEY stays under its own name so code
+    # that explicitly wants the raw key (the `anthropic` provider) can read it, without polluting
+    # the global env var the CLI reads. See CLAUDE.md section 11's auth note.
 
 
 def cmd_generate(args: argparse.Namespace) -> int:
-    if args.sandbox:
-        return _cmd_generate_sandbox(args)
-
-    from infinienv.evaluation.runner import run_generation
-
-    provider = get_provider(args.provider)
-    print(f"InfiniEnv run: {args.out}")
-    print(f"Prompt: {args.prompt}")
-    print(f"Provider: {args.provider}")
-    print(f"Seed: {args.seed}")
-    print()
-
-    stage_num = [0]
-    total_stages = 6 if args.assets == "none" else 7
-
-    def on_stage(msg: str) -> None:
-        stage_num[0] += 1
-        print(f"[{stage_num[0]}/{total_stages}] {msg}")
-
-    try:
-        result = run_generation(
-            provider,
-            args.prompt,
-            args.seed,
-            args.out,
-            max_repair_attempts=args.max_repair_attempts,
-            allow_fallback=not args.no_fallback,
-            assets_mode=args.assets,
-            require_runs_dir=True,
-            on_stage=on_stage,
-        )
-    except ValueError as exc:
-        print(f"Error: {exc}")
-        return 1
-    print()
-    ok = result.metrics["success"]
-    print("Result: SUCCESS" if ok else "Result: FAILED (see report.md)")
-    return 0 if ok else 1
+    # Sandbox is the only generate mode. The deterministic pipeline stays available for the other
+    # commands (validate/solve/mutate/curriculum/benchmark/export-dataset), just not here.
+    return _cmd_generate_sandbox(args)
 
 
 def _cmd_generate_sandbox(args: argparse.Namespace) -> int:
@@ -92,6 +64,7 @@ def _cmd_generate_sandbox(args: argparse.Namespace) -> int:
             max_repair_attempts=args.max_repair_attempts,
             assets_mode=args.assets,
             require_runs_dir=True,
+            refine_prompt=args.refine_prompt,
             on_stage=on_stage,
         )
     except ValueError as exc:
@@ -280,9 +253,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="infinienv", description="InfiniEnv: infinite environment generation via an agent harness.")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    g = sub.add_parser("generate", help="Generate, validate, build, and solve a scene from a prompt.")
+    g = sub.add_parser(
+        "generate",
+        help="Generate a playable scene from a prompt. Runs the sandbox agent (the one and only "
+        "generate mode): a model writes and runs its own engine code in an isolated per-run "
+        "workspace copy, repairing against an outer check + an independent audit.",
+    )
     g.add_argument("--prompt", required=True)
-    g.add_argument("--provider", default="mock", choices=["mock", "openai_agents", "openai_responses", "anthropic"])
     g.add_argument("--seed", type=int, default=42)
     g.add_argument(
         "--out",
@@ -297,35 +274,34 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         dest="max_repair_attempts",
-        help="Non-sandbox: repair attempts against the LLM repair agent (default 3). Sandbox: "
-        "repair attempts where the same sandbox agent gets the concrete outer-sanity-check "
+        help="Repair attempts where the same sandbox agent gets the concrete outer-check/audit "
         "failure and a chance to fix its own work in the same persistent workspace (default 2).",
-    )
-    g.add_argument(
-        "--no-fallback",
-        action="store_true",
-        help="Error out instead of silently falling back to the template generator when the "
-        "provider can't produce a valid scene within the repair budget.",
     )
     g.add_argument(
         "--assets",
         default="none",
         choices=["none", "local", "generated", "auto"],
         help="none: flat colored cells (default). local: checked-in placeholder sprites, no key "
-        "needed. generated: OpenAI image generation only, no silent fallback. auto: generated "
-        "then local placeholder fallback. Applies to --sandbox runs too (resolved inside the "
-        "sandbox workspace via a copy of assets/resolver.py).",
+        "needed. generated: OpenAI image generation only, no silent fallback. auto: draw the "
+        "simple structural types locally, OpenAI-generate the rest. Resolved inside the sandbox "
+        "workspace via a copy of assets/resolver.py.",
     )
     g.add_argument(
-        "--sandbox",
-        action="store_true",
-        help="Let an isolated sandbox agent write and run its own code (in a per-run copy of "
-        "the engine, never the real installation) to implement mechanics beyond the fixed "
-        "vocabulary, repairing its own work against an outer sanity check up to "
-        "--max-repair-attempts times. Ignores --provider/--no-fallback; trades away "
-        "the validator-guaranteed solvability check other runs have. See CLAUDE.md.",
+        "--no-refine-prompt",
+        dest="refine_prompt",
+        action="store_false",
+        help="Skip the best-effort LLM step that expands your prompt into a fuller build spec "
+        "before handing it to the agent. On by default; the original and refined prompts are "
+        "both recorded in metrics.json.",
     )
-    g.set_defaults(func=cmd_generate)
+    # Accepted no-op: sandbox is the only generate mode now, but keep the flag so existing
+    # `generate --sandbox ...` invocations and scripts don't break.
+    g.add_argument("--sandbox", action="store_true", help=argparse.SUPPRESS)
+    # Sandbox is the ONE generate mode. The deterministic engine stays as the substrate (the sandbox
+    # copies schema/engine/navigation/validation/render/assets into every workspace, and its outer
+    # check runs the real validator on the scene), and the validate/solve/mutate/curriculum/
+    # benchmark/export-dataset tools still use it -- but `generate` no longer has a non-sandbox path.
+    g.set_defaults(func=cmd_generate, refine_prompt=True)
 
     v = sub.add_parser("validate", help="Validate a scene.json file.")
     v.add_argument("scene_path")

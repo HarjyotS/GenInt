@@ -15,6 +15,16 @@ from infinienv.sandbox.runner import (
 from infinienv.sandbox.workspace import tar_directory
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_prompt_refinement(monkeypatch):
+    # Prompt refinement now defaults on for sandbox runs. Keep these tests hermetic: without a key
+    # the best-effort refiner no-ops (falls back to the raw prompt) instead of making a real API
+    # call if one happens to be exported in the environment. Tests that specifically exercise
+    # refinement monkeypatch the refiner directly rather than relying on a key.
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OP_KEY", raising=False)
+
+
 def test_repair_message_describes_run_error_distinctly_from_sanity_error():
     msg = _repair_message(run_error="boom", sanity_error=None)
     assert "did not finish cleanly" in msg
@@ -196,6 +206,11 @@ def patched_sdk(tmp_path, monkeypatch):
     # non-sandbox path) -- chdir into tmp_path so tests' `str(tmp_path / "run")` out_dirs
     # satisfy that check.
     monkeypatch.chdir(tmp_path)
+    # Disable the independent faithfulness auditor for the plain repair-loop tests -- they're about
+    # the SDK loop / outer sanity check, not the auditor, and this keeps them hermetic (no real
+    # OpenAI call) regardless of whether OPENAI_API_KEY happens to be set. The dedicated
+    # audit-loop test below re-enables it by monkeypatching runner.audit_run directly.
+    monkeypatch.setenv("INFINIENV_SANDBOX_AUDIT", "0")
 
     with (
         patch("agents.sandbox.SandboxAgent", lambda **kwargs: SimpleNamespace(**kwargs)),
@@ -273,6 +288,149 @@ def test_repair_loop_succeeds_immediately_without_using_the_repair_budget(tmp_pa
     assert len(attempts) == 1
     assert result["success"] is True
     assert result["repair_attempts"] == 0
+
+
+def test_audit_failure_triggers_a_repair_even_when_the_outer_check_passes(tmp_path, patched_sdk, monkeypatch):
+    import infinienv.sandbox.runner as runner_mod
+    from infinienv.sandbox.auditor import AuditResult
+
+    Runner = patched_sdk
+    attempts: list[str] = []
+
+    async def fake_run(agent, message, *, run_config, max_turns):
+        attempts.append(message)
+        _write_good_attempt(run_config.sandbox.session.files)  # always mechanically valid
+        return SimpleNamespace(final_output=f"attempt {len(attempts)} summary")
+
+    calls = {"n": 0}
+
+    def fake_audit(out_dir, refined_prompt, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return AuditResult(True, False, findings="- fakes procedural generation with a hardcoded layout")
+        return AuditResult(True, True, findings=None)
+
+    monkeypatch.setattr(runner_mod, "audit_run", fake_audit)
+
+    with patch.object(Runner, "run_streamed", _streamed(fake_run)):
+        result = run_sandbox_generation("make a procedural cave", 1, str(tmp_path / "run"), max_repair_attempts=2)
+
+    assert len(attempts) == 2  # the outer check passed both times; only the audit forced the repair
+    assert "does not faithfully implement the spec" in attempts[1]
+    assert "hardcoded layout" in attempts[1]  # the finding is fed back to the author
+    assert result["success"] is True
+    history = result["metrics"]["repair_history"]
+    assert history[0]["outer_sanity_passed"] is True and history[0]["audit_passed"] is False
+    assert history[1]["audit_passed"] is True
+    assert result["metrics"]["audited"] is True and result["metrics"]["audit_passed"] is True
+
+
+def test_persistent_audit_failure_fails_the_run(tmp_path, patched_sdk, monkeypatch):
+    import infinienv.sandbox.runner as runner_mod
+    from infinienv.sandbox.auditor import AuditResult
+
+    Runner = patched_sdk
+
+    async def fake_run(agent, message, *, run_config, max_turns):
+        _write_good_attempt(run_config.sandbox.session.files)
+        return SimpleNamespace(final_output="summary")
+
+    monkeypatch.setattr(
+        runner_mod, "audit_run", lambda *a, **k: AuditResult(True, False, findings="- still faked")
+    )
+
+    with patch.object(Runner, "run_streamed", _streamed(fake_run)):
+        result = run_sandbox_generation("make a procedural cave", 1, str(tmp_path / "run"), max_repair_attempts=1)
+
+    # outer check passes but the audit never does -> success is False despite valid artifacts
+    assert result["success"] is False
+    assert result["metrics"]["outer_sanity_passed"] is True
+    assert result["metrics"]["audited"] is True and result["metrics"]["audit_passed"] is False
+
+
+def test_audit_skip_does_not_block_a_valid_run(tmp_path, patched_sdk, monkeypatch):
+    import infinienv.sandbox.runner as runner_mod
+    from infinienv.sandbox.auditor import AuditResult
+
+    Runner = patched_sdk
+
+    async def fake_run(agent, message, *, run_config, max_turns):
+        _write_good_attempt(run_config.sandbox.session.files)
+        return SimpleNamespace(final_output="summary")
+
+    # auditor couldn't run (e.g. no key): audited=False, passed=True -> run still succeeds
+    monkeypatch.setattr(runner_mod, "audit_run", lambda *a, **k: AuditResult(False, True, note="skipped"))
+
+    with patch.object(Runner, "run_streamed", _streamed(fake_run)):
+        result = run_sandbox_generation("make a game", 1, str(tmp_path / "run"), max_repair_attempts=2)
+
+    assert result["success"] is True
+    assert result["metrics"]["audited"] is False and result["metrics"]["audit_passed"] is True
+
+
+def test_repair_message_hints_the_fix_for_the_view_image_absolute_path_crash():
+    err = "Error running tool view_image: manifest path must be relative: /private/var/x/review_start.png"
+    msg = _repair_message(run_error=err, sanity_error=None)
+    assert "workspace-RELATIVE path" in msg and 'view_image("review_start.png")' in msg
+    # an unrelated run_error gets no such hint
+    plain = _repair_message(run_error="Max turns (60) exceeded", sanity_error=None)
+    assert "view_image" not in plain
+
+
+def test_repair_message_describes_an_audit_finding_distinctly(tmp_path):
+    msg = _repair_message(run_error=None, sanity_error=None, audit_findings="- fakes fog of war")
+    assert "does not faithfully implement the spec" in msg
+    assert "fakes fog of war" in msg
+
+
+def test_refined_prompt_is_handed_to_the_agent_and_recorded(tmp_path, patched_sdk, monkeypatch):
+    from infinienv.sandbox.prompt_refiner import RefineResult
+
+    monkeypatch.setattr(
+        "infinienv.sandbox.prompt_refiner.refine_prompt",
+        lambda p, **kw: RefineResult(p, "A MUCH RICHER SPEC derived from: " + p, True, None),
+    )
+    Runner = patched_sdk
+    attempts: list[str] = []
+
+    async def fake_run(agent, message, *, run_config, max_turns):
+        attempts.append(message)
+        _write_good_attempt(run_config.sandbox.session.files)
+        return SimpleNamespace(final_output="summary")
+
+    with patch.object(Runner, "run_streamed", _streamed(fake_run)):
+        result = run_sandbox_generation("a ninja game", 1, str(tmp_path / "run"), max_repair_attempts=0)
+
+    # the agent's task message carries the REFINED prompt, not the raw one
+    assert "A MUCH RICHER SPEC derived from: a ninja game" in attempts[0]
+    # both are recorded in metrics for transparency
+    assert result["metrics"]["original_prompt"] == "a ninja game"
+    assert result["metrics"]["refined_prompt"] == "A MUCH RICHER SPEC derived from: a ninja game"
+    assert result["metrics"]["prompt_refined"] is True
+
+
+def test_refine_prompt_false_uses_the_raw_prompt(tmp_path, patched_sdk, monkeypatch):
+    # if refinement were called it would raise -- proves it isn't when disabled
+    def _boom(p, **kw):
+        raise AssertionError("refiner should not be called when refine_prompt=False")
+
+    monkeypatch.setattr("infinienv.sandbox.prompt_refiner.refine_prompt", _boom)
+    Runner = patched_sdk
+    attempts: list[str] = []
+
+    async def fake_run(agent, message, *, run_config, max_turns):
+        attempts.append(message)
+        _write_good_attempt(run_config.sandbox.session.files)
+        return SimpleNamespace(final_output="summary")
+
+    with patch.object(Runner, "run_streamed", _streamed(fake_run)):
+        result = run_sandbox_generation(
+            "a ninja game", 1, str(tmp_path / "run"), max_repair_attempts=0, refine_prompt=False
+        )
+
+    assert "a ninja game" in attempts[0]
+    assert result["metrics"]["prompt_refined"] is False
+    assert result["metrics"]["refined_prompt"] == "a ninja game"
 
 
 def test_session_is_created_with_a_read_only_grant_for_the_harness_python_prefix(tmp_path, patched_sdk):

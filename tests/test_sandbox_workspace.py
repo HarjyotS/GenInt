@@ -5,6 +5,8 @@ import tarfile
 
 from infinienv.sandbox.workspace import (
     ARTIFACT_FILES,
+    _positions_from_replay,
+    _teleport_frame,
     build_workspace_dir,
     extract_artifacts,
     outer_sanity_check,
@@ -33,6 +35,11 @@ def test_build_workspace_dir_copies_engine_and_reference_runner(tmp_path):
     assert os.path.exists(os.path.join(workspace, "engine", "grid_collision.py"))
     assert os.path.exists(os.path.join(workspace, "engine", "level_generation.py"))
     assert os.path.exists(os.path.join(workspace, "engine", "puzzle_state.py"))
+    assert os.path.exists(os.path.join(workspace, "engine", "pushables.py"))
+    assert os.path.exists(os.path.join(workspace, "engine", "pathfinding.py"))
+    assert os.path.exists(os.path.join(workspace, "engine", "vision.py"))
+    assert os.path.exists(os.path.join(workspace, "engine", "agent_behavior.py"))
+    assert os.path.exists(os.path.join(workspace, "engine", "rendering.py"))
     # nothing from the installed package's cli/generation/gui should leak in, and only the
     # one file assets/*.py actually needs (ProviderError) is copied from llm/, not the
     # whole package (providers, prompts, heavy optional deps).
@@ -263,6 +270,93 @@ def test_outer_sanity_check_passes_for_valid_scene_and_real_images(tmp_path):
     assert error is None
 
 
+def _smooth_trace(steps=20):
+    # a hero walking right ~3px/frame then a small jump arc -- all steps bounded, no teleport
+    frames = []
+    x, y, vy = 0.0, 100.0, 0.0
+    for i in range(steps):
+        x += 3.0
+        if i == 8:
+            vy = -9.0
+        vy += 1.5
+        y = min(100.0, y + vy)
+        frames.append({"hero": {"x": x, "y": y}})
+    return {"trace": frames}
+
+
+def test_positions_from_replay_extracts_nested_hero_series():
+    positions = _positions_from_replay(_smooth_trace(12))
+    assert positions is not None
+    assert len(positions) == 12
+    assert positions[0] == (3.0, positions[0][1])
+
+
+def test_positions_from_replay_handles_top_level_and_pos_shapes():
+    assert _positions_from_replay({"frames": [{"x": i, "y": 0} for i in range(10)]}) is not None
+    assert _positions_from_replay({"states": [{"pos": [i, 2 * i]} for i in range(10)]}) is not None
+
+
+def test_positions_from_replay_returns_none_for_unknown_shape():
+    assert _positions_from_replay({"something_else": 1}) is None
+    assert _positions_from_replay({"trace": [{"score": 5}, {"score": 6}]}) is None
+
+
+def test_teleport_frame_none_for_smooth_motion():
+    positions = _positions_from_replay(_smooth_trace(20))
+    assert _teleport_frame(positions) is None
+
+
+def test_teleport_frame_flags_an_egregious_jump():
+    # smooth ~3px steps, then one 90px snap (a `pos = target` teleport)
+    positions = [(float(i * 3), 0.0) for i in range(15)]
+    positions.append((positions[-1][0] + 90.0, 0.0))
+    positions += [(positions[-1][0] + 3.0 * i, 0.0) for i in range(1, 6)]
+    tp = _teleport_frame(positions)
+    assert tp is not None
+    frame_i, jump, p90 = tp
+    assert jump > 80
+    assert p90 < 10
+
+
+def test_outer_sanity_check_fails_for_a_teleporting_replay(tmp_path):
+    out_dir = tmp_path / "run"
+    out_dir.mkdir()
+    _write_valid_scene(out_dir)
+    _write_real_images(out_dir)
+    frames = [{"hero": {"x": float(i * 3), "y": 0.0}} for i in range(15)]
+    frames.append({"hero": {"x": frames[-1]["hero"]["x"] + 120.0, "y": 0.0}})  # teleport
+    frames += [{"hero": {"x": frames[-1]["hero"]["x"] + 3.0 * i, "y": 0.0}} for i in range(1, 6)]
+    (out_dir / "replay.json").write_text(json.dumps({"trace": frames}))
+
+    ok, error = outer_sanity_check(str(out_dir))
+    assert ok is False
+    assert "teleport" in error
+
+
+def test_outer_sanity_check_passes_for_a_smooth_replay(tmp_path):
+    out_dir = tmp_path / "run"
+    out_dir.mkdir()
+    _write_valid_scene(out_dir)
+    _write_real_images(out_dir)
+    (out_dir / "replay.json").write_text(json.dumps(_smooth_trace(30)))
+
+    ok, error = outer_sanity_check(str(out_dir))
+    assert ok is True
+    assert error is None
+
+
+def test_outer_sanity_check_skips_motion_floor_for_unparseable_replay(tmp_path):
+    out_dir = tmp_path / "run"
+    out_dir.mkdir()
+    _write_valid_scene(out_dir)
+    _write_real_images(out_dir)
+    (out_dir / "replay.json").write_text(json.dumps({"rules": ["x"], "no_positions": True}))
+
+    ok, error = outer_sanity_check(str(out_dir))
+    assert ok is True  # unknown shape -> motion floor skipped, not failed
+    assert error is None
+
+
 def test_outer_sanity_check_fails_for_malformed_scene(tmp_path):
     out_dir = tmp_path / "run"
     out_dir.mkdir()
@@ -280,6 +374,55 @@ def test_outer_sanity_check_fails_when_scene_json_missing(tmp_path):
     ok, error = outer_sanity_check(str(out_dir))
     assert ok is False
     assert "did not produce" in error
+
+
+# --- the deterministic validator runs on the sandbox scene (geometry enforced, rest recorded) ---
+
+
+def test_outer_sanity_check_enforces_out_of_bounds(tmp_path):
+    out_dir = tmp_path / "run"
+    out_dir.mkdir()
+    scene = _write_valid_scene(out_dir)
+    scene["agent"]["x"] = 99  # outside the 4x4 grid
+    (out_dir / "scene.json").write_text(json.dumps(scene))
+    _write_real_images(out_dir)
+
+    ok, error = outer_sanity_check(str(out_dir))
+    assert ok is False and "OUT_OF_BOUNDS" in error
+
+
+def test_outer_sanity_check_enforces_duplicate_id(tmp_path):
+    out_dir = tmp_path / "run"
+    out_dir.mkdir()
+    scene = _write_valid_scene(out_dir)
+    scene["objects"] = [{"id": "agent", "type": "box", "x": 2, "y": 2}]  # id collides with the agent
+    (out_dir / "scene.json").write_text(json.dumps(scene))
+    _write_real_images(out_dir)
+
+    ok, error = outer_sanity_check(str(out_dir))
+    assert ok is False and "DUPLICATE_ID" in error
+
+
+def test_outer_sanity_check_does_not_enforce_vocabulary_specific_errors(tmp_path):
+    # A scene with an undeclared custom object type is invalid to the deterministic validator
+    # (UNSUPPORTED_OBJECT_TYPE) but legitimate for the sandbox (its code handles the type). The outer
+    # check must NOT fail it -- geometry is fine -- it's recorded, not enforced.
+    from infinienv.sandbox.workspace import deterministic_validation_summary
+
+    out_dir = tmp_path / "run"
+    out_dir.mkdir()
+    scene = _write_valid_scene(out_dir)
+    scene["objects"] = [{"id": "w1", "type": "widget", "x": 2, "y": 2}]  # 'widget' is not a built-in type
+    (out_dir / "scene.json").write_text(json.dumps(scene))
+    _write_real_images(out_dir)
+
+    ok, error = outer_sanity_check(str(out_dir))
+    assert ok is True and error is None  # geometry is fine; vocabulary error not enforced
+
+    summary = deterministic_validation_summary(str(out_dir))
+    assert summary["ran"] is True and summary["valid"] is False
+    assert "UNSUPPORTED_OBJECT_TYPE" in summary["errors"]  # recorded for transparency
+    assert summary["enforced_codes"] == ["DUPLICATE_ID", "OUT_OF_BOUNDS"]
 
 
 def test_outer_sanity_check_fails_for_truncated_replay_gif(tmp_path):

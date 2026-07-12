@@ -81,6 +81,11 @@ if assets_mode != "none":
 
     entries, asset_notes = resolve_assets(scene, assets_mode, os.path.abspath("asset_cache"))
     asset_paths = {t: e.path for t, e in entries.items() if e.path}
+    # This script hands asset_paths straight to save_render_png/save_replay_gif, which paste every
+    # resolved sprite for you. If you REWRITE this into a custom draw loop (continuous positions),
+    # paste through engine.rendering.SpriteBook(asset_paths) and assert not book.unused_keys()
+    # before finishing -- that catches the recurring bug of resolving nice sprites then drawing
+    # primitives anyway, or asking for a key that doesn't match what was resolved.
 
 metrics = {
     "success": bool(validation.valid and solve.success),
@@ -230,6 +235,92 @@ async def extract_artifacts(session, out_dir: str) -> dict[str, str]:
     return paths
 
 
+# Teleport detector: how many times larger than the 90th-percentile step a single-frame move
+# must be to count as an egregious jump. Smooth run/jump motion has per-frame steps bounded by
+# velocity, so no step exceeds a few x the p90; a `pos = target` snap is a 10-30x spike. 6x is
+# conservative -- it catches real teleports (the observed case was ~15-30x) while leaving normal
+# motion, and even a fast projectile, well under the bar.
+_TELEPORT_STEP_FACTOR = 6.0
+# Need enough steps for a p90 to be meaningful; below this the trace is too short to judge.
+_TELEPORT_MIN_STEPS = 8
+
+# Deterministic-validator error codes the sandbox outer check ENFORCES (fails + repairs). These are
+# true regardless of the fixed vocabulary the sandbox escapes -- a duplicate id or an out-of-bounds
+# coordinate is a real scene.json bug for any mechanics. Everything else the validator flags
+# (solvability, reachability, mechanics consistency, undeclared types) is vocabulary-specific and is
+# recorded, not enforced -- see outer_sanity_check / deterministic_validation_summary.
+_ENFORCED_VALIDATION_CODES = frozenset({"OUT_OF_BOUNDS", "DUPLICATE_ID"})
+
+
+def _positions_from_replay(data: object) -> list[tuple[float, float]] | None:
+    """Best-effort extraction of the main entity's per-frame (x, y) series from a sandbox
+    replay.json's parsed contents. Sandbox agents write their own replay shapes, so this tries the
+    forms they actually produce and returns the first consistent series -- or None if nothing
+    parses, in which case the teleport check is simply skipped (never fails on an unknown shape).
+    """
+    frames = None
+    if isinstance(data, dict):
+        for key in ("trace", "frames", "states"):
+            if isinstance(data.get(key), list) and data[key]:
+                frames = data[key]
+                break
+    elif isinstance(data, list):
+        frames = data
+    if not frames:
+        return None
+
+    def _xy(frame: object) -> tuple[float, float] | None:
+        if not isinstance(frame, dict):
+            return None
+        # a nested main-entity dict with x/y
+        for ent_key in ("hero", "agent", "player"):
+            ent = frame.get(ent_key)
+            if isinstance(ent, dict) and _is_num(ent.get("x")) and _is_num(ent.get("y")):
+                return float(ent["x"]), float(ent["y"])
+        # top-level x/y
+        if _is_num(frame.get("x")) and _is_num(frame.get("y")):
+            return float(frame["x"]), float(frame["y"])
+        # a pos/position 2-sequence
+        for pos_key in ("pos", "position"):
+            p = frame.get(pos_key)
+            if isinstance(p, (list, tuple)) and len(p) >= 2 and _is_num(p[0]) and _is_num(p[1]):
+                return float(p[0]), float(p[1])
+        return None
+
+    positions = [xy for xy in (_xy(f) for f in frames) if xy is not None]
+    # require the position to be present in (nearly) every frame -- a partial series means we
+    # guessed the wrong shape, so don't judge it.
+    if len(positions) < max(_TELEPORT_MIN_STEPS + 1, int(0.8 * len(frames))):
+        return None
+    return positions
+
+
+def _is_num(v: object) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _teleport_frame(positions: list[tuple[float, float]]) -> tuple[int, float, float] | None:
+    """The first single-frame step that is an egregious outlier (a teleport), as
+    (frame_index, jump_distance, normal_p90_step), or None if the motion is smooth enough. Scale-
+    free: uses the step distribution itself, so it works whether the trace is in pixels or tiles."""
+    import math
+
+    steps = [
+        math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(positions, positions[1:])
+    ]
+    if len(steps) < _TELEPORT_MIN_STEPS:
+        return None
+    ordered = sorted(steps)
+    p90 = ordered[min(len(ordered) - 1, int(0.9 * len(ordered)))]
+    if p90 <= 0:
+        return None  # essentially motionless -- nothing to compare against
+    threshold = _TELEPORT_STEP_FACTOR * p90
+    for i, step in enumerate(steps):
+        if step > threshold:
+            return i, step, p90
+    return None
+
+
 def outer_sanity_check(out_dir: str) -> tuple[bool, str | None]:
     """Re-parse the sandbox's declared scene.json with the REAL, unmodified schema.
 
@@ -247,19 +338,45 @@ def outer_sanity_check(out_dir: str) -> tuple[bool, str | None]:
     `Image.verify()` and an `n_frames` check) but malformed LZW-compressed pixel data in every
     frame, which `Image.verify()` does not catch because it validates container structure, not
     pixel data -- `ffmpeg`/a real per-frame `.load()` both fail on it with "LZW decode failed".
+
+    It also applies one *heuristic* motion floor: it best-effort-parses replay.json and fails a
+    run whose main entity makes an egregious single-frame position jump (a teleport). This modestly
+    widens the check from "the artifacts are well-formed" to "the motion isn't physically absurd" --
+    still not a semantic-correctness guarantee (it can't judge whether the game's *rules* are real,
+    which is the boundary this mode exists at), just a floor against the specific, repeatedly-
+    observed failure of an agent assigning a position straight to a target instead of moving there.
+    Best-effort: if replay.json's shape isn't recognized, the motion floor is skipped, never a
+    false failure.
     """
     from PIL import Image
 
     from infinienv.schema.scene_schema import scene_spec_from_dict
+
+    from infinienv.validation.validator import validate_scene
 
     scene_path = os.path.join(out_dir, "scene.json")
     if not os.path.exists(scene_path):
         return False, "sandbox did not produce scene.json"
     try:
         with open(scene_path) as f:
-            scene_spec_from_dict(json.load(f))
+            scene = scene_spec_from_dict(json.load(f))
     except Exception as exc:
         return False, f"sandbox's scene.json does not parse against the real schema: {exc}"
+
+    # Run the REAL deterministic validator on the scene and ENFORCE its vocabulary-agnostic geometry
+    # checks: a scene.json with an out-of-bounds coordinate or a duplicate id is a genuine bug no
+    # matter what mechanics the agent's code implements, so those fail the outer check and feed the
+    # repair loop. The fixed-vocabulary-dependent checks (solvability, reachability-via-fixed-actions,
+    # mechanics consistency, undeclared custom types) are NOT enforced here -- a sandbox scene
+    # legitimately escapes them (its real gameplay and win conditions live in run_scene.py, its
+    # object types may be custom) -- they're recorded for transparency via
+    # `deterministic_validation_summary`. Fixed-vocabulary solvability genuinely can't transfer to
+    # arbitrary agent-authored code; the image checks below + the faithfulness audit + the agent's
+    # own trace invariants stand in for it rather than a planner guarantee being pretended.
+    geometry_errors = [e for e in validate_scene(scene).errors if e.code in _ENFORCED_VALIDATION_CODES]
+    if geometry_errors:
+        e = geometry_errors[0]
+        return False, f"sandbox's scene.json fails the deterministic validator ({e.code}): {e.message}"
 
     for name, min_bytes in (("render.png", 100), ("replay.gif", 100)):
         path = os.path.join(out_dir, name)
@@ -299,4 +416,52 @@ def outer_sanity_check(out_dir: str) -> tuple[bool, str | None]:
     except Exception as exc:
         return False, f"sandbox's replay.gif could not be decoded frame-by-frame: {exc}"
 
+    # Heuristic motion floor: fail an egregious single-frame position jump (a teleport). Best-
+    # effort -- unparseable/short/unknown-shape traces are skipped, never failed.
+    replay_path = os.path.join(out_dir, "replay.json")
+    if os.path.exists(replay_path):
+        try:
+            with open(replay_path) as f:
+                replay_data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            replay_data = None
+        if replay_data is not None:
+            positions = _positions_from_replay(replay_data)
+            if positions is not None:
+                tp = _teleport_frame(positions)
+                if tp is not None:
+                    frame_i, jump, p90 = tp
+                    return False, (
+                        f"sandbox's replay.json shows a teleport: the main entity jumped "
+                        f"{jump:.1f} between frames {frame_i} and {frame_i + 1} (normal steps ~{p90:.1f}) "
+                        f"-- move via a capped per-frame velocity, don't assign position straight to a target"
+                    )
+
     return True, None
+
+
+def deterministic_validation_summary(out_dir: str) -> dict:
+    """The full deterministic-validator verdict on the sandbox's scene.json, for `metrics.json`.
+
+    Runs the real `validate_scene` and records what the fixed-vocabulary validator thinks of the
+    scene: `valid`, the flagged error `codes`, and which of those the outer check actually
+    `enforced` (the geometry subset). This is the concrete "sandbox has the validator checks":
+    every vocabulary-agnostic geometry error is enforced (see `outer_sanity_check`), and the rest --
+    including fixed-vocabulary solvability, which genuinely can't apply to agent-authored gameplay --
+    is transparently recorded rather than pretended away."""
+    from infinienv.schema.scene_schema import scene_spec_from_dict
+    from infinienv.validation.validator import validate_scene
+
+    scene_path = os.path.join(out_dir, "scene.json")
+    try:
+        with open(scene_path) as f:
+            scene = scene_spec_from_dict(json.load(f))
+    except Exception as exc:
+        return {"ran": False, "note": f"scene.json unavailable: {exc}"}
+    result = validate_scene(scene)
+    return {
+        "ran": True,
+        "valid": result.valid,
+        "errors": [e.code for e in result.errors],
+        "enforced_codes": sorted(_ENFORCED_VALIDATION_CODES),
+    }

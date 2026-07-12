@@ -1,0 +1,41 @@
+{
+  "success": true,
+  "seed": 5,
+  "gems_collected": 2,
+  "health_remaining": 3,
+  "exit_unlocked": true,
+  "frames": 160,
+  "restart_available": true,
+  "asset_notes": [
+    "image generation unavailable for 'wall': image generation failed for 'wall': Error code: 429 - {'error': {'message': 'Rate limit reached for gpt-image-1 (for limit gpt-image) in organization org-rvbY6marGH2GL2PAz1debhCM on input-images per min: Limit 5, Used 5, Requested 1. Please try again in 12s. Visit https://platform.openai.com/account/rate-limits to learn more.', 'type': 'input-images', 'param': None, 'code': 'rate_limit_exceeded'}}"
+  ],
+  "self_check": "passed",
+  "source": "sandbox",
+  "provider": "openai_agents_sandbox",
+  "model": "gpt-5.6-terra",
+  "sandbox_self_reported_success": true,
+  "outer_sanity_passed": true,
+  "outer_sanity_error": null,
+  "missing_artifacts": [],
+  "repair_attempts": 1,
+  "repair_history": [
+    {
+      "attempt": 0,
+      "run_error": "Error running tool view_image: manifest path must be relative: /private/var/folders/4v/7p13sbkn1lg0y86d70zw11xc0000gn/T/sandbox-local-78pl0zkn/review_frames/cave_frame_0.png",
+      "outer_sanity_passed": false,
+      "outer_sanity_error": "agent run did not finish cleanly: Error running tool view_image: manifest path must be relative: /private/var/folders/4v/7p13sbkn1lg0y86d70zw11xc0000gn/T/sandbox-local-78pl0zkn/review_frames/cave_frame_0.png",
+      "missing_artifacts": []
+    },
+    {
+      "attempt": 1,
+      "run_error": null,
+      "outer_sanity_passed": true,
+      "outer_sanity_error": null,
+      "missing_artifacts": []
+    }
+  ],
+  "original_prompt": "Create a procedurally generated cave with uneven terrain, hazards, collectibles, and multiple possible paths. The player should choose a safe route to collect at least two gems before exiting., if the player moves the terrain viewbox should be shifted to see the players current position, open world game",
+  "refined_prompt": "Create a 2D side-view, open-world cave exploration platformer with a large procedurally generated cavern containing uneven floors, ledges, vertical shafts, tunnels, and several interconnected routes. The player can move left and right, jump, and climb ladders or climbable rock faces to explore. The camera/viewbox must smoothly shift to keep the player\u2019s current position visible as they travel through the larger world. Generate enough alternate passages that players can avoid dangerous sections and choose safer, longer routes or riskier shortcuts.\n\nScatter collectible gems throughout the cave, including some in exposed areas and others behind hazards or along optional branches. The player must collect at least two gems before the cave exit unlocks; reaching the unlocked exit wins the game, with a visible gem counter showing progress. Include hazards such as floor spikes, deep pits, timed falling rocks, and lava or poisonous pools, each clearly telegraphed and avoidable through careful movement and route choice. Hazards reduce a limited health supply or cause damage, while falling out of the cave or losing all health ends the run and allows a restart. Use a dark, atmospheric cave style with layered rock silhouettes, glowing gems, distinct hazard animations, and enough lighting and visual contrast for terrain and routes to remain readable.",
+  "prompt_refined": true,
+  "prompt_refine_note": null
+}

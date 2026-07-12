@@ -87,8 +87,10 @@ DEFAULT_DIFFUSION_MODEL = "stabilityai/sd-turbo"
 # still happens) only ever drops the tail of the description, never the formatting instructions
 # the rest of this pipeline (crop-to-content, background removal) depends on.
 DIFFUSION_SPRITE_PROMPT_TEMPLATE = (
-    "Clean 2D pixel art game sprite. A single isolated object filling nearly the entire frame "
-    "edge-to-edge with minimal empty margin, centered, on a plain simple background clearly "
+    "Retro 16-bit blocky pixel art game sprite built from chunky visible square pixels, a small "
+    "flat color palette, a bold dark outline, and flat cel shading -- no smooth gradients, no "
+    "photorealism, no 3D, no soft shading. A single isolated object filling nearly the entire "
+    "frame edge-to-edge with minimal empty margin, centered, on a plain simple background clearly "
     "distinct from the object, no text, no labels, no scene or background elements. "
     "Subject: {desc}"
 )
@@ -96,9 +98,11 @@ DIFFUSION_SPRITE_PROMPT_TEMPLATE = (
 # Texture tiles need no chroma-key/transparency handling at all -- they're meant to fill the
 # whole opaque canvas already, same reasoning as generator_openai.py's TEXTURE_PROMPT_TEMPLATE.
 DIFFUSION_TEXTURE_PROMPT_TEMPLATE = (
-    "Seamless tileable 2D pixel art game texture, no text, no labels. The texture must cover "
-    "the ENTIRE square canvas edge-to-edge with zero border and zero margin -- an opaque "
-    "surface filling 100% of the frame, not an isolated object. Subject: {desc}"
+    "Seamless tileable retro 16-bit blocky pixel art game texture built from chunky visible "
+    "square pixels and flat shading -- no smooth gradients, no photorealism, no soft shading. "
+    "No text, no labels. The texture must cover the ENTIRE square canvas edge-to-edge with zero "
+    "border and zero margin -- an opaque surface filling 100% of the frame, not an isolated "
+    "object. Subject: {desc}"
 )
 
 _pipeline = None

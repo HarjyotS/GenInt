@@ -175,5 +175,5 @@ def test_generate_sprite_with_a_long_description_keeps_style_instructions_intact
     long_description = "A " + "very " * 60 + "long player character description."
     generate_sprite("agent", str(tmp_path), description=long_description)
     prompt = calls[0]["prompt"]
-    assert prompt.startswith("Clean 2D pixel art game sprite")
+    assert prompt.startswith("Retro 16-bit blocky pixel art game sprite")
     assert "isolated object" in prompt.split("Subject:")[0]

@@ -21,9 +21,15 @@ class AnthropicProvider:
     name = "anthropic"
 
     def __init__(self, model: str | None = None):
-        if not os.environ.get("ANTHROPIC_API_KEY"):
+        # Read the key under InfiniEnv's own name (CL_KEY) first, falling back to a user-set
+        # ANTHROPIC_API_KEY. We pass it explicitly to the client rather than relying on the global
+        # env var, so nothing here sets ANTHROPIC_API_KEY -- keeping it unset is what lets the
+        # Claude Agent SDK sandbox backend use the claude.ai login (see CLAUDE.md section 11).
+        api_key = os.environ.get("CL_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
             raise ProviderError(
-                "ANTHROPIC_API_KEY is not set. Export it or use --provider mock for a no-key demo."
+                "No Anthropic key set. Put it in .env as CL_KEY (InfiniEnv's name for it) or export "
+                "ANTHROPIC_API_KEY, or use --provider mock for a no-key demo."
             )
         try:
             import anthropic
@@ -32,7 +38,7 @@ class AnthropicProvider:
                 "The 'anthropic' package is not installed. Install it with `pip install infinienv[anthropic]`."
             ) from exc
         self.model = model or os.environ.get("LLM_MODEL", "claude-sonnet-5")
-        self.client = anthropic.Anthropic()
+        self.client = anthropic.Anthropic(api_key=api_key)
 
     def _call(self, instructions: str, user_message: str) -> dict:
         try:
