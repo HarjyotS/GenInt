@@ -45,6 +45,13 @@ it imports the local copies below, not any installed package. You can also rewri
 entirely. The only hard requirement: by the time you finish, this directory must contain
 scene.json, metrics.json, replay.json, render.png, and replay.gif.
 
+TWO import-safety rules a rewrite MUST keep (so an external controller can play your game -- see
+the make_env contract in your instructions):
+  1. Expose a module-level `make_env()` returning a drivable episode of THIS game
+     (env.actions / env.reset() -> frame / env.step(action) -> (frame, reward, done, info)).
+  2. Keep all generation/self-play side effects under `if __name__ == "__main__":` so
+     `from run_scene import make_env` never re-runs your whole script.
+
 ASSETS_MODE (a plain-text file in this directory) controls sprite resolution, mirroring the
 project's --assets modes. If it's anything other than "none", real sprites are resolved via
 assets/resolver.py (generated through assets/generator_openai.py's OpenAI Images API call, or
@@ -63,59 +70,113 @@ from navigation.policy import solve_scene
 from render.image_export import save_render_png
 from render.replay_export import save_replay_gif
 
-with open("scene.json") as f:
-    scene = scene_spec_from_dict(json.load(f))
 
-validation = validate_scene(scene)
-solve = solve_scene(scene)
+def _load_scene():
+    with open("scene.json") as f:
+        return scene_spec_from_dict(json.load(f))
 
-assets_mode = "none"
-if os.path.exists("ASSETS_MODE"):
-    with open("ASSETS_MODE") as f:
-        assets_mode = f.read().strip() or "none"
 
-asset_paths = {}
-asset_notes = []
-if assets_mode != "none":
-    from assets.resolver import resolve_assets
+def make_env():
+    """A drivable episode of THIS world so an external controller (e.g. a vision policy) can play
+    it: env.actions / env.reset() -> PIL.Image / env.step(action) -> (PIL.Image, reward, done, info).
+    This reference version wraps the deterministic InfiniEnv (a top-down grid env). If you REWRITE
+    this file into a custom side-view game with your own physics + rendering, expose make_env() the
+    same way over YOUR game -- return the real rendered frame, your own action set, and set
+    info["won"] from your own code-defined win condition. Keep this at module level (import-safe).
 
-    entries, asset_notes = resolve_assets(scene, assets_mode, os.path.abspath("asset_cache"))
-    asset_paths = {t: e.path for t, e in entries.items() if e.path}
-    # This script hands asset_paths straight to save_render_png/save_replay_gif, which paste every
-    # resolved sprite for you. If you REWRITE this into a custom draw loop (continuous positions),
-    # paste through engine.rendering.SpriteBook(asset_paths) and assert not book.unused_keys()
-    # before finishing -- that catches the recurring bug of resolving nice sprites then drawing
-    # primitives anyway, or asking for a key that doesn't match what was resolved.
+    Render with the SAME real assets your replay uses: resolve ASSETS_MODE from the cached
+    ./asset_cache and pass them into your renderer, so the frames a player sees match
+    render.png/replay.gif -- NOT primitives. (If your own draw loop uses a SpriteBook, build it from
+    these asset_paths here too.)"""
+    from engine.env import InfiniEnv, CONTROLLER_ACTIONS
 
-metrics = {
-    "success": bool(validation.valid and solve.success),
-    "source": "sandbox",
-    "validation_passed": validation.valid,
-    "solver_success": solve.success,
-    "path_length": len(solve.actions),
-    "num_objects": len(scene.objects),
-    "num_goals": len(scene.goals),
-}
-# asset_notes carries resolve_assets()'s per-type failure reasons (e.g. a generation error) --
-# recorded even when empty is fine, but ALWAYS recorded: a sprite that silently fell back to a
-# flat colored cell with no trace of why is a real, previously-hit diagnostic dead end.
-metrics["asset_notes"] = asset_notes
-with open("metrics.json", "w") as f:
-    json.dump(metrics, f, indent=2)
+    scene = _load_scene()
 
-with open("replay.json", "w") as f:
-    json.dump(
-        {"actions": solve.actions, "trace": solve.trace, "success": solve.success},
-        f,
-        indent=2,
-        default=str,
-    )
+    asset_paths = {}
+    _mode = "none"
+    if os.path.exists("ASSETS_MODE"):
+        with open("ASSETS_MODE") as _f:
+            _mode = _f.read().strip() or "none"
+    if _mode != "none":
+        from assets.resolver import resolve_assets
 
-save_render_png(scene, "render.png", title=scene.metadata.name, asset_paths=asset_paths)
-save_replay_gif(scene, solve.actions, "replay.gif", asset_paths=asset_paths)
+        _entries, _notes = resolve_assets(scene, _mode, os.path.abspath("asset_cache"))
+        asset_paths = {t: e.path for t, e in _entries.items() if e.path}
 
-print("wrote scene.json, metrics.json, replay.json, render.png, replay.gif")
-sys.exit(0 if metrics["success"] else 1)
+    class _Episode:
+        actions = CONTROLLER_ACTIONS
+        dt = 0.2  # seconds of game time per step() -- lets the replay play in real time
+
+        def __init__(self):
+            self._env = InfiniEnv(scene, asset_paths=asset_paths)
+
+        def reset(self):
+            obs, _info = self._env.reset()
+            return obs
+
+        def step(self, action):
+            obs, reward, terminated, truncated, info = self._env.step(action)
+            return obs, reward, bool(terminated or truncated), {"won": bool(info.get("all_complete"))}
+
+    return _Episode()
+
+
+def main():
+    scene = _load_scene()
+    validation = validate_scene(scene)
+    solve = solve_scene(scene)
+
+    assets_mode = "none"
+    if os.path.exists("ASSETS_MODE"):
+        with open("ASSETS_MODE") as f:
+            assets_mode = f.read().strip() or "none"
+
+    asset_paths = {}
+    asset_notes = []
+    if assets_mode != "none":
+        from assets.resolver import resolve_assets
+
+        entries, asset_notes = resolve_assets(scene, assets_mode, os.path.abspath("asset_cache"))
+        asset_paths = {t: e.path for t, e in entries.items() if e.path}
+        # This script hands asset_paths straight to save_render_png/save_replay_gif, which paste every
+        # resolved sprite for you. If you REWRITE this into a custom draw loop (continuous positions),
+        # paste through engine.rendering.SpriteBook(asset_paths) and assert not book.unused_keys()
+        # before finishing -- that catches the recurring bug of resolving nice sprites then drawing
+        # primitives anyway, or asking for a key that doesn't match what was resolved.
+
+    metrics = {
+        "success": bool(validation.valid and solve.success),
+        "source": "sandbox",
+        "validation_passed": validation.valid,
+        "solver_success": solve.success,
+        "path_length": len(solve.actions),
+        "num_objects": len(scene.objects),
+        "num_goals": len(scene.goals),
+    }
+    # asset_notes carries resolve_assets()'s per-type failure reasons (e.g. a generation error) --
+    # recorded even when empty is fine, but ALWAYS recorded: a sprite that silently fell back to a
+    # flat colored cell with no trace of why is a real, previously-hit diagnostic dead end.
+    metrics["asset_notes"] = asset_notes
+    with open("metrics.json", "w") as f:
+        json.dump(metrics, f, indent=2)
+
+    with open("replay.json", "w") as f:
+        json.dump(
+            {"actions": solve.actions, "trace": solve.trace, "success": solve.success},
+            f,
+            indent=2,
+            default=str,
+        )
+
+    save_render_png(scene, "render.png", title=scene.metadata.name, asset_paths=asset_paths)
+    save_replay_gif(scene, solve.actions, "replay.gif", asset_paths=asset_paths)
+
+    print("wrote scene.json, metrics.json, replay.json, render.png, replay.gif")
+    return 0 if metrics["success"] else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
 '''
 
 ARTIFACT_FILES: tuple[str, ...] = ("scene.json", "metrics.json", "replay.json", "render.png", "replay.gif")
@@ -176,6 +237,168 @@ def build_workspace_dir(out_dir: str, *, assets_mode: str = "none") -> str:
         f.write(assets_mode)
 
     return workspace_dir
+
+
+_PLAN_TOOL_TEMPLATE = '''\
+#!/usr/bin/env python3
+"""Your BUILD PLAN tool -- a live todo of the PARTS OF THE PROGRAM you are building, like a coding
+agent's todo list. Drive it through this tool (not by hand-editing PLAN.json) so progress is tracked
+and shown live to the reviewer.
+
+  python plan.py show                 # print your build plan + what's left
+  python plan.py add "<build task>"   # add a concrete part of the program to build (a progress point)
+  python plan.py start <id>           # mark the task you are building NOW (shown as the current one)
+  python plan.py done <id>            # mark a task built and actually working
+  python plan.py note "<line>"        # append a line to MEMORY.md (your working memory)
+
+This is SEPARATE from REQUIREMENTS.json (what the finished game must do, which you're audited
+against). Your build tasks are the *work*, and together they must ADD UP to satisfy every
+requirement. Make each task a real part of the program -- "tile world generation", "gravity + jump
+physics", "gem pickup + counter", "exit gate logic", "HUD + win banner" -- NOT a restatement of a
+requirement. Plan the steps first (add them all), then build, marking start/done as you go.
+"""
+import json
+import sys
+
+PLAN = "PLAN.json"
+MEM = "MEMORY.md"
+
+
+def _load():
+    try:
+        with open(PLAN) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return []
+
+
+def _save(items):
+    with open(PLAN, "w") as f:
+        json.dump(items, f, indent=2)
+
+
+def _progress(items):
+    done = sum(1 for it in items if it.get("status") == "done")
+    print("PLAN_PROGRESS %d/%d done" % (done, len(items)))
+
+
+def _set(item_id, status):
+    items = _load()
+    for it in items:
+        if str(it.get("id")) == str(item_id):
+            it["status"] = status
+            _save(items)
+            print("PLAN_UPDATE %s %s" % (item_id, status))
+            _progress(items)
+            return
+    print("PLAN_ERROR: no task with id %r (run: python plan.py show)" % item_id)
+    sys.exit(2)
+
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] == "show":
+        items = _load()
+        for it in items:
+            mark = {"done": "x", "doing": ">"}.get(it.get("status"), " ")
+            print("[%s] %s: %s" % (mark, it.get("id"), it.get("task")))
+        _progress(items)
+        return
+    cmd = args[0]
+    if cmd == "add":
+        items = _load()
+        new_id = "t%d" % (len(items) + 1)
+        items.append({"id": new_id, "task": args[1] if len(args) > 1 else "", "status": "pending"})
+        _save(items)
+        print("PLAN_ADD %s: %s" % (new_id, args[1] if len(args) > 1 else ""))
+    elif cmd == "start":
+        _set(args[1], "doing")
+    elif cmd == "done":
+        _set(args[1], "done")
+    elif cmd == "note":
+        line = args[1] if len(args) > 1 else ""
+        with open(MEM, "a") as f:
+            f.write("- " + line + "\\n")
+        print("MEMORY_NOTE: " + line)
+    else:
+        print("PLAN_ERROR: unknown command %r" % cmd)
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+_MEMORY_HEADER = (
+    "# Build memory\n\n"
+    "Your working notes for this build -- decisions, invariants, gotchas. Append with "
+    "`python plan.py note \"...\"`. This persists across repair attempts, so a later attempt "
+    "inherits what you learned.\n\n"
+)
+
+
+def seed_workspace(workspace_dir: str, requirements: list[dict]) -> None:
+    """Seed the harness into the workspace (before hydration; lives in the sandbox FS + persists
+    across repair attempts):
+
+    - `REQUIREMENTS.json` -- the independently-derived acceptance criteria the run is audited against
+      (SEPARATE from the build plan; the agent doesn't tick these -- the auditor verifies them).
+    - `PLAN.json` -- the agent's live BUILD PLAN (progress points / parts of the program to build),
+      **empty to start**: the agent fills it via plan.py, and its tasks must add up to satisfy every
+      requirement. This is what the GUI's floating goals popup shows.
+    - `MEMORY.md` + `plan.py` (the tool).
+
+    Idempotent for the tool/memory; the two lists are only seeded when absent so a repair keeps the
+    agent's prior plan progress."""
+    req_path = os.path.join(workspace_dir, "REQUIREMENTS.json")
+    if not os.path.exists(req_path):
+        reqs = [
+            {
+                "id": str(it.get("id") or f"r{i}"),
+                "requirement": str(it.get("requirement") or ""),
+                "how_to_verify": str(it.get("how_to_verify") or ""),
+            }
+            for i, it in enumerate(requirements or [], start=1)
+        ]
+        with open(req_path, "w") as f:
+            json.dump(reqs, f, indent=2)
+    plan_path = os.path.join(workspace_dir, "PLAN.json")
+    if not os.path.exists(plan_path):
+        with open(plan_path, "w") as f:
+            json.dump([], f)
+    mem_path = os.path.join(workspace_dir, "MEMORY.md")
+    if not os.path.exists(mem_path):
+        with open(mem_path, "w") as f:
+            f.write(_MEMORY_HEADER)
+    with open(os.path.join(workspace_dir, "plan.py"), "w") as f:
+        f.write(_PLAN_TOOL_TEMPLATE)
+
+
+def _read_json_list(base: str, filename: str) -> list[dict]:
+    for candidate in (os.path.join(base, filename), os.path.join(base, "sandbox_workspace", filename)):
+        if os.path.exists(candidate):
+            try:
+                with open(candidate) as f:
+                    data = json.load(f)
+                return data if isinstance(data, list) else []
+            except (OSError, json.JSONDecodeError):
+                return []
+    return []
+
+
+def read_requirements(base: str) -> list[dict]:
+    """The run's REQUIREMENTS.json (acceptance criteria) -- for the auditor, metrics, final report."""
+    return _read_json_list(base, "REQUIREMENTS.json")
+
+
+def read_plan(base: str) -> list[dict]:
+    """The run's PLAN.json (the agent's build progress points) -- for metrics, the popup, repair."""
+    return _read_json_list(base, "PLAN.json")
+
+
+def open_plan_items(items: list[dict]) -> list[dict]:
+    """The still-not-done build tasks (for repair re-injection)."""
+    return [it for it in (items or []) if it.get("status") != "done"]
 
 
 def tar_directory(path: str) -> io.BytesIO:

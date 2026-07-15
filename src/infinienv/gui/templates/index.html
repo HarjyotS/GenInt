@@ -106,6 +106,15 @@
   .sandbox-note { font-size: 12px; color: var(--dim); margin-top: 14px; padding: 11px 13px;
     border: 1px dashed var(--line); border-radius: 4px; background: rgba(166,132,255,.05); display: none; }
   .sandbox-note.visible { display: block; }
+  .navigate-note { background: rgba(58,224,212,.05); }
+
+  /* ---------- mode toggle (Generate / Navigate) ---------- */
+  .modes { display: flex; gap: 0; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; margin-bottom: 20px; }
+  .mode-btn { flex: 1; padding: 9px; border: none; cursor: pointer; background: var(--surface-2);
+    color: var(--dim); font-family: var(--mono); font-size: 11px; font-weight: 700; letter-spacing: .12em;
+    text-transform: uppercase; border-right: 1px solid var(--line); transition: background .15s, color .15s; }
+  .mode-btn:last-child { border-right: none; }
+  .mode-btn.active { background: var(--gem); color: #041416; }
 
   /* recent runs — a cartridge shelf */
   .runs { margin-top: 26px; padding-top: 20px; border-top: 1px solid var(--line-soft); }
@@ -121,6 +130,7 @@
   .run-item .name.ok::before { content: "\25B8 "; color: var(--life); }
   .run-item .name.bad::before { content: "\25B8 "; color: var(--lava); }
   .run-item .name.sandbox::after { content: " \25A3"; color: var(--plasma); }
+  .run-item .name.vision::after { content: " \25CE"; color: var(--gem); }
   .empty { color: var(--faint); font-size: 12.5px; line-height: 1.6; grid-column: 1/-1;
     font-family: var(--mono); }
 
@@ -178,6 +188,48 @@
   .evt.error { border-color: rgba(255,92,108,.28); background: rgba(255,92,108,.07); }
   .evt.error .k, .evt.error .txt { color: var(--lava); }
   .evt.image .txt, .evt.status .txt, .evt.workspace .txt, .evt.refine .txt { color: var(--dim); }
+  .evt.goal { border-color: rgba(58,224,212,.28); background: rgba(58,224,212,.06); border-left: 3px solid var(--gem); }
+  .evt.goal .k { color: var(--gem); }
+  .evt.step { padding: 5px 12px; } .evt.step .txt { font-family: var(--mono); font-size: 12px; color: var(--dim); }
+  .evt.step .k { display: none; }
+  .evt.judge { border-color: rgba(255,194,74,.28); background: rgba(255,194,74,.07); border-left: 3px solid var(--coin); }
+  .evt.judge .k { color: var(--coin); }
+  .evt.todo { border-color: rgba(75,221,143,.26); background: rgba(75,221,143,.06); border-left: 3px solid var(--life); }
+  .evt.todo .k { color: var(--life); } .evt.todo .txt { font-family: var(--mono); font-size: 12px; }
+  /* checklist report */
+  .checklist { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+  .ck-item { display: flex; gap: 9px; align-items: flex-start; padding: 8px 11px; border-radius: 4px;
+    border: 1px solid var(--line-soft); background: var(--surface-2); font-size: 13px; }
+  .ck-item .box { flex: none; font-family: var(--mono); font-weight: 700; }
+  .ck-item.done .box { color: var(--life); } .ck-item.pending .box { color: var(--coin); }
+  .ck-item .req { color: var(--ink); } .ck-item .vb { color: var(--faint); font-size: 11.5px; margin-top: 2px; font-family: var(--mono); }
+
+  /* floating goals popup (live requirements tracker) */
+  .goals-popup { position: fixed; right: 22px; top: 78px; width: 310px; max-height: 74vh; z-index: 40;
+    display: none; flex-direction: column; border: 1px solid var(--line); border-radius: 6px;
+    background: rgba(12,17,40,.94); backdrop-filter: blur(9px);
+    box-shadow: 0 18px 55px -22px rgba(0,0,0,.8), 0 0 0 1px rgba(58,224,212,.08); overflow: hidden; }
+  .goals-popup.show { display: flex; animation: slidein .25s ease; }
+  .gp-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line);
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--faint); }
+  .gp-head .gp-title { cursor: pointer; user-select: none; }
+  .gp-head .gp-title::before { content: "\25BE "; color: var(--gem); }
+  .goals-popup.collapsed .gp-title::before { content: "\25B8 "; }
+  .gp-head .prog { margin-left: auto; font-weight: 700; color: var(--life); }
+  .gp-head .gp-x { cursor: pointer; color: var(--faint); padding: 0 2px; }
+  .gp-head .gp-x:hover { color: var(--lava); }
+  .gp-list { overflow-y: auto; padding: 6px; display: flex; flex-direction: column; gap: 4px; }
+  .goals-popup.collapsed .gp-list { display: none; }
+  .gp-list::-webkit-scrollbar { width: 7px; } .gp-list::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
+  .gp-item { display: flex; gap: 8px; align-items: flex-start; padding: 7px 9px; border-radius: 4px;
+    font-size: 12px; line-height: 1.4; border: 1px solid transparent; transition: background .15s, border-color .15s; }
+  .gp-item .mk { flex: none; font-family: var(--mono); font-weight: 700; margin-top: 1px; width: 12px; text-align: center; }
+  .gp-item.done { color: var(--faint); } .gp-item.done .mk { color: var(--life); } .gp-item.done .req { text-decoration: line-through; opacity: .75; }
+  .gp-item.pending { color: var(--dim); } .gp-item.pending .mk { color: var(--faint); }
+  .gp-item.current { color: var(--ink); border-color: rgba(58,224,212,.45); background: rgba(58,224,212,.09);
+    box-shadow: 0 0 14px -4px rgba(58,224,212,.4); }
+  .gp-item.current .mk { color: var(--gem); }
+  @media (max-width: 720px) { .goals-popup { display: none !important; } }
 
   /* ---------- result: verdict gauges + inventory + viewport ---------- */
   .verdicts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
@@ -226,6 +278,28 @@
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation: none !important; transition: none !important; }
   }
+  /* ---- Play mode ---- */
+  #play-stage { padding-top: 6px; }
+  .play-goal { font-size: 13px; color: var(--dim); margin-bottom: 12px; }
+  .play-goal b { color: var(--ink); }
+  .play-frame-wrap { border: 1px solid var(--line); border-radius: 6px; overflow: hidden;
+    background: var(--surface-2); display: flex; justify-content: center; align-items: center;
+    min-height: 200px; }
+  #play-frame { max-width: 100%; height: auto; display: block; image-rendering: pixelated; }
+  .play-status { margin-top: 12px; font-family: var(--mono); font-size: 12px; color: var(--dim);
+    display: flex; gap: 18px; flex-wrap: wrap; }
+  .play-status .rw { color: var(--life); }
+  .play-status .bl { color: var(--lava); }
+  .play-banner { margin-top: 14px; padding: 14px; border-radius: 6px; text-align: center;
+    font-family: var(--mono); font-weight: 700; letter-spacing: 1px; font-size: 18px; }
+  .play-banner.win { color: var(--life); border: 1px solid var(--life); background: rgba(75,221,143,.08); }
+  .play-banner.over { color: var(--coin); border: 1px solid var(--coin); background: rgba(255,194,74,.07); }
+  .play-controls { margin-top: 16px; display: flex; gap: 16px; align-items: center; flex-wrap: wrap;
+    font-family: var(--mono); font-size: 12px; color: var(--faint); }
+  .ghost-btn { margin-left: auto; padding: 7px 14px; border: 1px solid var(--line); border-radius: 4px;
+    background: var(--surface-2); color: var(--dim); cursor: pointer; font-size: 12px;
+    text-transform: uppercase; letter-spacing: .5px; }
+  .ghost-btn:hover { color: var(--ink); border-color: var(--gem); }
 </style>
 </head>
 <body>
@@ -239,62 +313,151 @@
 
 <div class="layout">
   <div class="deck">
-    <label for="prompt">Prompt &middot; compile a world</label>
-    <textarea id="prompt" placeholder="Create a museum heist where the agent must find a key, unlock a security door, crack a safe with a stethoscope, and deliver the jewel to the exit."></textarea>
-
-    <div class="sandbox-note visible">
-      A model writes and runs its own engine code in an isolated per-run copy, plays through it, and
-      repairs against an independent outer check + faithfulness audit. The scene it declares is run
-      through the real deterministic validator (bounds/ids enforced, the rest recorded). Needs an
-      OpenAI key + <code>pip install -e ".[openai]"</code>.
+    <div class="modes" id="modes">
+      <button type="button" class="mode-btn active" data-mode="generate">Generate</button>
+      <!-- Navigate (vision-policy) mode hidden for now; unhide to restore. Backend + JS left intact. -->
+      <button type="button" class="mode-btn" data-mode="navigate" style="display:none">Navigate</button>
+      <button type="button" class="mode-btn" data-mode="play">Play</button>
     </div>
 
-    <div class="checkbox-row" id="refine-row" style="margin-top:14px">
-      <input type="checkbox" id="refine_prompt" checked>
-      <label for="refine_prompt">Refine prompt &middot; expand it into a fuller spec before the handoff</label>
-    </div>
+    <div id="generate-fields">
+      <label for="prompt">Prompt &middot; compile a world</label>
+      <textarea id="prompt" placeholder="Create a museum heist where the agent must find a key, unlock a security door, crack a safe with a stethoscope, and deliver the jewel to the exit."></textarea>
 
-    <div id="backend-row">
-      <label for="sandbox_backend">Agent runtime</label>
-      <select id="sandbox_backend">
-        <option value="openai" selected>OpenAI Agents SDK (default)</option>
-        <option value="claude">Claude Agent SDK</option>
+      <div class="sandbox-note visible">
+        A model writes and runs its own engine code in an isolated per-run copy, plays through it, and
+        repairs against an independent outer check + faithfulness audit. The scene it declares is run
+        through the real deterministic validator (bounds/ids enforced, the rest recorded). Needs an
+        OpenAI key + <code>pip install -e ".[openai]"</code>.
+      </div>
+
+      <div class="checkbox-row" id="refine-row" style="margin-top:14px">
+        <input type="checkbox" id="refine_prompt" checked>
+        <label for="refine_prompt">Refine prompt &middot; expand it into a fuller spec before the handoff</label>
+      </div>
+
+      <div id="backend-row">
+        <label for="sandbox_backend">Agent runtime</label>
+        <select id="sandbox_backend">
+          <option value="openai" selected>OpenAI Agents SDK (default)</option>
+          <option value="claude">Claude Agent SDK</option>
+        </select>
+        <div class="hint">Which agent writes and runs the engine code. Interchangeable -- same
+          workspace, artifacts, and checks. Claude needs CL_KEY/ANTHROPIC_API_KEY, the
+          <code>claude</code> CLI on PATH, and <code>pip install infinienv[claude]</code>.</div>
+      </div>
+
+      <div id="model-row">
+        <label for="sandbox_model">Agent model</label>
+        <select id="sandbox_model"></select>
+        <div class="hint">Which model the agent runs as. Options change with the runtime above.
+          Runs are long and iterative, so a cheaper/faster tier is a fine default; pick a more
+          capable one for the hardest prompts.</div>
+      </div>
+
+      <label for="assets">Assets</label>
+      <select id="assets">
+        <option value="none" selected>none &middot; flat colored cells</option>
+        <option value="local">local &middot; checked-in placeholders</option>
+        <option value="generated">generated &middot; real sprites via the image API</option>
+        <option value="auto">auto &middot; generate the complex, draw simple ones locally</option>
       </select>
-      <div class="hint">Which agent writes and runs the engine code. Interchangeable -- same
-        workspace, artifacts, and checks. Claude needs CL_KEY/ANTHROPIC_API_KEY, the
-        <code>claude</code> CLI on PATH, and <code>pip install infinienv[claude]</code>.</div>
-    </div>
+      <div class="hint">Sprites the agent resolves inside its workspace.</div>
 
-    <div id="model-row">
-      <label for="sandbox_model">Agent model</label>
-      <select id="sandbox_model"></select>
-      <div class="hint">Which model the agent runs as. Options change with the runtime above.
-        Runs are long and iterative, so a cheaper/faster tier is a fine default; pick a more
-        capable one for the hardest prompts.</div>
-    </div>
-
-    <label for="assets">Assets</label>
-    <select id="assets">
-      <option value="none" selected>none &middot; flat colored cells</option>
-      <option value="local">local &middot; checked-in placeholders</option>
-      <option value="generated">generated &middot; real sprites via the image API</option>
-      <option value="auto">auto &middot; generate the complex, draw simple ones locally</option>
-    </select>
-    <div class="hint">Sprites the agent resolves inside its workspace.</div>
-
-    <div class="row">
-      <div>
-        <label for="seed">Seed</label>
-        <input type="number" id="seed" value="42">
+      <div class="row">
+        <div>
+          <label for="seed">Seed</label>
+          <input type="number" id="seed" value="42">
+        </div>
+        <div>
+          <label for="max_repair_attempts">Max repair attempts</label>
+          <input type="number" id="max_repair_attempts" placeholder="default: 2">
+        </div>
       </div>
-      <div>
-        <label for="max_repair_attempts">Max repair attempts</label>
-        <input type="number" id="max_repair_attempts" placeholder="default: 2">
+
+      <label for="out">Output directory</label>
+      <input type="text" id="out" placeholder="auto: runs/gui_&lt;timestamp&gt;">
+    </div>
+
+    <div id="navigate-fields" style="display:none">
+      <div class="sandbox-note navigate-note visible">
+        A pixel-only <b>vision policy</b> plays a generated world seeing only rendered frames, and a
+        <b>code-defined</b> reward (<code>is_goal_complete</code>) decides success &mdash; never the
+        pixels. A naive VLM-on-pixels verdict is recorded beside it, so a disagreement shows why the
+        code signal is the trustworthy one. Needs a vision key.
+      </div>
+
+      <label for="scene">Scene &middot; a world to play</label>
+      <select id="scene"></select>
+      <div class="hint">Curated <b>example</b> worlds, or any world you generated (<b>run</b>,
+        including sandbox). A <b>sandbox</b> world is played <b>faithfully</b> &mdash; the vision
+        policy drives its real game (its own side-view frames + physics + win) inside the sandbox.
+        A deterministic/example scene is played through the top-down engine. Either way, success is
+        judged by code.</div>
+
+      <div class="row">
+        <div>
+          <label for="vision_backend">Vision backend</label>
+          <select id="vision_backend">
+            <option value="openai" selected>OpenAI</option>
+            <option value="claude">Claude</option>
+          </select>
+        </div>
+        <div>
+          <label for="vision_model">Vision model</label>
+          <select id="vision_model"></select>
+        </div>
+      </div>
+
+      <label for="nav_assets">Assets</label>
+      <select id="nav_assets">
+        <option value="none" selected>none &middot; flat colored cells</option>
+        <option value="local">local &middot; checked-in placeholders</option>
+        <option value="generated">generated &middot; real sprites via the image API</option>
+        <option value="auto">auto &middot; generate the complex, draw simple ones locally</option>
+      </select>
+      <div class="hint">Sprites drawn into the frames the policy sees.</div>
+
+      <div class="row">
+        <div>
+          <label for="max_steps">Max steps</label>
+          <input type="number" id="max_steps" placeholder="default: auto">
+        </div>
+        <div>
+          <label for="nav_out">Output directory</label>
+          <input type="text" id="nav_out" placeholder="auto: runs/nav_&lt;timestamp&gt;">
+        </div>
+      </div>
+
+      <div class="checkbox-row" style="margin-top:16px">
+        <input type="checkbox" id="judge" checked>
+        <label for="judge">Judge with a VLM &middot; a pixel verdict for contrast against the code truth</label>
       </div>
     </div>
 
-    <label for="out">Output directory</label>
-    <input type="text" id="out" placeholder="auto: runs/gui_&lt;timestamp&gt;">
+    <div id="play-fields" style="display:none">
+      <div class="sandbox-note visible">
+        Play a world yourself with the <b>keyboard</b>. You drive the deterministic engine
+        (<code>InfiniEnv</code>) directly &mdash; arrow keys / WASD to move, <b>Space</b> or <b>E</b> to
+        interact &mdash; and reaching the goal is judged <b>by code</b> (<code>is_goal_complete</code>),
+        never the pixels. Works for every scene; a sandbox world plays as its declared top-down layout.
+      </div>
+
+      <label for="play_scene">Scene &middot; a world to play</label>
+      <select id="play_scene"></select>
+      <div class="hint">Curated <b>example</b> worlds, or any world you generated (<b>run</b>).</div>
+
+      <label for="play_assets">Assets</label>
+      <select id="play_assets">
+        <option value="world" selected>world &middot; this run's autogenerated sprites</option>
+        <option value="none">none &middot; flat colored cells</option>
+        <option value="local">local &middot; checked-in placeholders</option>
+        <option value="generated">generated &middot; real sprites via the image API</option>
+        <option value="auto">auto &middot; generate the complex, draw simple ones locally</option>
+      </select>
+      <div class="hint">Default reuses the sprites the world was generated with (no new API calls);
+        a curated example world with no generated sprites falls back to flat cells.</div>
+    </div>
 
     <button id="generate">Compile world</button>
 
@@ -314,14 +477,18 @@
 
     <div id="result" style="display:none">
       <div class="verdicts" id="verdicts"></div>
+      <div id="checklist-block" style="display:none">
+        <div class="section-h" id="checklist-head">Requirements &middot; true to the prompt</div>
+        <div class="checklist" id="checklist-list"></div>
+      </div>
       <div id="assets-block" style="display:none">
         <div class="section-h">Assets used</div>
         <div class="assets-grid" id="assets-grid"></div>
         <div class="notes" id="asset-notes"></div>
       </div>
       <div class="media" id="media" style="display:none">
-        <figure><img id="render-img" alt="render.png"><figcaption>render.png</figcaption></figure>
-        <figure><img id="replay-img" alt="replay.gif"><figcaption>replay.gif</figcaption></figure>
+        <figure id="fig-render"><img id="render-img" alt="render.png"><figcaption id="cap-render">render.png</figcaption></figure>
+        <figure id="fig-replay"><img id="replay-img" alt="replay.gif"><figcaption id="cap-replay">replay.gif</figcaption></figure>
       </div>
       <details id="refine-details" style="display:none"><summary>Refined prompt (what the agent was actually given)</summary><pre class="scene" id="refine-text"></pre></details>
       <details id="summary-details" style="display:none"><summary>Agent summary</summary><pre class="scene" id="agent-summary"></pre></details>
@@ -329,7 +496,28 @@
       <details id="metrics-details" style="display:none"><summary>All metrics</summary><table class="metrics" id="metrics-table"></table></details>
       <details id="rawlog-details" style="display:none"><summary>Raw log</summary><div class="log" id="log"></div></details>
     </div>
+
+    <div id="play-stage" style="display:none">
+      <div class="play-goal" id="play-goal"></div>
+      <div class="play-frame-wrap"><img id="play-frame" alt="game frame"></div>
+      <div class="play-status" id="play-status"></div>
+      <div class="play-banner" id="play-banner" style="display:none"></div>
+      <div class="play-controls">
+        <span>&#8592;&#8593;&#8595;&#8594; / WASD move</span>
+        <span>Space / E interact</span>
+        <button type="button" id="play-restart" class="ghost-btn">Restart</button>
+      </div>
+    </div>
   </div>
+</div>
+
+<div class="goals-popup" id="goals-popup">
+  <div class="gp-head">
+    <span class="gp-title" id="goals-title">Build plan</span>
+    <span class="prog" id="goals-prog"></span>
+    <span class="gp-x" id="goals-x" title="hide">&times;</span>
+  </div>
+  <div class="gp-list" id="goals-list"></div>
 </div>
 
 <script>
@@ -338,6 +526,57 @@ const logEl = $('log'), bannerEl = $('banner'), mediaEl = $('media');
 const feedEl = $('feed'), phasebar = $('phasebar'), phaseStepsEl = $('phase-steps'), phaseMetaEl = $('phase-meta');
 const resultEl = $('result'), verdictsEl = $('verdicts');
 const assetsBlock = $('assets-block'), assetsGrid = $('assets-grid'), assetNotesEl = $('asset-notes');
+const checklistBlock = $('checklist-block'), checklistList = $('checklist-list');
+const goalsPopup = $('goals-popup'), goalsList = $('goals-list'), goalsProg = $('goals-prog');
+
+// ---- floating goals popup: live requirements tracker, highlights the current item ----
+let goals = [];
+function resetGoals() { goals = []; goalsPopup.classList.remove('show', 'collapsed'); }
+const goalById = (id) => goals.find((g) => g.id === id);
+function currentGoalIndex() {
+  let i = goals.findIndex((g) => g.status === 'doing');   // what the agent said it's on
+  if (i < 0) i = goals.findIndex((g) => g.status !== 'done');  // else the first not-yet-done
+  return i;
+}
+function renderGoals() {
+  if (!goals.length) { goalsPopup.classList.remove('show'); return; }
+  const done = goals.filter((g) => g.status === 'done').length;
+  goalsProg.textContent = done + '/' + goals.length;
+  const cur = currentGoalIndex();
+  goalsList.innerHTML = goals.map((g, i) => {
+    const cls = g.status === 'done' ? 'done' : (i === cur ? 'current' : 'pending');
+    const mk = g.status === 'done' ? '✓' : (i === cur ? '▶' : '○');
+    return `<div class="gp-item ${cls}"><div class="mk">${mk}</div><div class="req">${g.requirement || ''}</div></div>`;
+  }).join('');
+  goalsPopup.classList.add('show');
+  const curEl = goalsList.children[cur]; if (curEl && !goalsPopup.classList.contains('collapsed')) curEl.scrollIntoView({block: 'nearest'});
+}
+// The popup tracks the agent's BUILD PLAN (parts of the program it's building), not the requirements.
+// Fed from plan.py's clean OUTPUT lines (PLAN_ADD/PLAN_UPDATE, with real ids) that the harness
+// surfaces -- NOT the shell command lines (which break on `&&` chaining / quoting). A message may
+// carry several lines (a chained command's combined output), so process each.
+function handleTodoLine(message) {
+  message.split('\n').forEach((line) => {
+    let m;
+    if ((m = line.match(/^PLAN_ADD\s+(\S+):\s*(.*)$/))) {          // a build task was added
+      if (!goalById(m[1])) goals.push({id: m[1], requirement: m[2].trim(), status: 'pending'});
+      renderGoals();
+    } else if ((m = line.match(/^PLAN_UPDATE\s+(\S+)\s+(done|doing)/))) {  // a task started/finished
+      const g = goalById(m[1]);
+      if (m[2] === 'doing') goals.forEach((x) => { if (x.status === 'doing') x.status = 'pending'; });
+      if (g) g.status = m[2];
+      renderGoals();
+    }
+  });
+}
+function syncGoalsFromChecklist(items) {  // authoritative final build plan from metrics.build_plan
+  if (!items || !items.length) return;
+  goals = items.map((it) => ({id: it.id, requirement: it.task || it.requirement,
+    status: it.status === 'done' ? 'done' : it.status === 'doing' ? 'doing' : 'pending'}));
+  renderGoals();
+}
+$('goals-title').addEventListener('click', () => goalsPopup.classList.toggle('collapsed'));
+$('goals-x').addEventListener('click', () => goalsPopup.classList.remove('show'));
 const metricsEl = $('metrics-table'), metricsDetails = $('metrics-details'), rawlogDetails = $('rawlog-details');
 const sceneDetails = $('scene-details'), sceneJson = $('scene-json');
 const summaryDetails = $('summary-details'), agentSummaryEl = $('agent-summary');
@@ -353,15 +592,19 @@ const KINDS = {
   image:     {ic:'▤', label:'Reviewed frame'},
   agent:     {ic:'▸', label:'Agent'},
   audit:     {ic:'◈', label:'Audit'},
+  goal:      {ic:'◎', label:'Goal'},
+  step:      {ic:'▸', label:'Step'},
+  judge:     {ic:'◈', label:'VLM judge'},
+  todo:      {ic:'☑', label:'Checklist'},
   error:     {ic:'✕', label:'Failed'},
   status:    {ic:'·', label:'Status'},
 };
-const PHASES = ['Refine', 'Build', 'Audit', 'Done'];
+let PHASES = ['Refine', 'Build', 'Audit', 'Done'];
 let runTimer = null, runStart = 0, curPhase = -1;
 
 function setPhase(name) {
   const i = PHASES.indexOf(name);
-  if (i < curPhase) return;
+  if (i === -1 || i < curPhase) return;
   curPhase = i;
   phaseStepsEl.querySelectorAll('.phase-step').forEach((el, idx) => {
     el.className = 'phase-step' + (idx < curPhase ? ' done' : idx === curPhase ? ' active' : '');
@@ -384,6 +627,7 @@ function attemptDivider(label) {
 let lastAttemptText = '';
 function pushEvent(kind, message) {
   logLine(message); // keep the full raw text in the collapsible raw log
+  handleTodoLine(message); // feed the floating goals tracker (seeds + todo.py updates)
   if (kind === 'refine' && message.startsWith('Refined prompt')) {
     const body = message.replace(/^Refined prompt[^:]*:\s*/, '');
     refineTextEl.textContent = body; refineDetails.style.display = 'block';
@@ -395,6 +639,8 @@ function pushEvent(kind, message) {
     if (/^Running|^Repairing/.test(message)) { setPhase('Build'); attemptDivider(m ? `Attempt ${m[1]}` : 'Attempt'); return; }
   }
   if (kind === 'audit') setPhase('Audit');
+  if (kind === 'step' || kind === 'goal') setPhase('Play');
+  if (kind === 'judge') setPhase('Judge');
   const meta = KINDS[kind] || KINDS.status;
   let txt = message;
   if (kind === 'command') txt = message.replace(/^\$\s*/, '');
@@ -444,6 +690,126 @@ function populateModelOptions() {
 backendSelect.addEventListener('change', populateModelOptions);
 populateModelOptions();
 
+// ---- mode toggle: Generate <-> Navigate ----
+let mode = 'generate';
+const genFields = $('generate-fields'), navFields = $('navigate-fields');
+const visionBackend = $('vision_backend'), visionModel = $('vision_model');
+function setMode(m) {
+  mode = m;
+  document.querySelectorAll('.mode-btn').forEach((b) => b.classList.toggle('active', b.dataset.mode === m));
+  genFields.style.display = m === 'generate' ? 'block' : 'none';
+  navFields.style.display = m === 'navigate' ? 'block' : 'none';
+  $('play-fields').style.display = m === 'play' ? 'block' : 'none';
+  genBtn.textContent = m === 'generate' ? 'Compile world' : (m === 'navigate' ? 'Run vision policy' : 'Start playing');
+  // Play uses its own stage in the right panel; the generate/navigate feed+result are hidden there.
+  const inPlay = m === 'play';
+  if (inPlay) { stopPlay(); $('feed').style.display = 'none'; $('result').style.display = 'none'; $('banner').style.display = 'none'; }
+  else { $('play-stage').style.display = 'none'; $('feed').style.display = ''; }
+}
+document.querySelectorAll('.mode-btn').forEach((b) => b.addEventListener('click', () => setMode(b.dataset.mode)));
+
+// The vision-model picker reuses the same account model lists as the sandbox picker.
+function populateVisionModels() {
+  const opts = SANDBOX_MODELS[visionBackend.value] || SANDBOX_MODELS.openai;
+  visionModel.innerHTML = '';
+  for (const [value, label] of opts) {
+    const o = document.createElement('option'); o.value = value; o.textContent = label; visionModel.appendChild(o);
+  }
+}
+visionBackend.addEventListener('change', populateVisionModels);
+populateVisionModels();
+
+async function loadScenes() {
+  try {
+    const res = await fetch('/api/scenes');
+    const data = await res.json();
+    for (const id of ['scene', 'play_scene']) {
+      const sel = $(id); if (!sel) continue;
+      sel.innerHTML = '';
+      for (const s of data.scenes) {
+        const o = document.createElement('option'); o.value = s.path; o.textContent = s.label; sel.appendChild(o);
+      }
+    }
+    const demo = [...$('scene').options].find((o) => o.value.endsWith('vision_demo.json'));
+    if (demo) $('scene').value = demo.value;  // default to the small purpose-built demo scene
+  } catch (e) {}
+}
+loadScenes();
+
+// ---- Play mode: drive the deterministic engine with the keyboard ----
+let playSession = null;   // active session id, or null
+let playBusy = false;     // one step in flight (avoid key spamming outrunning the server)
+const KEY_ACTION = {
+  ArrowUp: 'forward', KeyW: 'forward', ArrowDown: 'back', KeyS: 'back',
+  ArrowLeft: 'left', KeyA: 'left', ArrowRight: 'right', KeyD: 'right',
+  Space: 'interact', KeyE: 'interact', KeyF: 'interact', Enter: 'interact',
+};
+
+function renderPlay(d) {
+  $('play-frame').src = d.frame;
+  $('play-status').innerHTML =
+    `<span>step ${d.steps} / ${d.max_steps}</span>` +
+    (d.resolved ? `<span>last: ${d.resolved}${d.legal === false ? ' <b class="bl">(blocked)</b>' : ''}</span>` : '') +
+    (typeof d.reward === 'number' && d.reward > 0 ? `<span class="rw">+${d.reward} reward</span>` : '');
+  const banner = $('play-banner');
+  if (d.won) { banner.textContent = 'YOU WIN'; banner.className = 'play-banner win'; banner.style.display = 'block'; }
+  else if (d.done) { banner.textContent = 'OUT OF STEPS'; banner.className = 'play-banner over'; banner.style.display = 'block'; }
+  else { banner.style.display = 'none'; }
+}
+
+async function startPlay() {
+  const scene = $('play_scene').value;
+  if (!scene) { alert('Pick a scene first.'); return; }
+  stopPlay();
+  $('play-goal').textContent = 'Loading...';
+  $('play-stage').style.display = 'block';
+  genBtn.disabled = true;
+  try {
+    const res = await fetch('/api/play/start', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ scene, assets: $('play_assets').value }),
+    });
+    const d = await res.json();
+    if (!res.ok) { $('play-goal').textContent = 'Error: ' + d.error; genBtn.disabled = false; return; }
+    playSession = d.session_id;
+    $('play-goal').innerHTML = '<b>Goal:</b> ' + (d.goal || 'reach the objective');
+    renderPlay(d);
+  } catch (e) {
+    $('play-goal').textContent = 'Request failed: ' + e;
+  }
+  genBtn.disabled = false;
+}
+
+function stopPlay() {
+  playSession = null; playBusy = false;
+  $('play-banner').style.display = 'none';
+}
+
+async function playStep(action) {
+  if (!playSession || playBusy) return;
+  playBusy = true;
+  try {
+    const res = await fetch('/api/play/step', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ session_id: playSession, action }),
+    });
+    const d = await res.json();
+    if (!res.ok) { playBusy = false; return; }
+    renderPlay(d);
+    if (d.done) playSession = null;  // episode over; Restart begins a fresh one
+  } catch (e) {}
+  playBusy = false;
+}
+
+document.addEventListener('keydown', (e) => {
+  if (mode !== 'play' || !playSession) return;
+  const action = KEY_ACTION[e.code];
+  if (!action) return;
+  e.preventDefault();  // don't scroll the page on arrows/space
+  playStep(action);
+});
+$('play-restart').addEventListener('click', startPlay);
+
 function logLine(text) {
   const div = document.createElement('div');
   div.className = 'line';
@@ -455,27 +821,34 @@ function logLine(text) {
 function resetLog() {
   logEl.innerHTML = '';
   feedEl.innerHTML = '';
+  resetGoals();
   bannerEl.style.display = 'none';
   resultEl.style.display = 'none';
   assetsBlock.style.display = 'none';
+  checklistBlock.style.display = 'none';
   mediaEl.style.display = 'none';
   refineDetails.style.display = 'none';
   sceneDetails.style.display = 'none';
   summaryDetails.style.display = 'none';
   metricsDetails.style.display = 'none';
   rawlogDetails.style.display = 'none';
+  // Restore the default two-figure media layout (a navigate run hides the second figure).
+  $('fig-replay').style.display = '';
+  $('cap-render').textContent = 'render.png';
+  const stale = document.getElementById('nav-extra'); if (stale) stale.remove();
   curPhase = -1;
 }
 
 function startRun() {
   resetLog();
+  PHASES = mode === 'navigate' ? ['Play', 'Judge', 'Done'] : ['Refine', 'Build', 'Audit', 'Done'];
   renderPhaseSteps();
   phasebar.style.display = 'flex';
   document.body.classList.add('building');
   runStart = Date.now();
   clearInterval(runTimer);
   runTimer = setInterval(() => setMeta(lastAttemptText), 500);
-  setPhase('Refine');
+  setPhase(mode === 'navigate' ? 'Play' : 'Refine');
   setMeta('');
 }
 function stopTimer() { clearInterval(runTimer); runTimer = null; document.body.classList.remove('building'); setMeta(lastAttemptText); }
@@ -485,6 +858,31 @@ function verdictCard(h, v, cls, sub) {
 }
 function buildResult(data) {
   const m = data.metrics || {};
+  if (data.mode === 'navigate') {
+    const judged = m.vlm_judge_success;
+    const agree = m.judge_agrees_with_code;
+    const cards = [
+      verdictCard('Vision policy', data.success ? 'Reached goal' : 'Did not reach',
+        data.success ? 'ok' : 'bad', 'judged by code — is_goal_complete'),
+      verdictCard('VLM on pixels', judged == null ? 'n/a' : (judged ? 'Says done' : 'Says not done'),
+        judged == null ? 'warn' : (judged ? 'ok' : 'bad'), 'a guess from the final frame alone'),
+      verdictCard('Agreement', agree == null ? 'n/a' : (agree ? 'Agrees' : 'Disagrees'),
+        agree === false ? 'warn' : (agree ? 'ok' : 'warn'),
+        agree === false ? 'the code signal is the trustworthy one' : 'code vs. pixels'),
+      verdictCard('Steps', `${m.steps ?? '?'} / ${m.max_steps ?? '?'}`, '',
+        `${m.model || ''}${m.backend ? ' · ' + m.backend : ''}`),
+    ];
+    verdictsEl.innerHTML = cards.join('');
+    if (m.goal_text) {
+      const g = document.createElement('div');
+      g.id = 'nav-extra';
+      g.style.cssText = 'font-size:12.5px;color:var(--dim);margin-top:12px;font-family:var(--mono)';
+      g.innerHTML = `<span style="color:var(--faint)">GOAL GIVEN TO THE POLICY:</span> ${m.goal_text}`;
+      verdictsEl.after(g);
+    }
+    resultEl.style.display = 'block';
+    return;
+  }
   const cards = [verdictCard('Result', data.success ? 'Success' : 'Failed', data.success ? 'ok' : 'bad')];
   if (data.sandbox) {
     cards.push(verdictCard('Outer sanity check', m.outer_sanity_passed ? 'Passed' : 'Failed',
@@ -505,6 +903,21 @@ function buildResult(data) {
     verdictsEl.after(d);
   }
   resultEl.style.display = 'block';
+}
+// The acceptance criteria (requirements) + how the independent audit judged them. Separate from the
+// build plan (the floating popup) -- these are the "what the game must do", audited as a whole.
+function buildChecklist(items, metrics) {
+  if (!items || !items.length) { checklistBlock.style.display = 'none'; return; }
+  metrics = metrics || {};
+  const met = metrics.audited && metrics.audit_passed;  // audit passed => every requirement met
+  const verdict = metrics.audited
+    ? (metrics.audit_passed ? 'independently audited &mdash; all met' : 'independent audit found a gap')
+    : 'not independently audited';
+  $('checklist-head').innerHTML = `Requirements &middot; ${verdict}`;
+  checklistList.innerHTML = items.map((it) =>
+    `<div class="ck-item ${met ? 'done' : 'pending'}"><div class="box">${met ? '×' : '•'}</div>`
+    + `<div><div class="req">${it.requirement || ''}</div></div></div>`).join('');
+  checklistBlock.style.display = 'block';
 }
 function buildAssets(assets) {
   if (!assets || !assets.items || !assets.items.length) { assetsBlock.style.display = 'none'; return; }
@@ -527,6 +940,7 @@ async function loadRuns() {
     item.className = 'run-item';
     let statusClass = run.success === true ? 'ok' : run.success === false ? 'bad' : '';
     if (run.sandbox) statusClass += ' sandbox';
+    if (run.vision) statusClass += ' vision';
     item.innerHTML = `
       <img src="${run.render_url || ''}" onerror="this.style.opacity=0.15" alt="${run.name}">
       <div class="name ${statusClass}">${run.name}</div>`;
@@ -538,9 +952,16 @@ async function loadRuns() {
 function showRun(run) {
   resetLog();
   phasebar.style.display = 'none';
-  feedEl.innerHTML = `<div class="empty">Showing existing world: ${run.name}${run.sandbox ? ' (sandbox)' : ''}.<br>Compile a new one to watch the live build.</div>`;
+  const kind = run.sandbox ? ' (sandbox)' : run.vision ? ' (vision)' : '';
+  feedEl.innerHTML = `<div class="empty">Showing existing world: ${run.name}${kind}.<br>Compile a new one to watch the live build.</div>`;
   resultEl.style.display = 'block';
-  if (run.render_url || run.replay_url) {
+  if (run.vision) {
+    // A vision run's only visual is episode.gif -- show it alone.
+    mediaEl.style.display = 'grid';
+    $('fig-replay').style.display = 'none';
+    $('cap-render').textContent = 'episode.gif · the frames the policy saw';
+    $('render-img').src = run.replay_url || run.render_url || '';
+  } else if (run.render_url || run.replay_url) {
     mediaEl.style.display = 'grid';
     $('render-img').src = run.render_url || '';
     $('replay-img').src = run.replay_url || '';
@@ -548,30 +969,36 @@ function showRun(run) {
 }
 
 $('generate').addEventListener('click', async () => {
-  const prompt = $('prompt').value.trim();
-  if (!prompt) { alert('Enter a prompt first.'); return; }
+  if (mode === 'play') { startPlay(); return; }
+  let endpoint, payload;
+  if (mode === 'generate') {
+    const prompt = $('prompt').value.trim();
+    if (!prompt) { alert('Enter a prompt first.'); return; }
+    endpoint = '/api/generate';
+    payload = {
+      prompt, sandbox: true, seed: $('seed').value, assets: $('assets').value,
+      max_repair_attempts: $('max_repair_attempts').value, out: $('out').value,
+      refine_prompt: $('refine_prompt').checked, sandbox_backend: $('sandbox_backend').value,
+      sandbox_model: $('sandbox_model').value,
+    };
+  } else {
+    if (!$('scene').value) { alert('Pick a scene first.'); return; }
+    endpoint = '/api/navigate';
+    payload = {
+      scene: $('scene').value, vision_backend: $('vision_backend').value, model: $('vision_model').value,
+      assets: $('nav_assets').value, max_steps: $('max_steps').value, out: $('nav_out').value,
+      judge: $('judge').checked,
+    };
+  }
 
   startRun();
   genBtn.disabled = true;
   lastAttemptText = '';
   pushEvent('status', 'Submitting job...');
 
-  const sandbox = true;  // sandbox is the only generate mode
-  const payload = {
-    prompt,
-    sandbox,
-    seed: $('seed').value,
-    assets: $('assets').value,
-    max_repair_attempts: $('max_repair_attempts').value,
-    out: $('out').value,
-    refine_prompt: $('refine_prompt').checked,
-    sandbox_backend: $('sandbox_backend').value,
-    sandbox_model: $('sandbox_model').value,
-  };
-
   let jobId;
   try {
-    const res = await fetch('/api/generate', {
+    const res = await fetch(endpoint, {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload),
     });
     const data = await res.json();
@@ -590,12 +1017,37 @@ $('generate').addEventListener('click', async () => {
     const data = JSON.parse(ev.data);
     stopTimer();
     setPhase('Done');
+
+    if (data.mode === 'navigate') {
+      bannerEl.className = 'banner ' + (data.success ? 'success' : 'fail');
+      const vbadge = data.faithful ? 'real game · vision' : 'vision';
+      bannerEl.innerHTML = (data.success ? '✓ Goal reached (code-judged)' : '✕ Did not reach the goal')
+        + `<span class="badge">${vbadge}</span>`;
+      buildResult(data);
+      // episode.gif is the whole visual: show it alone, hide the second figure.
+      mediaEl.style.display = 'grid';
+      $('fig-replay').style.display = 'none';
+      $('cap-render').textContent = 'episode.gif · the frames the policy saw';
+      $('render-img').src = (data.episode_url || '/artifact/' + data.out_dir + '/episode.gif') + '?t=' + Date.now();
+      metricsDetails.style.display = 'block';
+      metricsEl.innerHTML = Object.entries(data.metrics).map(
+        ([k, v]) => `<tr><td>${k}</td><td>${typeof v === 'object' ? JSON.stringify(v) : v}</td></tr>`
+      ).join('');
+      rawlogDetails.style.display = 'block';
+      source.close();
+      genBtn.disabled = false;
+      loadRuns();
+      return;
+    }
+
     const badge = data.sandbox ? '<span class="badge">sandbox</span>' : '';
     bannerEl.className = 'banner ' + (data.success ? 'success' : 'fail');
     bannerEl.innerHTML = (data.success ? '✓ World compiled' : '✕ Failed — see verdicts below') + badge;
     if (data.run_error) pushEvent('error', `Agent run did not finish cleanly: ${data.run_error}`);
 
     buildResult(data);
+    buildChecklist((data.metrics || {}).requirements, data.metrics || {});  // acceptance criteria report
+    syncGoalsFromChecklist((data.metrics || {}).build_plan);  // final authoritative build-plan states
     buildAssets(data.assets);
     mediaEl.style.display = 'grid';
     $('render-img').src = '/artifact/' + data.out_dir + '/render.png?t=' + Date.now();

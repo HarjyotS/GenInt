@@ -41,14 +41,20 @@ from infinienv.sandbox.runner import (
     _interpreter_briefing,
     _load_prompt,
     _repair_message,
+    _todo_brief,
     _truncate,
 )
 from infinienv.sandbox.auditor import audit_run
+from infinienv.sandbox.checklist import build_checklist
 from infinienv.sandbox.workspace import (
     ARTIFACT_FILES,
     build_workspace_dir,
     deterministic_validation_summary,
+    open_plan_items,
     outer_sanity_check,
+    read_plan,
+    read_requirements,
+    seed_workspace,
 )
 
 DEFAULT_SANDBOX_CLAUDE_MODEL = "claude-sonnet-5"
@@ -96,16 +102,23 @@ def _describe_block(block: object) -> str | None:
         if name in ("Read", "Glob", "Grep", "TodoWrite"):
             return None  # too noisy to surface; the agent's own text covers intent
         return f"Calling tool: {name}"
-    # A failed tool result is worth surfacing; a successful one is not (its intent was announced).
+    # A tool RESULT block (has content, no name). A failed one is worth surfacing; a successful one
+    # normally isn't (its intent was announced) -- EXCEPT the plan.py progress lines, which drive the
+    # GUI build-plan popup and must be surfaced (from the clean OUTPUT, not the shell command).
+    result = getattr(block, "content", None)
+    detail = ""
+    if isinstance(result, str):
+        detail = result
+    elif isinstance(result, list):
+        detail = " ".join(str(part.get("text", "")) for part in result if isinstance(part, dict))
+    todo_lines = [
+        ln.strip()
+        for ln in detail.splitlines()
+        if ln.strip().startswith(("PLAN_ADD", "PLAN_UPDATE", "PLAN_PROGRESS", "MEMORY_NOTE"))
+    ]
+    if todo_lines:
+        return "\n".join(todo_lines)
     if getattr(block, "is_error", False):
-        result = getattr(block, "content", None)
-        detail = ""
-        if isinstance(result, str):
-            detail = result
-        elif isinstance(result, list):
-            detail = " ".join(
-                str(part.get("text", "")) for part in result if isinstance(part, dict)
-            )
         detail = detail.strip()
         return f"  tool failed{': ' + _truncate(detail, _MAX_NARRATION_CHARS) if detail else ''}"
     return None
@@ -189,6 +202,19 @@ async def _run_async(
     stage("Preparing sandbox workspace (copy of schema/engine/navigation/validation/render/assets)...")
     workspace_dir = build_workspace_dir(out_dir, assets_mode=assets_mode)
 
+    # Independent requirements checklist seeded as the agent's live TODO (+ MEMORY.md + todo.py) --
+    # identical to the OpenAI backend (see sandbox/runner.py). Claude Code also has its native
+    # TodoWrite for in-context tracking; TODO.json stays the harness-readable source of truth.
+    stage("Deriving the requirements from the prompt...")
+    checklist_result = build_checklist(prompt)
+    seed_workspace(workspace_dir, checklist_result.items)
+    if checklist_result.items:
+        stage(f"Requirements derived ({len(checklist_result.items)}); the agent will plan a build to meet them.")
+        for _it in checklist_result.items:
+            stage(f"REQ_SEED {_it['id']}: {_it['requirement']}")
+    else:
+        stage(f"Requirements not pre-derived ({checklist_result.note}); the agent will derive them itself.")
+
     options = ClaudeAgentOptions(
         cwd=workspace_dir,
         model=model,
@@ -219,7 +245,7 @@ async def _run_async(
     audit_note: str | None = None
     missing: list[str] = list(ARTIFACT_FILES)
     repair_history: list[dict] = []
-    message = f"Seed: {seed}\nTask: {prompt}\nAssets mode: {assets_mode}\n{_interpreter_briefing()}"
+    message = f"Seed: {seed}\nTask: {prompt}\nAssets mode: {assets_mode}\n{_interpreter_briefing()}{_todo_brief()}"
 
     for attempt in range(max_repair_attempts + 1):
         stage(
@@ -249,6 +275,10 @@ async def _run_async(
         # inspects and fixes its own prior files -- fresh conversation, persistent filesystem,
         # exactly as the OpenAI backend does.
         artifact_paths = _copy_artifacts_from_dir(workspace_dir, out_dir)
+        # The agent edited workspace_dir in place, so its requirements + build plan are right there.
+        requirements = read_requirements(workspace_dir)
+        plan = read_plan(workspace_dir)
+        open_todo = open_plan_items(plan)
         missing = [name for name in ARTIFACT_FILES if name not in artifact_paths]
         if run_error is None and "scene.json" in artifact_paths:
             sane, sanity_error = outer_sanity_check(out_dir)
@@ -269,7 +299,7 @@ async def _run_async(
         audit_note = None
         if run_error is None and sane and not missing:
             stage("Independent reviewer auditing the run for faithfulness to the spec...")
-            audit = audit_run(out_dir, prompt)
+            audit = audit_run(out_dir, prompt, checklist=requirements)
             audited, audit_passed = audit.audited, audit.passed
             audit_findings, audit_note = audit.findings, audit.note
             if audited and not audit_passed:
@@ -305,9 +335,13 @@ async def _run_async(
             break
         stage(f"Attempt {attempt + 1} failed a check, repairing: {fail_reason}")
         if audited and not audit_passed:
-            message = _repair_message(run_error=None, sanity_error=None, audit_findings=audit_findings)
+            message = _repair_message(
+                run_error=None, sanity_error=None, audit_findings=audit_findings, open_todo=open_todo
+            )
         else:
-            message = _repair_message(run_error=run_error, sanity_error=sanity_error)
+            message = _repair_message(
+                run_error=run_error, sanity_error=sanity_error, open_todo=open_todo
+            )
 
     success = not missing and sane and run_error is None and audit_passed
 
@@ -333,6 +367,9 @@ async def _run_async(
             "audit_passed": audit_passed,
             "audit_findings": audit_findings,
             "audit_note": audit_note,
+            "requirements": read_requirements(workspace_dir),
+            "requirements_note": checklist_result.note,
+            "build_plan": read_plan(workspace_dir),
             "deterministic_validation": deterministic_validation_summary(out_dir),
             "missing_artifacts": missing,
             "repair_attempts": len(repair_history) - 1,

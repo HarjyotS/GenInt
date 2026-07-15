@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from infinienv.llm import get_provider
@@ -132,6 +133,61 @@ def cmd_solve(args: argparse.Namespace) -> int:
         print(f"Wrote {out_dir}/replay.json and {out_dir}/replay.gif")
 
     return 0 if result.success else 1
+
+
+def cmd_navigate(args: argparse.Namespace) -> int:
+    """Play a world with a VISION policy (sees only rendered frames), scored by code.
+
+    If the target is a sandbox run (a directory with sandbox_workspace/, or its scene.json),
+    the vision policy FAITHFULLY plays the real sandbox game (its own side-view frames + physics +
+    win) inside the sandbox. Otherwise a scene.json is played through the deterministic top-down env."""
+    target = args.scene_path
+    # Detect a sandbox run: a dir with sandbox_workspace/, or a scene.json whose dir has one.
+    run_dir = None
+    if os.path.isdir(target) and os.path.isdir(os.path.join(target, "sandbox_workspace")):
+        run_dir = target
+    elif target.endswith(".json") and os.path.isdir(os.path.join(os.path.dirname(target), "sandbox_workspace")):
+        run_dir = os.path.dirname(target)
+
+    if run_dir is not None:
+        from infinienv.sandbox.vision_runner import play_sandbox_world
+
+        metrics = play_sandbox_world(
+            run_dir,
+            args.out,
+            backend=args.vision_backend,
+            model=args.model,
+            max_steps=args.max_steps or 60,
+            judge=not args.no_judge,
+            on_stage=print,
+        )
+        print(
+            f"Result: {'SUCCESS' if metrics['vision_success'] else 'FAILED'} "
+            f"(vision policy played the REAL sandbox game, judged by the game's own win)"
+        )
+        return 0 if metrics["vision_success"] else 1
+
+    from infinienv.evaluation.vision_runner import run_navigation
+    from infinienv.schema.scene_schema import scene_spec_from_dict
+
+    with open(target) as f:
+        scene = scene_spec_from_dict(json.load(f))
+
+    metrics = run_navigation(
+        scene,
+        args.out,
+        backend=args.vision_backend,
+        model=args.model,
+        max_steps=args.max_steps,
+        assets_mode=args.assets,
+        judge=not args.no_judge,
+        on_stage=print,
+    )
+    print(
+        f"Result: {'SUCCESS' if metrics['vision_success'] else 'FAILED'} "
+        f"(pixel-only policy, judged by code-defined reward)"
+    )
+    return 0 if metrics["vision_success"] else 1
 
 
 def cmd_play(args: argparse.Namespace) -> int:
@@ -311,6 +367,25 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("scene_path")
     s.add_argument("--out", default=None)
     s.set_defaults(func=cmd_solve)
+
+    n = sub.add_parser(
+        "navigate",
+        help="Play a scene with a stand-in VISION policy (sees only rendered frames), scored by "
+        "code-defined reward. Writes episode.gif/episode.json/metrics.json.",
+    )
+    n.add_argument("scene_path")
+    n.add_argument("--out", required=True)
+    n.add_argument("--vision-backend", default="openai", choices=["openai", "claude"], dest="vision_backend")
+    n.add_argument("--model", default=None, help="Override the vision model (default per backend).")
+    n.add_argument("--max-steps", type=int, default=None, dest="max_steps")
+    n.add_argument("--assets", default="none", choices=["none", "local", "generated", "auto"])
+    n.add_argument(
+        "--no-judge",
+        action="store_true",
+        dest="no_judge",
+        help="Skip the naive VLM-on-pixels judge of the final frame (the code-vs-pixels contrast).",
+    )
+    n.set_defaults(func=cmd_navigate)
 
     p = sub.add_parser("play", help="Interactively play a scene.json file in the terminal.")
     p.add_argument("scene_path")

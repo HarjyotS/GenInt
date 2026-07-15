@@ -1,0 +1,22 @@
+{
+  "version": "0.1",
+  "seed": 7,
+  "metadata": {
+    "name": "vision_demo_deliver",
+    "prompt": "Pick up the can and deliver it onto the sink.",
+    "theme": "kitchen"
+  },
+  "grid": {"width": 7, "height": 5, "tile_size": 32},
+  "agent": {"id": "agent", "x": 0, "y": 2, "inventory": []},
+  "objects": [
+    {"id": "can_1", "type": "can", "x": 2, "y": 2, "solid": false, "portable": true},
+    {"id": "sink_1", "type": "sink", "x": 5, "y": 2, "solid": false, "portable": false}
+  ],
+  "walls": [
+    {"x": 3, "y": 0}, {"x": 3, "y": 1}, {"x": 3, "y": 4}
+  ],
+  "goals": [
+    {"id": "deliver_can", "type": "deliver", "object_id": "can_1", "target_id": "sink_1"}
+  ],
+  "mechanics": {"custom_object_types": [], "custom_interactions": []}
+}

@@ -1,16 +1,30 @@
 # InfiniEnv
 
-**Infinite Environment Generation via an Agent Harness** — a 2D-first agent harness that
-converts natural-language commands into playable, verified environments.
+**Infinite Environment Generation via an Agent Harness** — a 2D-first harness that turns
+natural-language commands into playable, *verified* environments, then lets a **vision-based
+policy** (one that sees only rendered frames) play them while a **code-defined** reward decides
+whether it succeeded.
 
-> A model proposes. The harness verifies. The agent proves.
+> A model proposes. The harness verifies. A pixel-policy proves.
 
-A language model (OpenAI Agents SDK by default) compiles a text prompt into a typed
-`SceneSpec` JSON world. Deterministic Python code validates it, repairs it via LLM feedback
-if invalid, builds a playable gridworld, solves it with an A*/symbolic planner, and emits
-replayable proof (`render.png`, `replay.gif`, `metrics.json`) that the objective was completed.
-The LLM is never the source of truth — schema validation, reachability, solvability, and goal
-completion are all deterministic and testable.
+The core bet, straight from the challenge brief: **code-defined objectives beat a VLM checking
+pixels.** So generation is semantic (an LLM writes the world) but *truth* is deterministic Python
+— schema validation, reachability, solvability, goal completion, and reward are all code, never
+the model's say-so.
+
+The headline demo (`navigate`) closes the exact loop the brief is about: a policy that observes
+*rendered frames* and emits *controller actions* plays a generated world, and whether it *reached
+the goal* is judged by `is_goal_complete` over game state — **not** by looking at the pixels. That
+one split is the whole thesis, made runnable:
+
+- **Post-training environments** — `InfiniEnv` is a Gymnasium-style `reset()/step()` env whose
+  observation is a frame and whose action is a controller input; drop any frame-in/action-out
+  policy into it.
+- **Code-level objectives** — reward comes from `navigation/planner.py::is_goal_complete`, a pure
+  function of state, so "the can is on the sink" is decided by code, reliably.
+- **Reward from code, applied to pixels** — the `navigate` run also records a naive *VLM-judges-
+  the-final-frame* verdict beside the code truth; where they disagree is a live demonstration of
+  why the code signal is the trustworthy one to train a reward model on.
 
 ---
 
@@ -19,14 +33,18 @@ completion are all deterministic and testable.
 ```bash
 pip install -e ".[openai]"
 
+# THE HEADLINE: a VISION policy (sees only rendered frames) plays a generated world, and a
+# CODE-defined reward decides success. Writes episode.gif (the frames it saw), episode.json
+# (its action + the code reward each step), and metrics.json (vision_success from code truth,
+# plus a naive VLM-on-pixels verdict for contrast). Needs an OpenAI key (OPENAI_API_KEY/OP_KEY):
+python -m infinienv navigate examples/vision_demo.json --out runs/vision_demo
+
 # `generate` -- a model writes and runs a small game for your prompt, plays it, and an
-# independent reviewer checks it didn't fake the mechanic. The scene it declares is run
-# through the real deterministic validator (bounds/ids enforced). Needs an OpenAI key
-# (OPENAI_API_KEY or OP_KEY in .env):
+# independent auditor checks it didn't fake the mechanic. The scene it declares is run
+# through the real deterministic validator (bounds/ids enforced):
 python -m infinienv generate \
   --prompt "Create a procedurally generated cave with spike hazards and glowing gems; pick a safe route, collect at least two gems, and reach the exit." \
-  --seed 42 --assets generated \
-  --out runs/cave
+  --seed 42 --assets generated --out runs/cave
 
 # No API key? The deterministic tools run offline over any scene. `solve` renders a
 # playable environment and a replay of the agent completing a code-defined objective:
@@ -35,6 +53,15 @@ python -m infinienv solve examples/kitchen_can.json --out runs/kitchen_can
 
 No key at all? A committed example world lives in `examples/example_world/` (open `render.png` /
 `replay.gif`, or launch the GUI and it shows up in the gallery).
+
+A `navigate` run writes:
+
+```text
+runs/<run_id>/
+├── episode.gif    # the exact frames the pixel-only policy saw, in order
+├── episode.json   # per step: controller action chosen from pixels + the code-computed reward
+└── metrics.json   # vision_success (from is_goal_complete), + vlm_judge_success for contrast
+```
 
 A `generate` (sandbox) run writes:
 
@@ -55,19 +82,53 @@ code-defined objective, no key needed.)
 
 ```text
 Text Prompt
-  -> OpenAI Agents SDK ScenePlannerAgent  (LLM proposes)
-  -> SceneSpec JSON DSL
-  -> deterministic validator (schema, bounds, collisions, reachability, solvability)
-  -> RepairAgent loop if invalid (max 3 attempts, then template fallback)
+  -> LLM writes the world            (a model proposes)
+  -> SceneSpec JSON DSL  /  agent-authored game code (--sandbox)
+  -> deterministic validator + independent audit    (the harness verifies)
   -> playable 2D gridworld
-  -> A* + symbolic task planner solves the goals   (harness proves)
-  -> replay.gif + metrics.json + report.md
+  -> A*/symbolic planner solves it, AND/OR
+     a VISION policy plays it from rendered frames   (a pixel-policy proves)
+  -> reward from is_goal_complete (code truth, not pixels)
+  -> render.png + replay.gif / episode.gif + metrics.json
 ```
 
 The most important design rule: **the validator wins**. The LLM may propose, repair, or mutate
 a scene, but schema validation, object placement, collisions, reachability, pathfinding,
-inventory transitions, goal completion, and scoring are all deterministic code paths, covered
-by `tests/`.
+inventory transitions, goal completion, and reward are all deterministic code paths, covered by
+`tests/`.
+
+## The vision-policy loop (`navigate`)
+
+`engine/env.py::InfiniEnv` is a Gymnasium-compatible env — `obs, info = env.reset()` /
+`obs, reward, terminated, truncated, info = env.step(action)` — where the **observation is a
+rendered frame** and the **action is a controller input** (`forward/back/left/right/interact/wait`,
+the 2D subset of the brief's move-forward/…/mouse-ΔX/ΔY interface). Reward is code-defined:
+`is_goal_complete(goal, state)` over the real `GameState`, +1 the step a goal first completes.
+
+`navigate` runs a **stand-in vision policy** (a VLM — General Intuition's own policy isn't
+available to us, so this proves the *interface and the reward loop*, not a competing policy)
+through that env. The policy is handed *only the frame* plus the goal in words and returns a
+controller action each step; the env decides success in code. It never sees `GameState`.
+
+```bash
+python -m infinienv navigate examples/vision_demo.json --out runs/vision_key
+# --vision-backend openai|claude   --model ...   --max-steps N   --assets ...   --no-judge
+```
+
+`metrics.json` records `vision_success` (the pixel policy's outcome, **judged by code**) and,
+for deliberate contrast, `vlm_judge_success` — a naive "does this final frame look done?" VLM
+verdict — plus whether the two agreed. When they disagree, that's the brief's point made concrete:
+the code signal is the one you'd trust to train a reward model on.
+
+**Faithful play of a sandbox world.** A `--sandbox` world is a real game (often a side-view
+platformer) whose physics/rendering/win live in the agent's own code, so playing it through the
+top-down engine mis-renders and mis-plays it. Instead, a sandbox world is played **faithfully**: the
+vision policy drives the *actual* game — its own frames, physics, and win condition — **inside the
+sandbox** (the trusted process only reads back `episode.gif` + metrics, never runs the game code).
+This works because every generated `run_scene.py` exposes a `make_env()` (reset/step over its real
+frames + a code-defined reward). In the GUI, picking a sandbox world in Navigate routes here
+automatically; on the CLI, `navigate <run_dir>` faithfully plays it while `navigate <scene.json>`
+plays deterministically.
 
 ## Runtime providers
 
@@ -78,14 +139,11 @@ by `tests/`.
 | `openai_responses` | Yes | Lower-level fallback: a single Responses API call with a non-strict JSON-schema `text.format`, no agent orchestration. |
 | `anthropic` | Yes | Optional Claude provider (see Limitations). |
 
-By default, if the provider can't produce a valid scene within `MAX_REPAIR_ATTEMPTS`, `generate`
-silently falls back to the deterministic template generator so the pipeline still produces a
-successful run (useful for unattended/reviewer runs). Pass `--no-fallback` to disable that and
-have the command error out instead — useful while iterating on prompts/providers, so a real
-generation failure is loud instead of quietly masked by the fallback.
-
-If `OPENAI_API_KEY` isn't set, either use `--provider mock` or drop the key in a project-root
-`.env` file (`OPENAI_API_KEY=sk-...`, or `OP_KEY=sk-...` — both are read).
+These providers drive the deterministic generation *tools* (`mutate`/`curriculum`/`benchmark`),
+which propose a `SceneSpec` and validate/repair it with a full solvability guarantee. `generate`
+itself is sandbox-only (a model writes and runs its own game code — see below); its repair loop
+runs against the outer sanity check + audit, not an LLM repair agent. Keys are read from a
+project-root `.env` (`OPENAI_API_KEY=sk-...`, or `OP_KEY=sk-...` — both work).
 
 The LLM never executes code or writes files directly: it only emits `SceneSpec` JSON and may
 call the read-only/validate-only tools above. All file writes, retries, rendering, and scoring
@@ -176,7 +234,7 @@ solvability check every other run has, and says so plainly: sandbox runs are lab
 independent outer sanity check (re-parses `scene.json` against the real, unmodified schema;
 confirms `render.png`/`replay.gif` are genuine, non-trivial, *animated* images) side by side. If
 that outer check fails, the same agent gets the concrete failure fed back and a chance to repair
-its own work in the same persistent workspace, up to `--max-repair-attempts` times (default 2) --
+its own work in the same persistent workspace, up to `--max-repair-attempts` times (default 3) --
 the harness keeps deciding pass/fail, the model just gets more chances against the same real
 check. `--assets {local,generated,auto}` applies to sandbox runs the same as any other -- the
 agent's reference `run_scene.py` resolves real sprites via the copied `assets/resolver.py` before
@@ -199,14 +257,19 @@ and what the outer sanity check does and doesn't guarantee.
 
 ## CLI
 
+`generate` is **sandbox-only** (a model writes and runs its own game code; needs an OpenAI key).
+The deterministic tools below (`validate`/`solve`/`navigate`/`mutate`/`curriculum`/`benchmark`/
+`export-dataset`) run the fixed-vocabulary validator + solver over any `scene.json` and work
+offline (except `navigate`, which needs a vision key):
+
 ```bash
-python -m infinienv generate --prompt "..." --provider mock --seed 42 --out runs/demo
-python -m infinienv generate --sandbox --prompt "..." --seed 42 --out runs/demo   # see above
-python -m infinienv validate runs/demo/scene.json
-python -m infinienv solve runs/demo/scene.json --out runs/demo
-python -m infinienv play runs/demo/scene.json          # interactive terminal play
+python -m infinienv generate --prompt "..." --seed 42 --out runs/demo        # sandbox (see above)
+python -m infinienv navigate examples/vision_demo.json --out runs/vision    # pixel policy plays it
+python -m infinienv validate examples/kitchen_can.json
+python -m infinienv solve examples/kitchen_can.json --out runs/demo          # deterministic planner
+python -m infinienv play examples/kitchen_can.json                           # interactive terminal play
 python -m infinienv benchmark examples/prompts.txt --provider mock --out runs/benchmark
-python -m infinienv mutate runs/demo/scene.json --count 10 --out runs/mutations
+python -m infinienv mutate examples/kitchen_can.json --count 10 --out runs/mutations
 python -m infinienv curriculum --theme warehouse --levels 5 --out examples/curriculum_warehouse.txt
 python -m infinienv curriculum --theme warehouse --levels 5 --run --provider mock --out runs/curriculum
 python -m infinienv export-dataset runs/curriculum --out runs/curriculum/dataset.jsonl
@@ -220,15 +283,23 @@ pip install -e ".[gui]"
 python -m infinienv gui   # opens http://127.0.0.1:5050
 ```
 
-A single local page: type a prompt, toggle every `generate` setting (provider, seed, `--assets`
-mode, `--no-fallback`, max repair attempts, output directory), hit Generate, and watch it work —
-stage-by-stage progress streams in live (Server-Sent Events) exactly as it happens, the same
-`[n/total] ...` messages the CLI prints, followed by `render.png`/`replay.gif` inline, the metrics
-table, and the full `scene.json`. A "Recent runs" strip on the left browses every past run under
-`runs/` (from the CLI or the GUI) so you can revisit an old result without regenerating it.
+A single local page with a **Generate ⟷ Navigate** mode toggle:
 
-This is a thin frontend on the exact same `evaluation.runner.run_generation` pipeline the CLI
-calls — no separate implementation to keep in sync. `flask` is an optional dependency
+- **Generate**: type a prompt, pick the sandbox agent runtime/model and `--assets` mode, hit
+  Generate, and watch the agent work — its decisions, code writes, shell commands, chosen assets,
+  and the audit verdict stream in live (Server-Sent Events) as a structured activity view, followed
+  by `render.png`/`replay.gif` inline and the metrics.
+- **Navigate**: pick an example scene and a vision backend/model, hit Run — a **pixel-only vision
+  policy** plays the world, its per-step controller actions stream as a play log, and the result
+  shows the `episode.gif` plus verdict cards contrasting **code truth** (`vision_success`) against a
+  **VLM-on-pixels** guess. This is the headline loop, runnable in the browser.
+
+A "Recent runs" strip browses every past run under `runs/` (and the committed
+`examples/example_world/`), badged by kind (sandbox ▣ / vision ◎), so you can revisit a result
+without regenerating it.
+
+This is a thin frontend on the exact same sandbox pipeline the CLI calls — no separate
+implementation to keep in sync. `flask` is an optional dependency
 (`pip install infinienv[gui]`); nothing else in the project needs it, and `python -m infinienv
 gui` gives a clear install hint if it's missing.
 
@@ -308,9 +379,17 @@ per-goal completion signal (`{"deliver_package": 1, "unlock_door": 1, "total": 2
 
 | Challenge criterion | How this repo addresses it |
 |---|---|
-| Creativity | Mutation engine (5 deterministic strategies + LLM-proposed) + curriculum generator + asset pipeline + model-definable object types/interactions produce infinite validated, visually and mechanically distinct variants from one seed scene, not a single text-to-grid demo. |
-| Clarity | Narrow P0 scope, one schema (`SceneSpec`) as the shared contract, `report.md` per run, this README. |
-| Working output | `--provider mock` runs with zero setup; `pytest` covers schema/validator/reachability/solver/mock/CLI/assets/mutation/curriculum/dataset export/mechanics/physics; `metrics.json` reports truthfully (`success` is only `true` if both validation and the solver actually succeeded). |
+| Creativity | Text → verified worlds, plus model-authored game code (`--sandbox`), plus a mutation/curriculum/asset pipeline for infinite validated variants — and a Gymnasium-style **pixel-observation env** so a vision policy can actually play them. |
+| Clarity | One schema (`SceneSpec`) as the shared contract; `navigate` runnable in one line; truthful `metrics.json` per run; this README leads with the loop. |
+| Working output | `pytest` (390+ tests) covers the env, vision loop, validator, solver, assets, mutation, dataset export, sandbox; `metrics.json` never overclaims (`vision_success` comes from `is_goal_complete`, never from pixels). |
+
+And the brief's three "why this matters" unlocks, made runnable:
+
+| Brief's unlock | Where it lives |
+|---|---|
+| Post-training environments for a vision policy | `engine/env.py::InfiniEnv` — a Gymnasium `reset()/step()` env; observation = frame, action = controller input. Any frame-in/action-out policy drops in. |
+| Code-level (not VLM-on-pixels) objectives | Reward = `navigation/planner.py::is_goal_complete`, a pure function of state; `navigate`'s `vision_success` is decided by it. |
+| Reward from code, applied to pixels | `navigate` records a naive `vlm_judge_success` (a VLM reading the final frame) beside the code truth; disagreements show why the *code* signal is the reliable one to train a reward model on. |
 
 ## Project layout
 
@@ -321,12 +400,12 @@ src/infinienv/
 ├── llm/                    # provider protocol + mock / openai_agents / openai_responses / anthropic
 ├── generation/             # compiler (generate->validate->repair->fallback), templates, mutation,
 │                           # curriculum, mechanics_cache (persist/reuse custom mechanics)
-├── engine/                 # grid, mutable game state, action legality, interactions.py (effect interpreter)
+├── engine/                 # grid, game state, action legality, interactions.py, env.py (pixel-obs env)
 ├── validation/             # structured errors, reachability (BFS), solvability (full solve), validator
-├── navigation/              # A*, symbolic task planner (incl. interact goals), top-level solve_scene
+├── navigation/              # A*, symbolic planner, solve_scene, vision_policy.py (pixel->action stand-in)
 ├── render/                  # render.png (Pillow) + replay.gif, with optional sprite pasting
 ├── assets/                  # placeholder sprite generator, resolver, OpenAI Images generator, manifest
-├── evaluation/               # per-run metrics, end-to-end runner, benchmark aggregation
+├── evaluation/               # per-run metrics, runner, benchmark, vision_runner.py (navigate command)
 ├── export/                    # dataset.py: runs directory -> JSONL with programmatic_reward
 ├── sandbox/                    # --sandbox mode: isolated per-run workspace, agent orchestration,
 │                                # artifact extraction, outer sanity check (see README above)

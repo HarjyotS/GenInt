@@ -544,3 +544,59 @@ def test_outer_sanity_check_fails_for_lzw_corrupted_replay_gif(tmp_path):
     assert ok is False
     assert "replay.gif" in error
     assert "corrupted" in error.lower() or "decod" in error.lower()
+
+
+# ---- TODO harness: seed_workspace (REQUIREMENTS + PLAN) + the plan.py tool + read/open helpers ----
+
+def test_seed_workspace_writes_requirements_plan_memory_and_the_tool(tmp_path):
+    from infinienv.sandbox.workspace import read_plan, read_requirements, seed_workspace
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    seed_workspace(str(ws), [{"id": "r1", "requirement": "jump works", "how_to_verify": "y changes"}])
+    reqs = read_requirements(str(ws))
+    assert reqs[0]["requirement"] == "jump works" and reqs[0]["how_to_verify"] == "y changes"
+    assert "status" not in reqs[0]  # requirements are acceptance criteria, not ticked by the agent
+    assert read_plan(str(ws)) == []  # the build plan starts empty; the agent authors it
+    assert (ws / "MEMORY.md").exists()
+    assert (ws / "plan.py").exists()
+
+
+def test_seed_workspace_does_not_clobber_existing_progress(tmp_path):
+    # A repair attempt must keep the agent's prior build plan (seed only when absent).
+    from infinienv.sandbox.workspace import read_plan, seed_workspace
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "PLAN.json").write_text(json.dumps([{"id": "t1", "task": "world gen", "status": "done"}]))
+    (ws / "REQUIREMENTS.json").write_text(json.dumps([{"id": "r1", "requirement": "x"}]))
+    seed_workspace(str(ws), [{"id": "r1", "requirement": "x"}, {"id": "r2", "requirement": "y"}])
+    plan = read_plan(str(ws))
+    assert len(plan) == 1 and plan[0]["status"] == "done"  # kept, not re-seeded
+
+
+def test_plan_tool_add_start_done_note(tmp_path):
+    import subprocess
+    import sys
+
+    from infinienv.sandbox.workspace import open_plan_items, read_plan, seed_workspace
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    seed_workspace(str(ws), [{"id": "r1", "requirement": "a"}])  # requirements; plan starts empty
+
+    def run(*a):
+        return subprocess.run([sys.executable, "plan.py", *a], cwd=ws, capture_output=True, text=True)
+
+    assert run("add", "gravity + jump physics").stdout.strip() == "PLAN_ADD t1: gravity + jump physics"
+    assert run("add", "gem pickup + counter").stdout.strip().splitlines()[0] == "PLAN_ADD t2: gem pickup + counter"
+    assert "PLAN_UPDATE t1 doing" in run("start", "t1").stdout
+    r = run("done", "t1")
+    assert "PLAN_UPDATE t1 done" in r.stdout and "PLAN_PROGRESS 1/2 done" in r.stdout
+    assert run("note", "using DT=0.05").stdout.strip() == "MEMORY_NOTE: using DT=0.05"
+    assert run("done", "nope").returncode == 2  # unknown id -> error exit
+
+    plan = read_plan(str(ws))
+    by_id = {i["id"]: i for i in plan}
+    assert by_id["t1"]["status"] == "done" and by_id["t1"]["task"] == "gravity + jump physics"
+    assert sorted(i["id"] for i in open_plan_items(plan)) == ["t2"]

@@ -72,3 +72,47 @@ def test_generate_is_sandbox_only(tmp_path, monkeypatch):
     captured.clear()
     rc = main(["generate", "--sandbox", "--prompt", "make a game", "--seed", "1", "--out", "runs/def2"])
     assert captured.get("called") is True and rc == 0
+
+
+def test_navigate_command_writes_episode_artifacts(tmp_path, monkeypatch):
+    # The `navigate` command drives a VISION policy through the pixel env, scored by code.
+    # We fake the policy so no key/network is needed; it plays a trivial pickup scene.
+    monkeypatch.chdir(tmp_path)
+    scene = {
+        "version": "0.1", "seed": 1, "metadata": {"name": "t", "prompt": "pick up the can"},
+        "grid": {"width": 4, "height": 2, "tile_size": 32},
+        "agent": {"id": "agent", "x": 0, "y": 0},
+        "objects": [{"id": "can_1", "type": "can", "x": 1, "y": 0, "portable": True}],
+        "walls": [],
+        "goals": [{"id": "pick", "type": "pickup", "object_id": "can_1"}],
+    }
+    scene_path = tmp_path / "scene.json"
+    scene_path.write_text(json.dumps(scene))
+
+    class FakePolicy:
+        backend = "openai"
+        model = "fake-vision"
+
+        def __init__(self, *a, **k):
+            self._plan = iter(["right", "interact"])
+
+        def act(self, frame, goal, **kw):
+            return [next(self._plan, "wait")], "fake"  # a (one-action) plan, per the new contract
+
+        def judge_final_frame(self, frame, goal):
+            return True, "YES"
+
+    import infinienv.evaluation.vision_runner as vr
+    monkeypatch.setattr(vr, "VisionPolicy", FakePolicy)
+
+    rc = main(["navigate", str(scene_path), "--out", "runs/nav"])
+    assert rc == 0
+    for name in ("episode.gif", "episode.json", "metrics.json"):
+        assert os.path.exists(os.path.join("runs", "nav", name))
+    metrics = json.load(open(os.path.join("runs", "nav", "metrics.json")))
+    # Success is code-defined (vision_success from is_goal_complete), and the pixel-only policy
+    # completed the objective. The naive VLM judge is recorded alongside it.
+    assert metrics["vision_success"] is True
+    assert metrics["source"] == "vision_navigation"
+    assert metrics["vlm_judge_success"] is True
+    assert metrics["judge_agrees_with_code"] is True

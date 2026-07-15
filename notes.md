@@ -3208,3 +3208,703 @@ Fix, three layers (principle-level, not per-case):
   asymmetry is a fake even if the spec never said "fair opponent" (a modest gap is fine). Re-tested
   live: auditor now FAILS the pong run with a precise finding ("over a 10x movement-speed advantage
   ... a walkover, not a competitive Pong match"). Suite 375 green.
+
+## 2026-07-11 -- the vision-policy loop: a pixel-observation env + a stand-in vision policy (section 11b)
+
+Strategic question from the user: "for this brief what more could we do to make it far better and
+more impressive." Honest read of the GI brief: its three "why this matters" bullets are ALL about
+a consumer InfiniEnv never touched -- a vision-based policy that *observes rendered frames* and
+emits *controller actions*. The project generated worlds, solved them with a deterministic
+*symbolic* planner (reasons over code state), and exported programmatic reward -- but had no
+frame-in/controller-out env and no pixel-observing agent anywhere (confirmed by grep: no gym/step
+API, no vision loop). So it *asserted* the "code beats a VLM on pixels" thesis without
+*demonstrating the bridge*. Chosen directions (user picked both): close that loop + a clarity pass.
+
+Built (all reusing existing pieces, no new deps):
+- `engine/env.py::InfiniEnv` -- a Gymnasium-compatible env (reset/step 5-tuple, no hard gymnasium
+  dep). Observation = a rendered frame (`render_scene_image`, the same per-state renderer the
+  replay uses). Action = a discrete controller set (forward/back/left/right/interact/wait). Reward
+  = newly-completed goals via `is_goal_complete` (code truth, §2 invariant preserved -- only the
+  *player* becomes pixel-based, no trade). `interact` is a "use" button the env resolves in code
+  (unlock->custom-interaction->pickup->drop priority). Illegal move = no-op recorded in info, not
+  a crash. Verified end-to-end by driving it with the deterministic solver's plan mapped to
+  controller actions: kitchen_can terminates reward 1.0, warehouse_key (key+deliver) reward 2.0.
+- `navigation/vision_policy.py::VisionPolicy` -- pixel->action stand-in. Sees ONLY the frame
+  (base64 PNG) + the goal in words; returns a controller action. Never sees GameState. OpenAI
+  vision default (OPENAI_API_KEY -- the funded key; CL_KEY has hit credit limits) / Claude opt-in;
+  network isolated behind a `responder` callable so the whole loop is hermetically testable.
+  Honest framing everywhere: a stand-in for GI's unavailable policy, proving the interface + the
+  reward loop, not a competing policy.
+- `evaluation/vision_runner.py::run_navigation` + `navigate` CLI -- writes episode.gif (frames the
+  policy saw), episode.json (per-step action + code reward), metrics.json (vision_success, CODE-
+  judged). The money line: also a naive `judge_final_frame` VLM verdict (`vlm_judge_success`) beside
+  the code truth + `judge_agrees_with_code` -- a disagreement is the brief's bullet 2 made concrete.
+  Best-effort (`--no-judge`, judge errors never fail the run).
+- Prompt `llm/prompts/vision_navigator.md` (controller actions + "you see only the frame").
+
+Tests: `test_env.py` (11 cases), `test_vision_policy.py` (fake responder), a faked-policy `navigate`
+case in `test_cli.py`. Full suite 394 green (was 375; +19). One test fixed: I'd asserted 'leftover'
+matches 'left' -- the whole-word regex correctly does NOT (that's the feature); corrected the test.
+
+Clarity pass (README): new intro/headline leads with the loop + the thesis; `navigate` is the first
+"run it in 60 seconds" command; pipeline diagram ends in "a pixel-policy plays it, scored by code
+truth"; a dedicated section maps the brief's three unlocks to `engine/env.py`/`is_goal_complete`/the
+VLM-judge contrast; demoted stale non-sandbox `generate --provider`/`--no-fallback` references
+(generate is sandbox-only) in the CLI list, providers, GUI, and criteria sections. CLAUDE.md gained
+section 11b + CLI-ref/test-list/release-checklist entries.
+
+Live-verification (real OpenAI vision API, `gpt-5.6-terra`, `examples/vision_demo.json` -- a small
+7x5 pickup+deliver scene added for a cheap reproducible demo): **first-try clean success.** The
+pixel-only policy completed the deliver task in the optimal 7 steps (`right`, `interact`->pick_up,
+4x `right`, `interact`->drop onto the sink), driven entirely from the rendered frames + the goal
+text -- it never saw GameState. `metrics.json`: `vision_success: true` (CODE-judged via
+is_goal_complete, not pixels), `total_reward: 1.0`, `goal_results: {deliver_can: true}`,
+`vlm_judge_success: true`, `judge_agrees_with_code: true`. Confirmed the artifacts are real, not a
+self-report: `episode.gif` is a genuine 8-frame animation, and the extracted final frame visually
+shows the agent standing on the sink with the can delivered. README's `navigate` examples now point
+at `examples/vision_demo.json` for reproducibility. Full suite 394 green (was 375; +19 new).
+
+Note on the code-vs-VLM-judge contrast: on this clean, unambiguous scene the naive VLM judge
+correctly agreed with the code truth -- the disagreement that proves the point is expected on
+harder/ambiguous frames (a near-miss, an occluded target), not a trivially-clear delivered can. The
+value is that both signals are recorded every run, so a divergence is captured whenever it occurs.
+
+## 2026-07-11 -- decorative hazards + collapsed levels (the "easy level for itself" cheese)
+
+User report on a sandbox cave run (`runs/gui_1783825764`, the procedural-cave prompt): "it just
+made an easy level for itself with no actual challenges and doesnt even use half the map." Read the
+actual `run_scene.py` (not the screenshot). Two root causes, both the same recurring class -- the
+agent designs the easiest level its own trivial auto-solver can beat, then self-checks only "I won":
+1. **Decorative hazards.** The 3 `wall_spike` hazards are mounted at row 2 (under the ceiling), while
+   the hero walks rows 11-14 and its jump arc only rises ~3.7 tiles (JUMP=12, GRAVITY*DT=0.9) -- it
+   can never get within ~5 tiles of them. And the controller's `danger_xs` explicitly EXCLUDES them
+   (`[floor spikes] + [gaps]` only). So they can never kill; pure decoration. This is a textbook
+   "declared hazard can't reach the player" fake -- which the auditor's OWN list already names -- yet
+   the run's `self_check()` asserted the wall spikes *exist and are counted* (a proxy), not that they
+   ever threatened the hero, and the auditor passed it.
+2. **Collapsed level.** Terrain jammed into rows 11-14 of an 18-row grid (agent chose base_row=14,
+   min/max 11/14), all 3 gems on the floor path (`terrain[col]-1`), the 4 platforms (rows 7-9) purely
+   decorative (only hold crystals; never required), 1 trivial chasm, 3 hardcoded floor-spike columns.
+   The refined spec explicitly asked for "ledges... branching routes... gems near riskier routes" --
+   the agent built a flat floor with decorative ledges. Most of the map is dead air.
+
+User chose "enforce both, generally" (no cave-specific patch, per the standing discipline). Fix:
+- `sandbox_agent.md` **principle 3**: added a concrete clause -- a hazard geometrically out of reach
+  (mounted above the jump arc, walled off) or left out of the avoidance/collision set is decorative
+  no matter how it renders; the same collapse applies to the whole level (confining play to a flat
+  strip with every objective on the easy ground while the structure is scenery = the easiest level,
+  not the described one).
+- `sandbox_agent.md` **self-review invariants** (the required checklist): (a) rewrote the hazard bullet
+  from a passive "came within a plausible threat distance" into a forceful *per-hazard, by-trace*
+  requirement that explicitly rejects the existence/count proxy and names the out-of-reach/excluded
+  forms; (b) added a NEW invariant -- the required objectives must actually make the player use the
+  structure/risk the spec described (walk the successful trace; at least one required objective forced
+  the player off the flat start ground / through a declared risk, and the declared structure is
+  load-bearing, not scenery). Both phrased generally, no cave/gem references.
+- `sandbox_auditor.md`: two new named fakes -- "A decorative hazard that can't reach the player"
+  (check the trace: did the player ever come within contact distance of each declared hazard?) and
+  "A level collapsed to its easiest version" (spec describes structure/risk but every required
+  objective sits on the flat path and the structure is decorative; the generation may even be
+  genuinely seeded yet the challenge is faked down to a straight stroll).
+
+**Verification (real OpenAI auditor, re-run against the exact captured `runs/gui_1783825764`):** the
+strengthened auditor now returns FAIL (the previous auditor had passed it clean), with two findings
+matching the hand diagnosis precisely and citing the exact code -- the row-2 spikes vs the ~3.7-tile
+jump ("cannot come within the < 0.62 collision radius even though resolve_spike_contacts() nominally
+checks them") and the gems-on-the-floor collapse ("platforms are never objectives or required routes
+... fakes the specified risk/route choice as decorative backdrop"). Since an audit FAIL feeds the
+repair loop, a fresh run gets exactly these findings and must fix them. Full fresh live run on the same prompt (`runs/cave_fix_verify`, `--assets none`): **the loop
+caught and fixed exactly the reported problems.** repair_history shows attempt 0 FAILED the
+strengthened audit with the collapse cheese verbatim ("the claimed generated uneven terrain is
+cosmetic rather than playable ... collision platforms are hardcoded ... profile is used only to
+draw the ceiling silhouette ... support_y()/physics() never use it. Build the solid floor/platform
+geometry from the generated profile so seed-driven uneven floors actually affect movement and
+routes"); attempt 1 FAILED on a separate real cheese (hardcoded LAYOUT = build_layout(SEED=7), so
+re-runs produce identical caves); attempt 2 PASSED. The final level has load-bearing uneven terrain
+(the hero's trace spans a 3.9-tile vertical range, not the old flat bottom strip), real chasms
+requiring jumps, and spikes placed in the traversed play area rather than decoratively overhead --
+visually confirmed in render.png. Not claimed as a maximally hard level, but the two specific
+reported failures (decorative hazards, unused space) are fixed and verified end-to-end. Full suite
+394 green (prompt/auditor edits are markdown; no code changed).
+
+## 2026-07-12 -- the vision-policy loop is now a GUI mode (Generate <-> Navigate)
+
+The navigate/vision loop (section 11b) shipped CLI-only; the GUI had zero references to it. User:
+"is this added to the frontend" -> "yes update everything in the frontend." Added a **mode toggle**
+(Generate <-> Navigate) to the single-page GUI, reusing the existing SSE/feed/verdict/media
+machinery -- a frontend on `run_navigation`, not a second implementation.
+
+Backend (`gui/app.py`): `_run_navigate_job` (mirrors `_run_sandbox_job` -- loads the scene, calls
+`run_navigation` with an `on_stage` callback, emits a `done` with `mode:"navigate"`,
+`success:vision_success`, `episode_url`); `POST /api/navigate` (validates scene against the offered
+list for path-safety, backend/model/assets/max_steps/judge); `GET /api/scenes` (lists
+`examples/*.json` -- the deterministic, guaranteed-playable set); `_classify_stage` gained
+goal/step/judge cases; `/api/runs` broadened so a run qualifies with `scene.json` OR `episode.gif`
+and carries a `vision` flag (using episode.gif as the thumbnail).
+
+Frontend (`index.html`): a segmented Generate/Navigate toggle that swaps the form + result view and
+the button label; navigate fields (scene dropdown defaulting to vision_demo.json, vision
+backend/model reusing the SANDBOX_MODELS lists, assets, max steps, judge checkbox); mode-aware
+`PHASES` (`Play/Judge/Done`); new feed KINDS (goal/step/judge) with CSS; a navigate `buildResult`
+branch rendering four verdict cards (Vision policy [code truth] / VLM on pixels / Agreement /
+Steps) + the goal line + episode.gif; gallery vision badge.
+
+Tests (`test_gui.py`, +5, all hermetic with a faked VisionPolicy): both modes in the index,
+/api/scenes lists examples, /api/navigate rejects an unknown scene, a full navigate job streams
+stage+done with code-judged vision_success + served episode.gif, a vision run shows in /api/runs.
+Full suite **399 green**.
+
+**Live-verified in a real browser** (browse skill, GUI on :5057): Generate mode renders unchanged;
+clicking Navigate swaps to the scene/vision form with the button reading "Run vision policy";
+clicking it ran the pixel policy against `examples/vision_demo.json` end to end in ~20s -- the play
+log streamed (`[7/40] interact -> drop can_1 +reward`), and the result showed the PLAY/JUDGE/DONE
+phase bar, the four verdict cards ("Reached goal" / "Says done" / "Agrees" / "7 / 40 · gpt-5.6-terra
+· openai"), the goal line, and the episode.gif -- with the new `nav_...` run appearing in the
+gallery badged as vision. Screenshots captured at each step. No regression to Generate.
+
+## 2026-07-12 -- navigate now plays sandbox-generated worlds too
+
+User: "the navigate stuff should work on the worlds we generate with the sandbox." It was scoped to
+`examples/*.json` on the theory that a sandbox scene.json might not be deterministically playable.
+Tested that assumption against real sandbox runs and it was wrong in the good direction: every
+sampled sandbox `scene.json` loads through the real schema, is deterministically SOLVABLE, and the
+env steps it without crashing -- because sandbox agents reuse the real SceneSpec with fixed-
+vocabulary goals (reach/deliver) and declare a reachable exit.
+
+Change: `_list_scenes()` now offers the curated `examples/` worlds AND any generated run's
+scene.json under `runs/` (newest-first, capped at 40), labeled `example:`/`run:`. Path-safety
+unchanged (paths enumerated here, validated against this list in `/api/navigate`). The scene-hint
+and CLAUDE.md §11b disclose the honest boundary: navigate plays the **deterministic reading** of the
+declared scene (static layout + declared goals), scored by code -- NOT the sandbox agent's custom-
+coded physics/win-condition, which the trusted process never runs (isolation invariant). So a
+declared `reach exit` goal can be a *simplification* of the sandbox game's full narrative.
+
+Tests: `test_scenes_endpoint_includes_generated_runs` (a runs/*/scene.json is listed, labeled
+`run:`); fixed the examples test to match the new `example:`-prefixed labels. Suite **400 green**.
+
+**Live-verified on the user's own cave** (`runs/gui_1783825764/scene.json`, the "easy level" from the
+earlier fix): navigate played it end to end -- the pixel policy reached the exit in 6 steps,
+`vision_success: True` (code-judged via is_goal_complete on the declared `reach exit`), a real
+7-frame episode.gif. Notably it surfaced the code-vs-pixels contrast for real: `vlm_judge_success:
+False` (DISAGREES) -- the VLM, judging the narrative prompt ("collect glowing gems... jumping over
+spikes") from the final frame, said not done, while the code goal (reach exit) was met. Honest
+reading: this isn't a clean "code right / VLM wrong" -- the declared `reach` goal is simpler than the
+sandbox game's real gem-gated win condition (which lived in run_scene.py and the deterministic env
+doesn't enforce), exactly the disclosed caveat. Reported as-is.
+
+## 2026-07-12 -- faithful vision-play: a vision policy plays the REAL sandbox game
+
+User showed a navigate run on a side-view sandbox platformer (`runs/lolipop` -> `runs/nav_1783872149`)
+that looked horrible and failed (156 steps oscillating). Root cause: navigate played it through the
+deterministic TOP-DOWN engine (`InfiniEnv` + `render_scene_image`), but the sandbox world is a
+side-view platformer whose real rendering/physics/win (`Gate(requires={'gems':2})`, gravity, jump)
+live in the agent's `run_scene.py`, which the trusted process never runs. Top-down of a side-view
+game = a sparse mis-rendered grid the VLM can't navigate. Confirmed: lolipop IS solvable top-down,
+so the failure was the alien frame + a wrong interpretation, not an impossible task. User chose
+**faithful play**: a vision policy plays the actual game.
+
+Built (isolation preserved -- the game runs only INSIDE the sandbox; the trusted process only reads
+back episode.gif + vision_metrics.json):
+- **make_env contract** (`sandbox_agent.md` + `_RUN_SCENE_TEMPLATE`): every run_scene.py exposes a
+  module-level `make_env()` -> env with `.actions` / `.reset()->PIL.Image` / `.step(action)->
+  (frame,reward,done,info)` (info["won"] from the game's own win), with two import-safety rules
+  (make_env at module level; generation under `if __name__=="__main__"`). Reference template models
+  it by wrapping InfiniEnv; a custom game exposes it over its own physics/render. Generation records
+  `playable_env` via a smoke check in the same session.
+- `sandbox/vision_play.py`: a self-contained driver copied into the workspace + run inside the
+  sandbox -- imports make_env, drives it with an inline OpenAI-vision policy (frame + goal +
+  env.actions), writes episode.gif (real frames) + vision_metrics.json (vision_success from
+  info["won"]). `run_vision_episode(env, act, ...)` core is unit-testable with a fake env + fake
+  caller.
+- `sandbox/vision_runner.py::play_sandbox_world`: orchestrator reusing runner.py's session mechanics
+  (temp-copy the run's sandbox_workspace, inject driver+config, fresh session with the same Manifest
+  grants -> interpreter+network+key work inside, hydrate, session.exec the driver, extract the two
+  artifacts, animation-check, aclose). A missing make_env -> clear "regenerate" ProviderError.
+- Triggers: GUI Navigate routes a sandbox world (dir has sandbox_workspace/ + metrics source==sandbox)
+  to faithful play (badge "real game - vision"); CLI `navigate <run_dir>` faithful, `navigate
+  <scene.json>` deterministic. Honest limit: needs the contract, so only worlds generated after it
+  (lolipop can't be retrofitted).
+
+Tests: `test_vision_play.py` (8, hermetic -- fake game env + fake controller: win from info["won"],
+PNG frames + action list passed, illegal-action coercion, truncation, game-step-error survival;
+reference make_env import-safe + drivable; play_sandbox_world rejects a non-sandbox dir), a GUI
+routing test (sandbox scene -> faithful path, mocked). Suite **409 green**.
+
+**Live-verified end to end.** (1) Generated a fresh side-view platformer (`runs/faithful_gen_test`,
+`--assets none`): `success:true`, **`playable_env: true`** -- the agent implemented make_env and the
+smoke check confirmed it drivable (its run_scene.py builds a game around `e=make_env()` + `e.step`).
+(2) Faithfully played it (`runs/faithful_play_test`, `gpt-5.6-terra`): the vision policy played the
+REAL game inside the sandbox, choosing from the game's OWN action set **`['left','right','jump',
+'wait']`** (jump! a side-view action, not the top-down forward/back/interact set), for 18 steps until
+the game's own code hit a terminal state. `vision_success: False` from the game's own win (didn't
+collect 2 gems + reach the sealed exit) -- an honest "the VLM didn't beat the platformer" result.
+The `episode.gif` (1152x576, 19 frames) is the REAL side-view platformer -- a mid frame shows the
+hero on a stone ledge, uneven platforms with gaps, floating cyan gems, white spikes, a "SEALED"
+exit, HUD "GEMS 0/2", controls "A/D MOVE - SPACE/UP JUMP" -- nothing like lolipop's sparse top-down
+grid. The naive VLM judge said "done" while the code said not-won (`judge_agrees_with_code: false`)
+-- the code-vs-pixels contrast, again. (3) The pre-contract lolipop faithful play failed cleanly with
+"This world wasn't built with a playable interface ... regenerate", no crash, no top-down garbage.
+Reported as found: the mechanism is proven (real game, real actions, real code-judged win); the VLM
+policy winning a real platformer is a separate, harder problem.
+
+## 2026-07-12 -- faithful play now uses the world's real generated assets (+ picker mtime fix)
+
+Two follow-on bugs from the first faithful-play cut, both found on the user's `absence` run:
+
+1. **Picker ordering** -- `runs/absence` (a recent named run) didn't appear in the navigate picker:
+   `_list_scenes`/`api_runs` sorted runs by NAME (`sorted(..., reverse=True)`), not mtime, despite
+   the "newest first" comment. Name-sort only looked right for `gui_<timestamp>` names; `absence`
+   ranked 100th of 101 and was cut by the 40-run cap. Fixed with `_run_dirs_newest_first()` (sort run
+   dirs by mtime desc), used by both the picker and the gallery. Regression test added.
+
+2. **Faithful play ignored the world's already-generated sprites** -- it "made its own character"
+   (rendered primitives). Two causes: (a) `sandbox/vision_runner.py` stripped `asset_cache/` when
+   copying the workspace, so even a correct make_env couldn't reuse the sprites; (b) the make_env
+   contract didn't require rendering with real assets, so the agent's `make_env()` was
+   `return CaveEpisode(SEED)` with NO asset_paths -> empty SpriteBook -> primitives, while only its
+   `main()`/replay resolved the generated sprites. Fixes: keep `asset_cache/` in the copy; the
+   reference `_RUN_SCENE_TEMPLATE` make_env now resolves ASSETS_MODE from `./asset_cache` and passes
+   `asset_paths` to InfiniEnv; `sandbox_agent.md`'s make_env contract now REQUIRES rendering with the
+   same real sprites the replay uses (resolve + SpriteBook inside make_env). Also added jump-caution
+   to the vision player's system prompt (`vision_play.py::_PLAYER_SYSTEM`) targeting the "jumped into
+   the void" complaint (only jump when there's a ledge to land on / a gap or hazard directly ahead).
+
+Honest limit: `absence` (and any pre-fix world) has a make_env written without assets and can't be
+retrofitted -- regenerate to get asset-correct faithful play. Suite **411 green** (+ a reference-
+make_env-resolves-assets test + the picker mtime regression test).
+
+**Live-verified.** Generated a fresh platformer with `--assets auto` (`runs/assetfix_gen`):
+`playable_env: true`, and its make_env now calls `resolve_book(scene)` -> resolves the generated
+sprites (agent.png, gem.png in asset_cache). Faithfully played it (`runs/assetfix_play`,
+gpt-5.6-terra): the episode.gif renders the REAL generated sprites -- a mid frame shows a real
+generated pixel-art explorer character (not a primitive box), generated crystal gems, red spikes, a
+green exit, platforms with gaps, HUD "CRYSTAL CAVERN GEMS 1/2 SPIKES = ONE HIT". The policy chose
+from the game's own `['left','right','jump','wait']` and collected a gem (1/2) before the game ended;
+`vision_success: false` -- it didn't get 2 gems + exit in 30 steps. So the asset bug is fixed and
+verified (real sprites, not primitives); the VLM reliably *winning* a real platformer remains a
+separate, harder problem (the jump-caution + real frames help it see, but don't guarantee a win).
+
+## 2026-07-12 -- faithful play hydrates from the real workspace, no host-side copy
+
+User asked why faithful play copies the workspace to a temp dir instead of using the run's own
+folder. It doesn't need to: the sandbox still requires its own hydrated FS (isolation -- the game
+code must run inside the sandbox, never on the host), but the host-side temp copy (a full copytree
+of the engine packages + asset_cache) was pure waste. Replaced it with `_tar_workspace_with()`:
+tars `run_dir/sandbox_workspace/` in place and injects the trusted `vision_play.py` + config as
+in-memory tar members (skipping __pycache__/.pyc), then hydrates. No temp dir, no copytree, no
+cleanup, and the kept sandbox_workspace/ is never polluted (the driver/config exist only inside the
+tar). Removed the `shutil`/`tempfile` imports. Round-trip + full-suite verified (412 green).
+
+## 2026-07-12 -- faithful play observes occasionally (frame-skip / action-repeat), not every frame
+
+User: faithful vision-play "should have occasional frame grabs, not grab every frame of the
+simulation and choose which frames to do actions on." The driver was 1 vision call per env.step
+(a decision on every simulation frame) -- unnatural and wasteful. Added frame-skip / action-repeat
+to `run_vision_episode` (`hold`, default 6): each decision grabs ONE frame, the policy picks an
+action, and that action is HELD for `hold` simulation frames while the game advances -- like a human
+glancing, holding a key, glancing again. The policy is called once per decision, never once per
+frame; all sim frames are still collected for a smooth gif (subsampled to ~140 for watchability).
+`hold=1` reproduces the old behavior (tests). Metrics now report `steps` (decisions/vision-calls),
+`sim_frames` (frames advanced), and `hold`. The player prompt tells the model its action is held
+briefly so it commits to a move rather than reacting per-frame. Config/param `hold` (VISION_HOLD env,
+`play_sandbox_world(hold=)`). Suite **414 green** (+ frame-skip + hold-default tests).
+
+Live-verified on `runs/assetfix_gen` (--max-steps 25): **7 vision decisions produced 40 sim frames**
+(hold 6) -- occasional grabs (1 per ~6 frames), not per-frame -- with the action held between, the
+character moving/jumping continuously; a 41-frame watchable gif. (The game ended at decision 7 on its
+own win/lose logic; vision_success False -- the VLM's platforming skill remains the separate limit.)
+
+## 2026-07-12 -- faithful-play replay is real-time and ends when the game ends
+
+User: "the replay should be in real time and should finish when the game is done." The episode.gif
+used an arbitrary 110ms/frame + an 8-frame final-frame hold. Fixed: the game exposes `env.dt`
+(seconds of game time per step -- e.g. the observed game's `DT=0.05`, 20fps) or `env.fps`; the
+driver reads it (default 0.05 if absent) and `_save_episode_gif` now plays in REAL time -- total
+playback == `sim_frames * dt` == the real game duration -- with NO padded final hold, so the replay
+finishes exactly when the game did. When the sim produced many frames it subsamples by a stride and
+stretches each shown frame to `stride*dt`, keeping total playback real-time while the frame count /
+per-frame duration stay sane (gif renderers clamp very short durations). Added `env.dt` to the
+make_env contract (sandbox_agent.md) + the reference template (`_Episode.dt = 0.2`). Metrics record
+`game_dt` + `real_time_seconds`. Suite **414 green**.
+
+Live-verified on `runs/assetfix_gen`: 46 sim frames at dt 0.05 -> a 47-frame episode.gif with total
+playback **2.35s = 46*0.05** (real time, the game's own speed), final frame 50ms (no hold), ending
+exactly when the game hit `done` at decision 8. Both requests satisfied.
+
+## 2026-07-12 -- tested faithful play on `absence` (pre-fix world) + best-effort dt fallback
+
+User asked to test faithful play on `runs/absence` -- a pre-fix run (no asset-passing make_env, no
+env.dt; real DT=1/30). Added `vision_play._resolve_dt(env, module)`: env.dt -> env.fps ->
+run_scene.DT/dt/TIMESTEP -> run_scene.FPS/fps -> 0.05 default. So a world built before the env.dt
+contract (like absence) still gets a real-time replay from its module timestep constant. Hermetic
+test added. `env.dt` remains the clean documented path; this is the fallback.
+
+Live test (`runs/absence_play`, --max-steps 25): **frame-skip confirmed** -- 25 vision decisions for
+150 sim frames (hold 6, occasional grabs, not per-frame); **real-time replay confirmed** -- game_dt
+0.0333 (=1/30, read from run_scene.DT via the fallback, not the 0.05 default that would've played
+1.5x slow), episode.gif ~4.6s ~= sim_frames*dt, ending on the final frame with no padded hold. The
+policy collected 1 gem and got +reward each step; vision_success False (didn't get 2 gems + exit in
+150 frames). **Honest caveat, as flagged:** the character/gems/spikes render as PRIMITIVES (orange
+ellipse hero) because absence's pre-fix make_env ignores assets -- can't be retrofitted; regenerate
+absence (new contract) for real generated sprites. Suite 415 green. runs/absence left untouched;
+runs/absence_play cleaned.
+
+## 2026-07-12 -- a live TODO + memory harness that makes a run true to the prompt (mcraft follow-up)
+
+The mcraft run failed (placed plank had no break-table entry; hotbar excluded collected wood; auditor
+caught it, repair budget exhausted). User's direction, via LangChain's "how to build a custom agent
+harness": stop adding a per-case principle per failure -- give the agent a live TODO it maintains via
+tool calls + a persistent memory, fed as context at every step, so it implements EVERY requirement.
+Chosen impl (user picked "files as source of truth + a todo tool"):
+
+- `sandbox/checklist.py::build_checklist` -- an independent LLM pass (mirrors prompt_refiner) turns the
+  refined prompt into concrete `[{id,requirement,how_to_verify}]` items, derived independently of the
+  builder so it can't drop a hard requirement. Best-effort -> [] (agent self-derives). Prompt in
+  `checklist_generator.md`.
+- `sandbox/workspace.py::seed_todo` writes TODO.json (source of truth: status/verified_by), MEMORY.md,
+  and `todo.py` -- a seeded workspace CLI the agent runs via Shell (show/add/done/fail/note), mutating
+  the files + printing greppable TODO_UPDATE/TODO_PROGRESS/MEMORY_NOTE lines. A workspace CLI (not an
+  SDK function tool) so both backends work identically and there's no diverging harness-side state.
+- runner.py + claude_runner.py: build+seed after refinement, thread the item list into the agent
+  message (`_todo_brief`), re-inject still-open items on repair (`_repair_message(open_todo=)` -- FS
+  persists so a repair resumes with TODO+memory intact), record final TODO.json as metrics.checklist.
+- sandbox_agent.md meta-principle now LEADS with "work your TODO... call `todo.py done <id>` only after
+  a real check that fails if faked; never finish while an item is pending." auditor.py + sandbox_auditor.md
+  audit against the checklist (completeness + each done item genuinely implemented). GUI: a "todo"
+  _classify_stage kind (live checklist) + a per-item pass/fail report from metrics.checklist. Repair
+  default 2 -> 3.
+
+Suite 425 green (+ test_checklist.py, todo.py/seed_todo in test_sandbox_workspace, repair-reinjection in
+test_sandbox_runner, auditor-checklist in test_auditor).
+
+**Live-verified two ways.** (1) Auditor-against-checklist on the captured `runs/mcraft` (real OpenAI
+auditor): with a checklist, it returned FAIL naming the exact items -- "item r2 not genuinely
+implemented: mine() indexes NEED['plank']/BREAK['plank'] which don't exist -> KeyError", "item r3 false:
+HOTBAR omits wood" -- plus flagged the checklist incomplete. Per-item enforcement works. (2) Full
+end-to-end fresh generation (`runs/todo_verify`, a cave-platformer prompt): the generator derived an
+**18-item** checklist (each concrete, e.g. "collects exactly once, increments by exactly one"; "touching
+the locked exit before 2 gems does not win"), seeded it, the agent worked it via todo.py, and finished
+**18/18 done -- first try, repair_attempts 0, audit_passed True**, with substantive per-item verified_by
+("Physics replay crosses four void gaps with declared jumps", "ActionSpace registers left and right"),
+a real render.png + replay.gif. The harness makes fidelity a tracked, per-item, independently-enforced
+contract. Honest scope: full Minecraft-lite remains a hard one-run build; auditor+repair are the backstop.
+
+## 2026-07-12 -- floating goals popup in the GUI (live "currently on" tracker)
+
+User: the goals should be a floating popup showing which one the agent is currently on. Added a fixed
+floating panel (`#goals-popup`, top-right) to the GUI: it lists every requirement, dims+strikes done
+ones, and HIGHLIGHTS the current item (cyan glow, ▶). Fed live from the stream -- `TODO_SEED r<n>: ...`
+lines seed it, and the agent's `todo.py doing/done <id>` tool-call lines (which stream as `$ ...` command
+narration) update statuses; current = the item marked `doing`, else the first not-done. Collapsible
+(click the title) and dismissible (×), reconciled to the authoritative `metrics.checklist` on the done
+event, reset on each run. To make "currently on" a real signal (not just an inference), added a
+`todo.py doing <id>` subcommand (status "doing", verified_by preserved) + a nudge in `_todo_brief`
+("call todo.py doing <id> when you START an item"). Suite 425 green. Live-verified in a real browser:
+injected the exact stream lines -> the popup showed "GOALS 2/6" with two done (struck), "Collect at
+least two gems" highlighted as current, the rest pending; collapse + close controls work (screenshot).
+
+## 2026-07-12 -- split: REQUIREMENTS (acceptance) vs the agent's BUILD PLAN (popup shows the plan)
+
+User clarified the goals popup should show Claude-Code-style progress points -- the PARTS OF THE
+PROGRAM to build -- NOT the requirements (which are separate), and the build tasks should add up to
+meet the requirements. Refactored the single "TODO = requirements" model into two:
+- `REQUIREMENTS.json` -- the independently-derived acceptance criteria (auditor's contract; the agent
+  does NOT tick these). Shown as a "Requirements" report + the audit verdict.
+- `PLAN.json` -- the agent's own live build plan (progress points), starts EMPTY; the agent authors it
+  with `plan.py add` and works it with `plan.py start/done`, ensuring the tasks cover every requirement.
+  This is what the floating popup (now titled "Build plan") shows, current task highlighted.
+Changes: workspace.py (`_PLAN_TOOL_TEMPLATE`/plan.py, `seed_workspace`, `read_requirements`/`read_plan`/
+`open_plan_items`), runner.py + claude_runner.py (seed requirements, thread the reqs-vs-plan brief,
+re-inject open build tasks on repair, metrics `requirements`+`build_plan`), sandbox_agent.md (author +
+work a build plan that adds up to the requirements), auditor gets requirements, gui/app.py
+(`_classify_stage` REQ_SEED/PLAN_*/plan.py) + index.html (popup parses plan.py add/start/done, title
+"Build plan", requirements report from metrics.requirements + the audit verdict). plan.py `start`
+replaces `doing`; items keyed by `task` not `requirement`. Tests updated (seed_workspace, plan.py
+add/start/done, repair re-injects build tasks, classify_stage). Suite 425 green.
+
+Live-verified in a browser: injecting the `plan.py add/start/done` command lines drove the popup to
+"BUILD PLAN 2/5" with two tasks struck done and "gem pickup + counter" highlighted as the current one
+(screenshot). The popup shows build tasks (tile world gen / jump physics / gem pickup / exit gate /
+HUD), separate from the requirements report.
+
+## 2026-07-14 -- popup fix: parse plan.py's clean OUTPUT lines, not the shell COMMAND line
+
+User reported a GUI run whose build-plan popup showed a single garbled "1/1" item -- the whole spec
+sentence plus a trailing `&& /Users/harjyot/GenInt/.venv/bin/python plan...` shell fragment mashed into
+one entry. Diagnosed by reading the actual run (`runs/bottle/sandbox_workspace/PLAN.json`): the agent
+behaved CORRECTLY -- PLAN.json held 4 clean tasks, all done, audit passed. The bug was purely frontend.
+`handleTodoLine` was parsing the narrated shell COMMAND line (`$ ...python plan.py add "<task>" && python
+plan.py ...`), so a `&&`-chained command became one garbled item and the real task ids were lost.
+
+Fix: surface plan.py's own clean OUTPUT lines and parse those instead.
+- `runner.py::_describe_tool_output` now returns any `PLAN_ADD/PLAN_UPDATE/PLAN_PROGRESS/MEMORY_NOTE`
+  lines found in a command's OUTPUT even on a SUCCESSFUL (exit 0) command (previously it stayed silent on
+  success, so plan progress never reached the GUI except via the fragile command line). Normal successful
+  commands still stay silent; failures still surface.
+- `claude_runner.py::_describe_block` mirrors this for the Claude backend's tool-result blocks (surfaces
+  PLAN_/MEMORY lines from a successful tool result before the is_error check).
+- `index.html::handleTodoLine` now parses the multi-line clean output (`PLAN_ADD t1: <task>` /
+  `PLAN_UPDATE <id> done|doing`, with real ids) -- a `$`-prefixed command line no longer matches
+  `^PLAN_ADD`, so the `&&` garble can't be captured. REQ_SEED lines still don't match, so requirements
+  don't pollute the build-plan popup.
+Regression test in test_sandbox_runner.py (`_describe_tool_output` surfaces PLAN lines on success, silent
+for normal commands, still surfaces failures). Suite 426 green. Live-verified in a browser: injecting the
+exact clean output lines the bottle run now emits drove the popup to a clean "BUILD PLAN 1/4" with four
+separate tasks (t1 struck done, t2 highlighted current, t3/t4 pending) -- no `&&` fragment (screenshot).
+
+## 2026-07-14 -- vision play in short PLANS, not one keystroke per model call
+
+User pointed at the Navigate page playing `bottle`: the play log was `[44/60] up`, `[45/60] right`,
+... -- **60 decisions = 60 separate vision/LLM calls, one keystroke each** (each shipping a full
+frame to get back one token), and the run still failed ("Did not reach"). Direction: "it should use
+vision to play but the actions shouldn't be done frame by frame." (Confirmed via AskUserQuestion that
+the target is the vision navigate/play loop, not the build-side self-play.)
+
+Fix: each vision call now returns a short ordered **plan** (up to `plan_len`, default 6) instead of
+one action; the driver executes the plan action-by-action through the real `env.step()` (physics /
+`hold`-frame collection unchanged), then re-observes -- or re-observes **early** if the level ends or
+a move is blocked (deterministic path: `info["action_legal"] is False`; faithful path: a *stall* --
+a `hold`-block that left the frame visually unchanged, `ImageChops.difference(...).getbbox() is
+None`). Same gameplay length, ~`plan_len`x fewer model calls.
+
+- `navigation/vision_policy.py`: `_parse_actions(raw, *, limit)` (ordered plan, appearance order,
+  repeats kept, capped, never empty); `_parse_action` kept as `_parse_actions(...)[0]`;
+  `VisionPolicy.act` returns `(list[str], raw)` with `max_actions`. `PLAN_LEN`
+  (`INFINIENV_VISION_PLAN_LEN`, default 6).
+- `sandbox/vision_play.py`: `_parse_actions`/`_idle_action`; `run_vision_episode` gains `plan_len`,
+  executes plans with per-action `hold`, `_still_frame` stall-abort, records each decision's
+  `plan`/`executed`, `env_steps`/`plan_len`; `_vision_act` returns a plan; `_PLAYER_SYSTEM` and
+  `_config` (`VISION_PLAN_LEN`) updated; `main()` logs `[look d] plan: ...`. Back-compat: a bare
+  string plan is coerced to `[string]`, `plan_len=1` reproduces the old one-action-per-look.
+- `evaluation/vision_runner.py::run_navigation`: outer loop = vision calls, inner = the plan;
+  blocked-move re-look; `episode.json` steps carry their `decision`; `metrics.json` gains
+  `decisions` + `plan_len`. `sandbox/vision_runner.py` threads `plan_len` into the injected
+  `vision_config.json` and `play_sandbox_world`.
+- Prompts (`vision_navigator.md`, `_PLAYER_SYSTEM`): ask for a short ordered sequence of action
+  words, note that a blocked/stalled move drops the rest and re-shows the frame (over-committing is
+  cheap to recover from).
+
+Honest framing kept in the code/docs: the guaranteed win is **fewer vision calls (tokens/latency)**
+for the same gameplay length; it *may* also help success (a coherent few-step plan beats
+frame-by-frame dithering; blocked-move re-looks avoid wall-bashing) but that isn't the claim. §2/§11b
+invariants untouched -- pixels-only policy, code-defined success; only *how often the policy is
+asked* changed. Suite 432 green (+6 vision tests: ordered-plan parsing, a plan of N in one decision,
+bare-string coercion, stall aborts a plan early via a moving-frame fake game).
+
+**Live-verified against the real OpenAI vision API, both paths:**
+- Deterministic `run_navigation` (`navigate examples/kitchen_can.json --max-steps 30 --no-judge`):
+  **3 vision calls** drove 15 env steps and SUCCEEDED (`vision_success=True`, `decisions=3`,
+  `steps=15`) -- the pixel-only policy picked up and delivered the can. Before this change that
+  would have been 15 separate vision calls. The `[look N] plan: ...` log and per-step `decision`
+  tags (`[1,1,1,1,1,2,2,2,2,2,2,3,3,3,3]`) confirm the outer-look / inner-plan structure.
+- Faithful sandbox play (`navigate runs/bottle` -- the exact case from the user's screenshot):
+  **14 vision calls** drove 60 env actions / 360 sim frames (`decisions=14`, `env_steps=60`,
+  `sim_frames=360`, `plan_len=6`, `hold=6`), each look a plan of up to 6 actions -- vs the
+  screenshot's **60 single-keystroke calls**, a ~4.3x reduction for the same gameplay length, with a
+  real 2 MB `episode.gif`. Honest outcome: `vision_success=False` -- the weak stand-in still didn't
+  solve the maze, exactly as flagged (the guaranteed win is call-count/tokens, not success). The
+  deterministic run above shows batching can *also* help when the level is solvable by the policy.
+
+## 2026-07-14 -- a better navigation policy: feedback + memory + frame history (still pixels-only)
+
+The faithful navigate of the `cartel` maze (`runs/nav_1784060137`) COMPLETELY FAILED:
+`vision_success=False`, `total_reward=-0.76`. Reward is +0.05/move, -0.02/blocked, so -0.76 over 60
+steps = **~54 of 60 moves were blocked** -- the policy moved ~6 cells into the top-right corner then
+spammed a blocked direction (`d` into the boundary) for the rest of the episode (start+mid gif
+frames both show it wedged in the same corner, `LAST: d (BLOCKED)`). User: "it completely fails as it
+goes backwards all the time ... make a better policy for navigation solving."
+
+Root causes (from reading `runs/cartel/sandbox_workspace/run_scene.py` + the run): (1) the driver
+never told the policy a move was blocked, so it repeated it -- though the game DOES expose
+`info["moved"]`/`info["blocked"]`; (2) the stall-abort added earlier was defeated by the live HUD
+(`STEPS`/`LAST` change every frame, so `_still_frame` never fired -- and a whole-frame area diff
+can't help either, a one-tile sprite move is <1% of the image); (3) no memory -- one context-free
+frame each look -> oscillation/backtracking.
+
+Decision (confirmed with user): stay a TRUE pixels-only policy (do NOT feed coordinates/a map -- that
+would defeat the §11b demo). The harness may compute stuck-ness however it likes; only words+frames
+reach the policy. Changes:
+- `sandbox/vision_play.py`: `_moved(info, before, after, before_pos, after_pos)` prefers
+  `info["moved"]`/`["blocked"]`/a position key over a frame diff; `_feedback_text(recent,
+  last_outcomes, looping, actions)` (blocked-move summary / repeated-block "do NOT repeat" / stuck
+  warning / untried-direction suggestion); `run_vision_episode` now aborts a plan on a BLOCKED move
+  (not a frame stall), keeps a rolling `recent`+`visited` memory, passes the current frame + up to
+  `history` recent frames (`VISION_HISTORY`, default 2) and the feedback text to the controller
+  (new contract `act(frames_list, decision, actions, feedback)`); metrics gain
+  `blocked_steps`/`stuck_looks`. `_PLAYER_SYSTEM` rewritten to real maze strategy.
+- `navigation/vision_policy.py`: `Responder` now `(system, user_text, images: list[bytes])`;
+  openai/claude responders attach each image; `VisionPolicy.act(frames, ..., feedback=)`; shared pure
+  `build_feedback(...)` (mirrors `_feedback_text`, kept separate because vision_play.py is copied
+  standalone into a sandbox).
+- `evaluation/vision_runner.py::run_navigation`: tracks recent `(action, moved)` (moved = a real
+  agent-cell change, read from `env.state.agent_pos()`) + `visited` for loop detection, builds the
+  same feedback, keeps the last 2 frames, passes frames+feedback to `act`; records `blocked_steps`.
+- `sandbox/vision_runner.py`: threads `history` into the injected `vision_config.json` +
+  `play_sandbox_world`.
+- Prompts: `vision_navigator.md` (maze strategy: turn on a block, don't reverse unless dead-ended,
+  wall-follow, break a loop, obey the blocked/stuck feedback); `sandbox_agent.md` make_env contract
+  now asks `env.step`'s info to include `"moved": bool` (optional; the driver falls back).
+
+Honest scope (kept in code+docs): the guaranteed win is eliminating the stuck-in-a-corner
+wall-bashing and the oscillation, and giving the policy recovery + memory so it EXPLORES. Solving a
+deep 19x15 maze from pixels is still hard for a weak stand-in -- it gets much further, not a
+guaranteed win. §2/§11b invariants untouched (pixels-only, code-defined success). Suite 437 green
+(+5 tests: `_moved` prefers info; a blocked move aborts the plan via info + is fed back; history
+frames reach the controller; `build_feedback`/`_feedback_text` report blocked/stuck/suggestions;
+multi-image responder).
+
+**Live-verified (real OpenAI vision API):**
+- Deterministic path (`navigate examples/obstacle_course.json`, 52 walls): SUCCESS in 16 steps / 3
+  vision calls, `blocked_steps=0`, `history=2`, and the `Last plan result: ...` feedback line was
+  built and passed each look -- the shared feedback/memory/history plumbing confirmed working.
+- Faithful path (`navigate runs/cartel` -- the exact failing case): the pathological "wedged in a
+  corner spamming ONE blocked direction forever" is gone (blocked moves are now detected via
+  `info["moved"]`, fed back, and the policy re-observes at each wall). But **the outcome is
+  high-variance run to run** -- honestly reported, not cherry-picked: one run reached
+  `total_reward +2.32` (reward is +0.05/move, -0.02/blocked, so the agent was genuinely MOVING
+  through the maze, not bashing), another `-1.02` (mostly bashing again). No faithful cartel run
+  SOLVED the maze (`vision_success=False` every time) -- expected and stated up front: a weak
+  stand-in VLM solving a 19x15 dead-end maze from single rendered frames is hard and stochastic. The
+  improvements (feedback / memory / frame history / blocked-detection / maze prompt) remove the
+  specific reported failure (stuck going backwards) and make it EXPLORE; they do not make a weak
+  policy reliably solve a deep maze, and the run-to-run variance is real.
+  - **Two bugs/levers found from the live runs, both fixed:** (1) `blocked_steps` first read only the
+    LAST of the `hold=6` held frames, miscounting a direction that advanced several cells then hit a
+    wall as "blocked" (52/60). Fixed so an action counts as moved if it moved AT ALL during the hold
+    (truthful counter). (2) The re-observation cadence is a real lever: the better (+2.32) run
+    re-observed at EVERY wall-touch; committing further before re-looking (an intermediate version)
+    did worse. Final design separates the two -- `block_moved` (moved at all) drives the honest
+    `blocked_steps` counter + feedback, while a blocked FINAL held step (`step_moved` False, this
+    direction is exhausted) triggers re-observe, keeping the frequent-relook cadence. Regression test
+    `test_hold_block_counts_as_moved_if_it_moved_at_all`. Suite 438 green.
+  - **Final-design live sample (the settled cadence: re-observe at each wall + truthful counter):**
+    `total_reward +4.16`, `blocked_steps 10/40 = 25%`, `stuck_looks 0` -- the best of the runs, vs the
+    original `-0.76` / ~90% blocked / wedged-in-a-corner. Still `vision_success=False` (didn't reach
+    the deep package in 40 steps). Net honest read across all runs (`-0.76` original -> `+2.32` /
+    `-1.02` / `+4.16`): the specific reported pathology is fixed and the settled design's sample is
+    strongly positive, but a weak stand-in VLM does not reliably SOLVE a deep dead-end maze from
+    single frames, and run-to-run variance is real -- reported, not cherry-picked.
+
+## 2026-07-14 -- the minimap: give the vision policy a code-derived map so it ACTUALLY solves
+
+Feedback+memory+history (above) made the policy explore instead of wedging in a corner, but it still
+didn't reliably REACH the goal -- a weak stand-in VLM can't route a maze from pixels alone (verified:
+it could clearly SEE the agent + goal in the frame; the gap was route-planning). User: "fix the
+vision stuff till it actually runs properly." Asked whether to relax the earlier strict pixels-only
+stance; user chose **"give it a minimap + coordinates."**
+
+Change: each look, the policy now also gets a **text minimap** (`#`=wall `.`=floor `A`=you `P`=current
+sub-goal) + coordinates, built from CODE TRUTH and prepended to the feedback string (no controller
+signature change).
+- Deterministic path: `vision_runner._deterministic_minimap(env, scene)` from `env.grid` +
+  `env.state.agent_pos()` + the first incomplete goal's target (a `deliver` points at the object to
+  fetch until `held`, then the drop target). `vision_navigator.md` explains the map + the
+  forward/back/left/right<->(x,y) mapping.
+- Faithful path: `vision_play._minimap(env, info)` best-effort from what the sandbox game exposes --
+  `info["position"]` (or an env pos attr) + a walls set (`obstacle_cells`/`walls`/`blocked`) or a
+  `walkable` set + a goal cell (`package`/`goal`/`target`/`exit`). Guards: returns "" if no grid
+  state or bounds > 60/side (a continuous/pixel-coord game stays pixels-only). `_PLAYER_SYSTEM`
+  explains it. `sandbox_agent.md`'s make_env contract now asks grid games to expose these.
+  `metrics.json`/`vision_metrics.json` record `had_minimap`.
+
+**Deliberate departure from "pixels-only"** (the earlier stance), made at the user's explicit
+direction because they want it to actually solve. The load-bearing invariant is intact: the
+REWARD/SUCCESS is still 100% code-defined (`info["won"]`/`is_goal_complete`, never a VLM judging
+pixels) -- the minimap is an OBSERVATION aid, not a reward. That preserves the GI-brief point
+(code-level objectives beat a VLM-on-pixels judge); it only changes what the *player* observes.
+
+Tests (438->442 green): `_minimap` builds a correct grid from a cartel-shaped fake env + returns ""
+for a game without grid state; the minimap reaches the controller as feedback (`had_minimap` True);
+`_deterministic_minimap` marks A + P and points at the fetch object for a deliver. Live-verified the
+deterministic path solves with the map (`obstacle_course`: SUCCESS 18 steps / 3 vision calls).
+Faithful `cartel` live re-run WITH the minimap: `had_minimap=True`, `total_reward +2.96` (moving
+well) but `vision_success=False` (didn't reach the deep package in 50 steps, `blocked_steps 21/50`).
+Honest read: the minimap made the DETERMINISTIC play reliable and clearly helped faithful play, but a
+weak VLM's ASCII-maze pathfinding + action-name mapping over a deep dead-end maze is still imperfect;
+faithful deep-maze solving isn't guaranteed. Deterministic play (the substrate the human-play feature
+uses) is the reliable one.
+
+## 2026-07-14 -- human keyboard play in the GUI (Play mode)
+
+User: "can we allow the player to play the environments after generation on the frontend?" Offered
+two options (deterministic real-time keyboard play of any scene via InfiniEnv, vs turn-based faithful
+play of the real sandbox game); user chose **deterministic keyboard play**. Faithful real-time human
+play isn't practical anyway -- the real sandbox game runs isolated inside the sandbox (the trusted
+process never runs its code, a core §11b invariant), so interactive per-keypress play would need a
+long-lived in-sandbox process; out of scope.
+
+Built a third GUI mode, **Play**: the human drives the same deterministic `InfiniEnv` that `navigate`
+uses, just as the controller instead of a vision policy.
+- Backend (`gui/app.py`): `_play_sessions` in-memory map (a server-side InfiniEnv per session, capped
+  at `_PLAY_SESSION_CAP=24`, oldest-evicted); `POST /api/play/start {scene, assets}` -> first frame
+  (base64 PNG) + goal + `CONTROLLER_ACTIONS` + goal state (scene from the path-safe `_list_scenes`
+  allow-list); `POST /api/play/step {session_id, action}` -> new frame + steps/resolved/legal/reward/
+  goals + done/won, freeing the session on done. Win is CODE-defined (`info["all_complete"]` /
+  is_goal_complete), never pixels -- the §2 invariant holds; the human just replaces the solver.
+- Frontend (`index.html`): a "Play" mode button + a scene/assets picker; a right-panel play stage
+  (frame `<img>` + goal + status + WIN banner + controls). `keydown` maps arrows/WASD->move,
+  Space/E->interact, POSTs each step (one in flight at a time), updates the frame + status, shows
+  "YOU WIN" on `won`. Reuses the existing scene picker (populates both the navigate + play selects).
+- Works for EVERY scene (examples + any generated/sandbox scene.json); a sandbox world plays as its
+  declared top-down reading (same caveat as Navigate). Tests in `test_gui.py` (start/step/win-by-code/
+  rejections/session-freed). Live-verified in a browser: Play renders the frame+legend, arrow keys
+  advance the step counter + update the frame, and the YOU WIN banner shows on a code-judged win
+  (screenshot). Suite 447 green.
+
+## 2026-07-14 -- Play mode defaults to the world's OWN autogenerated sprites
+
+User: "the assets for playing should be the ones that were autogenerated." A generated run keeps its
+sprites in `runs/<name>/sandbox_workspace/asset_cache/<type>.png`. Added `_run_asset_paths(scene_path,
+scene)` (maps each `scene_asset_types(scene)` type to that run's cached `<type>.png` if present) and a
+new default Play assets mode **`world`**: `/api/play/start` renders with the run's own generated
+sprites -- no new image-API calls -- falling back to flat cells for an example world or `assets=none`;
+`none/local/generated/auto` still use the repo-cache resolution. Frontend Play assets dropdown now
+defaults to "world - this run's autogenerated sprites". Test in `test_gui.py`
+(`test_play_world_assets_use_the_runs_generated_sprites`: env.asset_paths point at the run's own
+asset_cache). Live-verified in a browser: playing `runs/cans` rendered the real generated chef agent +
+fridge/microwave/can/table pixel-art sprites, not flat cells (screenshot). Suite 448 green.
+
+## 2026-07-14 -- faithful deliver/pickup tasks: interact guidance + carry note + oscillation fix
+
+User reported a faithful navigate on the `cans` kitchen world failing with a telltale up/up/down/down
+oscillation (`vision_success=False`, `had_minimap=True`, `blocked_steps=2`, `stuck_looks=0`,
+`total_reward +2.52` -- MOVING, not blocked, but bouncing forever). Root cause from reading
+`runs/cans/sandbox_workspace/run_scene.py`: it's a DELIVER/pickup task ("place ONLY the red soda can
+in the sink"), the game has `e`/`space` = pick up / drop, and the win needs the can carried to the
+sink -- but (a) the faithful `_PLAYER_SYSTEM` prompt only taught maze navigation, never "use interact
+to pick up/place" (unlike the deterministic `vision_navigator.md`), so the policy never picked
+anything up; (b) the minimap points at the final goal (the sink, `env.goal`), not "get the can
+first," so the policy walked to the sink and bounced (arriving empty-handed does nothing); (c) the
+oscillation went undetected -- `stuck_looks=0` -- because the loop check only fired on `moved_recent
+== 0` or `len(set(visited)) <= 2`, and a 3-cell up/up/down/down bounce moves and spans 3 cells.
+
+Fixes (generic, both faithful + deterministic paths):
+- `_PLAYER_SYSTEM` (faithful prompt): added pickup/deliver guidance -- if the goal is collect/pick
+  up/place/deliver, move onto the item and use the interact action (e/space/interact/use/pick), carry
+  it, interact again at the destination.
+- `_carry_note(info)` (faithful): surfaces the game's own carry state in the feedback ("Your hands are
+  EMPTY -- go pick the item up first" / "You are carrying: X -- take it to the target and place it"),
+  best-effort over common info keys (`carried`/`carrying`/`holding`/`inventory`/...). The `cans` game
+  exposes `info["carried"]`, so this fires.
+- Oscillation detection loosened (both paths): `looping` now also fires when a MAJORITY of recent
+  cells are revisits (`2*len(set(visited)) <= len(visited)`), catching a moving-but-circling bounce,
+  not just no-movement. The looping feedback now also says "if moving isn't working you probably need
+  to INTERACT, not just move."
+Tests updated/added (449 green): `_carry_note` (empty/holding/none), the new looping+interact wording,
+"Options include:" suggestion.
+
+**Live cans re-run (honest, mixed result):** with the fixes, `stuck_looks` went 0 -> 16 -- the
+oscillation detection now FIRES and the policy is repeatedly told "you're oscillating; INTERACT, don't
+just move" + "your hands are EMPTY, go pick it up." BUT the default model (`gpt-5.6-terra`) *ignores*
+it -- it kept bouncing `a a a`/`d d d` and never issued the `e`/`space` interact action, so
+`vision_success=False` again. A stronger model (`gpt-5.5-pro`) was tried but is too slow to finish a
+60-step episode of 3-image vision calls inside a 15-min budget (timed out, no artifacts). Honest
+conclusion: the infrastructure is correct and complete (minimap + blocked-detection + oscillation
+detection + carry note + interact guidance all wired and verified firing), but reliably SOLVING a
+multi-step "find the RIGHT item among distractors, pick it up, avoid wrong deposits, place it in the
+sink" task needs a *capable game-playing policy*, which a weak stand-in VLM is not -- exactly the §11b
+premise (our contribution is the interface + code-defined reward loop; GI supplies the real policy).
+NOT pursued further: pointing the faithful minimap at the nearest item when empty-handed was
+considered and rejected -- the task needs the RED soda specifically, so "nearest can" could steer it
+to a wrong/dangerous deposit. The deterministic navigate (fixed-vocabulary scenes) + human Play mode
+both work reliably; faithful solving of a hard bespoke task is the honest limit.

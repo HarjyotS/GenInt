@@ -1966,6 +1966,69 @@ mode is for. The earlier `procgen_verify` "clean success" note stands corrected:
 honest, its *navigable multiple paths* were not. [End-to-end result -- auditor forcing a repair
 inside a fresh run -- appended after that run.]
 
+### A live TODO + memory harness: make a run true to the prompt, item by item (2026-07-12)
+
+A "mcraft" (Minecraft-lite) run failed because the agent half-built a complex spec (a placed `plank`
+had no break-table entry -> KeyError; collected wood wasn't in the hotbar). The auditor caught it, but
+the recurring lesson is that piling on a new *principle* per failure mode (the "closed action space"
+history above) is whack-a-mole. Following agent-harness best practice (LangChain's "how to build a
+custom agent harness": *"the job of a harness is to provide context to the model at every step; a todo
+list tracks progress across a long run; load memory at startup and write it back"*), fidelity is now an
+explicit, per-item, independently-enforced contract the agent works through — one general mechanism
+instead of another principle:
+
+- **`sandbox/checklist.py::build_checklist(refined_prompt)`** — an independent LLM pass (mirrors
+  `prompt_refiner.py`) decomposes the refined prompt into concrete, individually-verifiable items
+  `[{id, requirement, how_to_verify}]`. Derived **independently of the builder**, so the agent can't
+  silently drop a hard requirement (e.g. "every placeable block can also be broken" is its own item).
+  Best-effort → `[]` on no key/error (the agent then self-derives its TODO). Prompt in
+  `llm/prompts/checklist_generator.md`.
+- **Requirements vs. build plan are SEPARATE (user's distinction).** `sandbox/workspace.py::seed_workspace`
+  writes two things into the workspace: `REQUIREMENTS.json` — the derived **acceptance criteria** the
+  finished game is audited against (the agent doesn't tick these; the auditor verifies them) — and an
+  **empty `PLAN.json`**, the agent's live **build plan** (the concrete PARTS OF THE PROGRAM to build,
+  like a coding agent's todo, e.g. "tile world generation", "gravity + jump physics", "gem pickup +
+  counter"), plus `MEMORY.md` and the **`plan.py`** tool: `show` / `add "<task>"` / `start <id>` /
+  `done <id>` / `note`. The plan is what the GUI popup shows; the build tasks must **add up to satisfy
+  every requirement**. `plan.py` is a workspace CLI the agent runs via its **Shell tool** (not an SDK
+  function tool) so it works identically on both backends with no diverging harness-side state, and
+  prints greppable `PLAN_ADD`/`PLAN_UPDATE`/`PLAN_PROGRESS`/`MEMORY_NOTE` lines.
+- **The agent authors + works the plan** (`sandbox_agent.md`, the meta-principle leads with it): read
+  `REQUIREMENTS.json`, `plan.py add` each build task until the plan covers every requirement, then
+  build with `plan.py start/done`; **finish only when every task is done AND every requirement is
+  met**. The runners (`runner.py`/`claude_runner.py`) build+seed the requirements after refinement,
+  thread the requirements-vs-plan brief into the agent message (`_todo_brief`), re-inject the still-open
+  **build tasks** on each repair (`_repair_message(open_todo=...)` — the FS persists, so a repair
+  resumes with the plan + memory intact = "context at every step" across the whole run), and record
+  `metrics.json.requirements` (acceptance) + `metrics.json.build_plan` (progress) separately. The Claude
+  backend also uses its native TodoWrite for in-context tracking.
+- **The auditor enforces the REQUIREMENTS** (`auditor.py::audit_run(..., checklist=requirements)` +
+  `sandbox_auditor.md`): completeness (no spec requirement missing) AND each requirement genuinely
+  implemented in the code — itemized FAIL findings feed the repair loop. Live-verified against the
+  captured `runs/mcraft`: the real auditor returned FAIL naming the exact items ("`mine()` indexes
+  `NEED["plank"]`/`BREAK["plank"]` which don't exist → KeyError"; "HOTBAR omits wood") plus flagged
+  the checklist incomplete — per-item "true to the prompt" enforcement.
+- **GUI**: the `PLAN_ADD`/`plan.py`/`REQ_SEED` lines classify to a `_classify_stage` "todo" kind, and a
+  **floating "Build plan" popup** (`#goals-popup`, top-right) lists the **build tasks** and **highlights
+  the one the agent is currently on** (the task marked `start`, else the first not-done),
+  collapsible/dismissible, reconciled to `metrics.build_plan` on completion. `handleTodoLine` parses
+  plan.py's clean **OUTPUT** lines (`PLAN_ADD t1: <task>` / `PLAN_UPDATE <id> done|doing`, with real
+  ids), **not** the narrated shell `$ ...plan.py add "..."` **command** line — a `&&`-chained command
+  line would otherwise mash the whole thing into one garbled item and lose the ids (a real user-reported
+  bug). To make that work, `runner.py::_describe_tool_output` (and `claude_runner.py::_describe_block`
+  for the Claude backend) surface `PLAN_*`/`MEMORY_NOTE` output lines even from a *successful* command,
+  not just failures. The sandbox result separately renders a **Requirements** report
+  (`metrics.requirements` + the audit verdict). Live-verified in a browser: the popup ticked build tasks
+  off and highlighted the current one ("BUILD PLAN · 1/4"), with no `&&` fragment.
+- **Live-verified end to end** (a cave-platformer prompt, `runs/todo_verify` in the pre-split version):
+  the generator derived an 18-item requirement set, the agent authored + worked a build plan, and
+  finished with the audit passing first try. The default repair budget is bumped 2 → 3.
+
+Honest scope: this makes fidelity a persistently-tracked, per-item, independently-enforced contract
+fed to the model at every step — the strongest lever short of a bigger model — but a full Minecraft-
+lite is still a hard one-run build; the auditor + repair loop remain the backstop, and the hardest
+prompts may still want a more capable `INFINIENV_SANDBOX_MODEL` / more turns.
+
 ### Sandbox is the only `generate` mode, and it runs the deterministic validator (2026-07-11)
 
 At the user's explicit direction, sandbox is the **only** `generate` mode. `cmd_generate` always calls
@@ -2010,6 +2073,242 @@ own repair loop internally).
 
 ---
 
+## 11b. The vision-policy loop: a pixel-observation env + a stand-in vision policy
+
+Every mode above generates or plays a world using code that reasons over *state*. The challenge
+brief, though, is fundamentally about a different consumer: General Intuition's own **vision-based
+policy**, which observes *rendered frames* and emits *controller actions* (move fwd/back/left/right,
+mouse ΔX/ΔY). Its three "why this matters" bullets — post-training environments, code-level (not
+VLM-on-pixels) objectives, and a reward model trained on code signals then applied to pixels — are
+all about that policy. This section closes that loop: it makes InfiniEnv a place a frame-in /
+controller-out policy can actually play, with success judged in code.
+
+**The §2 invariant is preserved, not traded.** Reward is still deterministic code — only the
+*policy that plays* becomes pixel-based. This is unlike §11's sandbox, which trades the guarantee
+away; here there's no trade: `is_goal_complete` decides success exactly as it does for the
+deterministic solver.
+
+- `engine/env.py::InfiniEnv` — a **Gymnasium-compatible** env (mirrors the API without a hard
+  `gymnasium` dependency): `obs, info = env.reset()`, `obs, reward, terminated, truncated, info =
+  env.step(action)`. **Observation** is a rendered frame (`render_scene_image`, the same per-state
+  renderer the replay uses) — what a camera-mounted policy sees. **Action** is a discrete
+  controller input, `CONTROLLER_ACTIONS = (forward, back, left, right, interact, wait)` — the 2D
+  subset of the policy's controls (2D top-down has no mouse ΔX/ΔY; the interface is shaped to accept
+  a 6-DoF controller when the schema goes 3D, §18). `interact` is a single "use" button the env
+  resolves *in deterministic code* to the legal concrete engine action (unlock an adjacent door
+  we hold the key for → perform a satisfied custom interaction → pick up an adjacent portable →
+  drop a held object at the current cell, in that priority). An illegal move is a no-op recorded in
+  `info`, never a crash. **Reward** = the number of goals that *newly* complete this step via
+  `navigation/planner.py::is_goal_complete` over `GameState`; `terminated` when all goals hold
+  simultaneously (same success notion as `play`/`solve_scene`), `truncated` at `max_steps`.
+- `navigation/vision_policy.py::VisionPolicy` — the pixel→action agent (a sibling to the
+  deterministic `policy.py`). Each **look** it is handed the current frame **plus 1-2 recent frames**
+  (base64 PNGs, so it can *see its own motion*) plus the goal *in words* (the brief's "specific goals
+  and rewards" — told the objective, judged by code) and returns a short **plan** — an ordered list
+  of up to `PLAN_LEN` controller actions (`_parse_actions`; `INFINIENV_VISION_PLAN_LEN`, default 6),
+  not one keystroke. Alongside the frames it also gets a **text minimap + coordinates** for grid
+  worlds (see the minimap bullet below) — the one thing that lets a weak stand-in actually *route* a
+  maze rather than guess. It's a **stand-in** for GI's unavailable policy — the contribution is the
+  interface + the code-reward loop, not a competing policy. Backend is OpenAI vision by default
+  (`OPENAI_API_KEY`;
+  the project's confirmed-funded key) or Claude (`--vision-backend claude` / `CL_KEY`);
+  `INFINIENV_VISION_MODEL` overrides the model. The `responder` is `(system, user_text,
+  images: list[bytes]) -> str` (a list, for the frame history), isolated so the whole loop is tested
+  with no key (`test_vision_policy.py`, `test_env.py`, and a faked-policy `navigate` case in
+  `test_cli.py`).
+- **The policy plays in short plans, not one call per keystroke.** A weak stand-in policy that saw
+  one frame and returned one action cost one full-frame vision call *per keystroke* (a maze run:
+  60 steps → 60 model calls, and it still failed — a real user-reported waste). Instead each look
+  returns a plan of ≤`PLAN_LEN` actions, executed in order through the real `env.step()` (physics
+  unchanged), and the policy is re-asked only after the plan finishes — or **early** on level end or
+  a **blocked** move. So gameplay length is unchanged but model calls drop ~`PLAN_LEN`×. Honest
+  scope: the guaranteed win is **fewer vision calls (tokens/latency)**; the memory/feedback +
+  minimap below are what actually help it *solve*. The load-bearing `§2/§11b` invariant — **success
+  is code-defined** (`info["won"]` / `is_goal_complete`, never a VLM judging pixels) — is untouched.
+  A bare-string return is coerced to a one-action plan.
+- **Feedback + memory so it recovers and explores, not oscillates (the `cartel` fix).** A faithful
+  run of the `cartel` maze *completely failed* (`total_reward -0.76` ≈ **~54 of 60 moves blocked** —
+  it wedged in a corner spamming one blocked direction, "goes backwards all the time"). Root causes:
+  the driver never told the policy a move was blocked, it had no memory (one context-free frame → it
+  oscillated), and a whole-frame stall check was defeated by the game's live HUD (`STEPS`/`LAST`
+  change every frame). Fix — (1) **robust blocked detection** — `_moved(info, ...)`
+  prefers the game's own `info["moved"]`/`info["blocked"]`/position over a frame diff (a one-tile
+  sprite move is <1% of the frame, so a diff can't see it); a blocked move **aborts the rest of the
+  plan** and is remembered. (2) **word feedback each look** (`build_feedback` / `_feedback_text`,
+  pure + unit-tested): "Last plan result: up(moved) right(BLOCKED)", "these moves keep hitting a wall
+  — do NOT repeat: right", "you are STUCK / oscillating", and a suggestion of untried directions —
+  the proprioceptive signal a real embodied policy gets. *Oscillation* (moving but revisiting a small
+  cycle — the kitchen-deliver bounce) counts as looping, not just no-movement, and the looping hint
+  says to try INTERACT, not just move. For a **pickup/deliver task**, `_carry_note(info)` surfaces the
+  game's own carry state ("your hands are EMPTY — go pick the item up first" / "you are carrying: X —
+  take it to the target and place it") from common `info` keys (`carried`/`holding`/…), and
+  `_PLAYER_SYSTEM` tells the policy to use the interact action to pick up/place. Honest: on the real
+  `cans` deliver world this makes the oscillation *detected* (`stuck_looks` 0 → 16) and the interact
+  guidance + carry note *present*, but the weak default model (`gpt-5.6-terra`) still ignored it (kept
+  bouncing, never pressed `e`/`space`) — the guidance is wired and correct; following it needs a more
+  capable policy (a stronger model was too slow to finish the episode in-budget). This is the §11b
+  stand-in limit, not a missing feature. (3) **frame history**
+  (`VISION_HISTORY`, default 2). (4) a **maze-strategy prompt** (`vision_navigator.md` /
+  `_PLAYER_SYSTEM`: turn on a block, don't reverse unless dead-ended, wall-follow, break a loop,
+  interact to pick up/place for deliver tasks).
+  `vision_metrics.json`/`metrics.json` now record `blocked_steps` (should be a small fraction of
+  `env_steps`) + `stuck_looks`. `sandbox_agent.md`'s make_env contract now asks `env.step`'s `info`
+  to include `"moved": bool` so faithful play's feedback is reliable (best-effort; the driver falls
+  back). Honest scope (live-verified on `cartel`, reported not cherry-picked): this removes the
+  specific reported failure — the policy no longer wedges in a corner spamming one blocked direction
+  forever; it detects blocks, re-observes at each wall, and *explores*. The settled design's live
+  sample is strongly positive — `total_reward +4.16`, `blocked_steps 10/40 = 25%`, `stuck_looks 0`
+  (vs the original `-0.76` / ~90% blocked / wedged-in-a-corner) — but the outcome is **high-variance
+  run to run** (other runs hit `+2.32` and `-1.02`), and **no faithful `cartel` run solved the deep
+  19×15 dead-end maze** (`vision_success=False` every time). A weak stand-in VLM solving such a maze
+  from single frames is hard and stochastic; these changes make it explore instead of getting
+  pathologically stuck, they don't make it a reliable solver.
+- **The minimap: a code-derived route map so it *actually solves* (the "make it run properly" ask).**
+  Feedback/memory/history made the policy explore but not reliably reach the goal — a weak VLM can't
+  route a maze from pixels. At the user's explicit direction (reversing the earlier strict
+  pixels-only stance — they chose "give it a minimap + coordinates"), each look now also gets a
+  **text minimap** (`#`=wall, `.`=floor, `A`=you, `P`=the current sub-goal) plus its coordinates,
+  built from **code truth** (not pixels), and prepended to the feedback. Deterministic path
+  (`vision_runner._deterministic_minimap`): from `env.grid` + the live agent cell + the first
+  incomplete goal's target (a `deliver` points at the object to fetch until it's held, then the drop
+  target). Faithful path (`vision_play._minimap`): best-effort from what the sandbox game exposes —
+  `info["position"]` + a walls/`walkable` set + a goal cell on the env (`obstacle_cells`/`walls` +
+  `walkable` + `package`/`goal`/`target`); **returns "" for a non-grid/continuous game** (too-large
+  or pixel-coord bounds → pixels-only, unaffected), so it's opt-in by what the game happens to
+  expose. `sandbox_agent.md`'s make_env contract now asks grid games to expose these. This is a
+  deliberate departure from "pixels-only": the policy now reasons over a code-derived map. **The
+  load-bearing invariant is intact — the *reward/success* is still 100% code-defined** (`info["won"]`
+  / `is_goal_complete`), which is the GI-brief point (code objectives beat a VLM judging pixels); the
+  minimap is an *observation* aid, not a reward. `metrics.json` records `had_minimap`. Live-verified:
+  the **deterministic path solves reliably** with the map (`obstacle_course`/`kitchen_can`: SUCCESS
+  in ~3 vision calls). Faithful `cartel` now genuinely gets a real 19×15 routable map (`had_minimap:
+  true`, `total_reward +2.96` — moving well) **but still didn't solve it** (`vision_success=False`,
+  `blocked_steps 21/50`): a weak VLM's ASCII-maze pathfinding + action-mapping over a deep dead-end
+  maze is still imperfect, and the step budget is tight. Honest: the minimap made the *deterministic*
+  play reliable and clearly helped faithful play, but faithful deep-maze solving isn't guaranteed —
+  reported, not overclaimed.
+- `evaluation/vision_runner.py::run_navigation` — orchestration (parallel to `evaluation/runner.py`),
+  wired as `infinienv navigate <scene.json> --out ...`. An outer loop = vision calls, an inner loop
+  = the plan's actions (re-looking early on a blocked move, `info["action_legal"] is False`, with
+  the block fed back). Writes `episode.gif` (the exact frames the policy saw), `episode.json` (per
+  step: controller action + which `decision`/look produced it + `moved` + code reward + goal state),
+  and `metrics.json` with `vision_success` (**code-judged**: from `is_goal_complete`, never from
+  pixels) plus `decisions` (the vision-call count, well below `steps`), `plan_len`, `history`, and
+  `blocked_steps`.
+- **The code-vs-pixels contrast (the brief's bullet 2, made concrete).** `run_navigation` also runs
+  a *naive VLM judge* — `VisionPolicy.judge_final_frame` asks the model "from this final frame alone,
+  is the goal done?" — and records `vlm_judge_success` beside the code truth plus
+  `judge_agrees_with_code`. A disagreement is a live demonstration that a VLM checking pixels is less
+  reliable than the code signal — which is exactly why the code signal is the one to train a reward
+  model on. Best-effort (`--no-judge` skips it; a judge error never fails the run).
+
+### Human keyboard play in the browser (`Play` mode)
+
+The GUI's third mode, **Play**, lets a *human* play any scene with the keyboard — the same
+deterministic engine `navigate` uses, but the person is the controller. `gui/app.py` keeps a
+server-side `InfiniEnv` per play session in an in-memory `_play_sessions` map (capped at
+`_PLAY_SESSION_CAP`, oldest-evicted — it's a local single-user GUI). `POST /api/play/start {scene,
+assets}` builds the env (scene from the same path-safe `_list_scenes` allow-list) and returns the
+first frame (base64 PNG data-URI), the goal in words, `CONTROLLER_ACTIONS`, and the goal state. The
+**default `assets` mode is `world`** (`_run_asset_paths`): it renders the world with the sprites
+*that run already autogenerated* — `runs/<name>/sandbox_workspace/asset_cache/<type>.png`, mapped by
+type — so a generated world plays with its own art and makes **no new image-API calls**; an example
+world with no generated sprites (or `assets=none`) falls back to flat cells, and `none/local/
+generated/auto` still go through the normal repo-cache resolution. `POST /api/play/step {session_id, action}` applies one action and returns the new
+frame + `steps`/`resolved`/`legal`/`reward`/`goals` + `done`/`won`; the episode's session is freed on
+`done`. The frontend (`index.html`) maps arrow keys / WASD → move, Space/E → interact, POSTs each
+keypress (one step in flight at a time), updates the `<img>` frame + status, and shows a **YOU WIN**
+banner when `won`. **Win is code-defined** (`is_goal_complete` / `info["all_complete"]`, never
+pixels) — the same §2 invariant as everywhere else; the human just replaces the vision policy /
+solver as the controller. Works for every scene (examples + any generated/sandbox `scene.json`);
+a sandbox world plays as its *declared top-down reading* (same caveat as Navigate — the trusted
+process never runs the sandbox game's own code). Tested in `test_gui.py` (start returns a
+frame+goal+session, a step moves + wins by code, unknown scene/session/action rejected, session
+freed after a win). Live-verified in a browser: Play mode renders the game frame + legend, arrow
+keys advance the step counter and update the frame, and the YOU WIN banner shows on a code-judged win.
+
+The GUI surfaces this too: `gui/app.py` has a **Generate ⟷ Navigate** mode toggle (a `/api/navigate`
+route + `/api/scenes` picker, `_run_navigate_job` mirroring `_run_sandbox_job`), streaming the same
+`on_stage` play log over SSE and rendering the `episode.gif` + the code-vs-pixels verdict cards — a
+frontend on `run_navigation`, not a second implementation. Vision runs also appear in the runs
+gallery (a run qualifies with `scene.json` *or* `episode.gif`), badged distinctly. The scene picker
+(`_list_scenes`) offers both the curated `examples/` worlds **and any generated run's `scene.json`
+under `runs/`, including sandbox worlds** — a sandbox scene.json loads through the real schema with
+fixed-vocabulary goals, so the deterministic env plays it. What's played is the *deterministic
+reading* of the declared scene (static layout + declared goals like `reach exit`), scored by code —
+not the sandbox agent's own custom-coded win condition/physics (the trusted process never runs
+sandbox code). So the declared goal can be a *simplification* of the sandbox game's full narrative
+(e.g. a scene declaring a `reach` goal whose code also required collecting gems first — the env
+checks only the reach); paths are enumerated in `_list_scenes` and validated on use for path-safety.
+
+### Faithful vision-play: a vision policy plays the REAL sandbox game
+
+The deterministic `navigate` above plays a scene through the **top-down** `InfiniEnv`. That's the
+wrong substrate for a `--sandbox` world, which is usually a **side-view platformer** whose real
+rendering + physics + win condition live in the agent's own `run_scene.py` (found live on
+`runs/lolipop` played top-down: a sparse mis-rendered grid the VLM couldn't navigate; see notes.md).
+Faithful play fixes it: a vision policy plays the *actual* sandbox game — its own frames, physics,
+and win — **inside the sandbox** (isolation preserved: the trusted process only reads back
+`episode.gif` + `vision_metrics.json`, never imports the game code).
+
+- **The `make_env` contract** (`sandbox_agent.md` + the reference `_RUN_SCENE_TEMPLATE`): every
+  `run_scene.py` exposes a **module-level** `make_env()` returning a drivable episode of THIS game —
+  `env.actions` (the closed action set), `env.reset() -> PIL.Image` (the real frame),
+  `env.step(action) -> (frame, reward, done, info)` with `info["won"]` from the game's own win. Two
+  import-safety rules make it usable: `make_env` at module level, and all generation/self-play under
+  `if __name__ == "__main__":` so `from run_scene import make_env` doesn't re-run the script. The
+  reference template models it by wrapping `InfiniEnv`; a custom side-view game exposes the same
+  interface over its own physics/rendering. Generation records `playable_env` in `metrics.json` via
+  a smoke check in the same session (`from run_scene import make_env; e=make_env(); e.reset();
+  e.step(e.actions[0])`), so a missing/broken interface is visible, not a surprise at play time.
+- **`sandbox/vision_play.py`** — a self-contained driver **copied into the workspace and run inside
+  the sandbox**. It imports `make_env`, drives it with an inline OpenAI-vision policy (the frame +
+  the goal + `env.actions`) using **plans + frame-skip / action-repeat** (`run_vision_episode`): each
+  look returns a **plan** of ≤`plan_len` actions (`VISION_PLAN_LEN`, default 6), executed in order,
+  each HELD for `hold` simulation frames (`VISION_HOLD`, default 6) while the game runs forward — so
+  the policy is called once per look, not per keystroke and not per simulation frame. It also passes
+  the current frame **plus `history` recent frames** (`VISION_HISTORY`, default 2) and a **word
+  feedback** string (blocked moves / stuck warning, see the policy bullets above). A plan is cut
+  short (re-observe next look, with feedback) as soon as the game ends **or a move is blocked** —
+  detected via `_moved(info, ...)` from the game's own `info["moved"]`/`info["blocked"]`/position
+  (robust to a live HUD, unlike a frame diff). `max_steps` bounds the total env actions (gameplay
+  length), so vision calls ≈ `max_steps / plan_len` (`decisions`/`steps` = vision-calls, `env_steps`
+  = env actions, `blocked_steps` = env actions that didn't move, `sim_frames` = frames the game
+  actually advanced).
+  The `episode.gif` plays in **real time and ends when the game ends**: each sim frame represents
+  `env.dt` seconds (the game exposes `env.dt`/`env.fps`; default ~20fps), so total playback ==
+  `sim_frames * dt` == the real game duration, with no padded final-frame hold (subsampled + per-
+  frame duration stretched to `stride*dt` when there are many frames, keeping it real time).
+  It writes `episode.gif` (the real frames) + `vision_metrics.json`
+  (`vision_success` from `info["won"]` — code-defined). Its `run_vision_episode(env, act, ...)` core
+  takes the env + controller as args, so it's unit-tested with a fake env + fake caller (no game
+  code, no network). Self-contained (only stdlib + PIL + openai, all in the sandbox interpreter) so
+  it never needs the `llm/` stack copied in.
+- **`sandbox/vision_runner.py::play_sandbox_world(run_dir, out_dir, ...)`** — the orchestrator,
+  reusing `sandbox/runner.py`'s session mechanics: hydrate a fresh sandbox **directly from the run's
+  real `sandbox_workspace/`** (no host-side copy — `_tar_workspace_with` tars it in place and injects
+  the driver + a `vision_config.json` as in-memory tar members, so the kept folder stays clean and
+  `asset_cache/` is reused), create a fresh session with the **same `Manifest` grants**
+  (the `sys.prefix` read-only grant + model cache — the interpreter + outbound network + OpenAI key
+  work inside, since asset gen already calls OpenAI from inside a sandbox run), hydrate, `session.exec`
+  the driver, extract `episode.gif` + `vision_metrics.json`, animation-check the gif, `aclose`. A
+  missing `make_env` (a pre-contract run like lolipop) surfaces as a clear "regenerate for a playable
+  interface" error, not a crash.
+- **Triggers**: the GUI Navigate route detects a sandbox world (`_faithful_run_dir`: the scene's dir
+  has `sandbox_workspace/` + metrics `source==sandbox`) and routes to `play_sandbox_world` (result
+  badged "real game · vision"); deterministic/example scenes keep `run_navigation`. CLI: `navigate
+  <run_dir>` (a dir, or its scene.json) faithfully plays; `navigate <scene.json>` plays deterministically.
+- **Honest limit**: faithful play needs the `make_env` contract, so it works for worlds generated
+  *after* it — an existing pre-contract run can't be retrofitted (regenerate). Faithful play uses
+  the OpenAI vision backend (the sandbox's proven network path); Claude-in-sandbox isn't wired.
+
+Honest scope: the vision policy is a stand-in (GI's policy isn't available). The deterministic
+`navigate` plays the *deterministic* engine's scenes (the fixed vocabulary), scored by a guaranteed
+code signal; faithful play (above) is what plays `--sandbox` agent-authored games, scored by the
+game's own code-defined win. Live-verification recorded in `notes.md`.
+
+---
+
 ## 12. CLI reference
 
 ```bash
@@ -2020,6 +2319,13 @@ python -m infinienv generate --prompt "..." --seed 42 --out runs/demo [--max-rep
 
 # No-key path: the deterministic tools still run offline over any scene (validate/solve/mutate/...):
 python -m infinienv solve examples/kitchen_can.json --out runs/demo
+
+# `navigate` (section 11b): a stand-in VISION policy (sees only rendered frames) plays a scene
+# through engine/env.py::InfiniEnv, scored by the code-defined reward (is_goal_complete). Needs a
+# vision key (OpenAI default, or --vision-backend claude). Writes episode.gif/episode.json/metrics.json;
+# metrics has vision_success (code-judged) + vlm_judge_success (a naive VLM-on-pixels verdict, contrast).
+python -m infinienv navigate examples/kitchen_can.json --out runs/vision_demo \
+  [--vision-backend {openai,claude}] [--model M] [--max-steps N] [--assets ...] [--no-judge]
 
   # --- generate (sandbox only): model-authored engine code in an isolated per-run copy.
   # ignores --provider/--no-fallback (no LLM-repair-agent path or fallback-template path to
@@ -2212,6 +2518,17 @@ test_vision.py             - generic perception (section 11): line-of-sight clea
 test_perception.py         - closed perception model (section 11): KnowledgeMap only knows what it
                              observed, find() can't reach an unseen target, memory persists out of
                              view; visible_cells radius + occlusion + bounds
+test_checklist.py          - requirements generator (section 11), hermetic (faked OpenAI): _parse_items
+                             (fences/prose/missing-ids), build_checklist returns items + passes the
+                             prompt/instructions, best-effort skips (no key/API-error/empty -> []).
+                             The requirements/build-plan harness (section 11): seed_workspace writes
+                             REQUIREMENTS.json (acceptance, no status) + an empty PLAN.json + plan.py +
+                             MEMORY.md and doesn't clobber prior plan progress; the plan.py tool
+                             (add/start/done/note mutate PLAN.json/MEMORY.md + print PLAN_ADD/
+                             PLAN_UPDATE/PLAN_PROGRESS) -- all in test_sandbox_workspace.py;
+                             _repair_message re-injects open BUILD TASKS (test_sandbox_runner.py); the
+                             auditor's review input includes the requirements + _format_checklist
+                             (test_auditor.py); _classify_stage maps REQ_SEED/PLAN_*/plan.py (test_gui.py)
 test_auditor.py            - independent faithfulness auditor (section 11), hermetic (faked OpenAI):
                              verdict parsing (PASS/FAIL/garbage/code-fence), payload includes spec+
                              code+rules, best-effort skips (no key / AUDIT=0 / unparseable / no code /
@@ -2233,6 +2550,31 @@ test_sandbox_workspace.py  - ...also the teleport floor (section 11): _positions
                              + DUPLICATE_ID, does NOT enforce vocabulary-specific errors (records
                              them), deterministic_validation_summary shape
 test_replay_export.py       - per-action frames + smooth interpolation of a multi-cell slide
+test_env.py                 - pixel-observation env (section 11b): reset returns a frame + goal
+                              info; move actions change position; an illegal move is a no-op not a
+                              crash; reward fires exactly when a goal completes and never twice;
+                              interact resolves pickup->drop for deliver; truncation at max_steps;
+                              unknown action / step-before-reset raise
+test_vision_policy.py       - stand-in vision policy (section 11b), hermetic (fake responder):
+                              robust action parsing (whole-word), _parse_actions returns an ordered
+                              plan (appearance order, repeats kept, capped at limit, never empty),
+                              act returns a PLAN (list) + respects max_actions, passes a LIST of
+                              frames (current + history) to the responder + coerces a single frame,
+                              feedback text is included in the user message, build_feedback reports
+                              blocked/stuck/suggestions, judge_final_frame parses YES/NO and is
+                              best-effort on ProviderError, unknown backend raises
+test_vision_play.py         - faithful vision-play (section 11b), hermetic (fake game env + fake
+                              controller, no network/session): run_vision_episode win from the game's
+                              own info["won"], passes PNG frames + the game's action list, coerces an
+                              illegal action, truncates without a win, survives a game step error;
+                              _parse_actions returns a plan over the game's own actions; a PLAN of N
+                              runs N steps in ONE decision, a bare-string plan is coerced, a stall
+                              cuts a plan short (moving-frame fake game); _moved prefers info
+                              (moved/blocked/position) over a frame diff; a blocked move aborts the
+                              plan via info + is fed back to the next look (a HUD-changing fake game
+                              proving info beats a frame diff); history frames reach the controller;
+                              the reference run_scene make_env is import-safe (no generation re-run)
+                              and drivable; play_sandbox_world rejects a non-sandbox dir
 test_mechanics_cache.py    - persist/reload, no duplication or overwrite on repeated calls
 test_mock_generation.py     - mock provider is deterministic and always valid
 test_assets.py               - scene_asset_types includes wall+agent; none/local/generated
@@ -2252,7 +2594,9 @@ test_curriculum.py              - level templates easy->hard; --run executes and
 test_dataset_export.py           - per-goal programmatic_reward, not a flattened bool
 test_compiler.py                  - --no-fallback raises with the real root cause surfaced, not
                                      just the last (often generic) history entry
-test_cli.py                        - generate/validate/solve write expected artifacts
+test_cli.py                        - generate/validate/solve write expected artifacts; navigate
+                                     (section 11b) with a faked vision policy writes episode.gif/
+                                     episode.json/metrics.json and vision_success is code-judged
 test_prompt_refiner.py             - sandbox prompt enrichment (section 11): mocked OpenAI client
                                      returns enriched text; graceful fallback to the original on
                                      no-key/API-error/empty-output; INFINIENV_REFINER_MODEL override
@@ -2267,7 +2611,15 @@ test_claude_runner.py              - Claude Agent SDK sandbox backend (section 1
 test_gui.py                         - Flask test client (no live server needed): index page,
                                        validation errors, a full generate job consumed as real SSE
                                        events (stage + done), artifact serving incl. path-traversal
-                                       rejection, runs listing
+                                       rejection, runs listing; navigate mode (section 11b): both
+                                       modes present in the index, /api/scenes lists examples,
+                                       /api/navigate rejects an unknown scene, a full navigate job
+                                       (faked VisionPolicy) streams stage+done with code-judged
+                                       vision_success, a vision run shows in /api/runs; play mode
+                                       (human keyboard): the index has the Play mode + picker,
+                                       /api/play/start returns a frame+goal+session, /api/play/step
+                                       moves + wins by code (is_goal_complete), unknown scene/session/
+                                       action are rejected, and the session is freed after a win
 ```
 
 Before considering a change done:
@@ -2364,6 +2716,9 @@ vision-based policy eventually replacing the deterministic 2D planner for that p
 [ ] `--sandbox` mode (section 11) live-verified end-to-end at least once: agent-edited workspace
     actually synced back (not just the pre-run copy), outer sanity check runs and its verdict is
     recorded alongside the agent's own self-report in metrics.json.
+[ ] `navigate` (section 11b) live-verified once against the real vision API: a pixel-only policy
+    plays a scene, `metrics.json` records `vision_success` from `is_goal_complete` (never from
+    pixels), `episode.gif` shows real frames, and `vlm_judge_success` is recorded beside it.
 [ ] pytest passes; anything touching a provider/mechanic/asset was also verified live, not just
     against the offline suite.
 [ ] notes.md reflects any non-obvious decision or bug fix from the current work.

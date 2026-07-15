@@ -34,7 +34,7 @@ from infinienv.sandbox.workspace import (
 )
 
 DEFAULT_SANDBOX_MODEL = "gpt-5.6-terra"
-DEFAULT_SANDBOX_MAX_REPAIR_ATTEMPTS = int(os.environ.get("INFINIENV_SANDBOX_MAX_REPAIR_ATTEMPTS", "2"))
+DEFAULT_SANDBOX_MAX_REPAIR_ATTEMPTS = int(os.environ.get("INFINIENV_SANDBOX_MAX_REPAIR_ATTEMPTS", "3"))
 
 _PATCH_OP_RE = re.compile(r"^\*\*\* (Add File|Delete File|Update File): (.+)$", re.MULTILINE)
 _PATCH_VERB = {"Add File": "add", "Delete File": "delete", "Update File": "edit"}
@@ -160,6 +160,18 @@ def _describe_tool_output(item: object) -> str | None:
     output = getattr(item, "output", None)
     if not isinstance(output, str):
         return None
+    # Surface the TODO harness's structured progress lines even on a SUCCESSFUL command, so the GUI
+    # build-plan popup gets clean, id-accurate updates from plan.py's OUTPUT (PLAN_ADD/PLAN_UPDATE/
+    # PLAN_PROGRESS) rather than parsing fragile shell command lines (which break on `&&` chaining
+    # or quoting -- a real bug that showed the whole spec + a shell fragment as one popup item).
+    body = output.split("Output:", 1)[-1]
+    todo_lines = [
+        ln.strip()
+        for ln in body.splitlines()
+        if ln.strip().startswith(("PLAN_ADD", "PLAN_UPDATE", "PLAN_PROGRESS", "MEMORY_NOTE"))
+    ]
+    if todo_lines:
+        return "\n".join(todo_lines)
     match = re.search(r"Process exited with code (-?\d+)", output)
     if not match or match.group(1) == "0":
         return None
@@ -224,9 +236,46 @@ def _describe_stream_event(event: object) -> str | None:
         return None
 
 
+def _todo_brief() -> str:
+    """The instruction (shared by both backends): read the requirements, then author + work a build
+    plan (progress points) via plan.py that adds up to meet them."""
+    py = sys.executable
+    return (
+        "\n\nYour workspace has two things. REQUIREMENTS.json lists what the finished game MUST do -- "
+        "the acceptance criteria you will be independently audited against (you don't edit it). "
+        "PLAN.json is your own live BUILD PLAN: the concrete PARTS OF THE PROGRAM to build, which you "
+        "author and work like a coding agent's todo list, and which must ADD UP to satisfy every "
+        "requirement. Drive the plan ONLY through the plan.py tool, run with this exact interpreter: "
+        f"first read the requirements (`cat REQUIREMENTS.json`), then plan the build -- add each part "
+        f"with `{py} plan.py add \"<build task>\"` (e.g. \"tile world generation\", \"jump/gravity "
+        "physics\", \"gem pickup + counter\", \"exit gate\", \"HUD + win banner\") until the plan "
+        f"covers every requirement. Then build: `{py} plan.py start <id>` when you begin a task and "
+        f"`{py} plan.py done <id>` when it's built and working. Keep notes with `{py} plan.py note "
+        "\"...\"`. Do NOT finish until every plan task is done AND every requirement is genuinely met."
+    )
+
+
+def _todo_reminder(open_todo: list[dict] | None) -> str:
+    """A short 'these build tasks are still open' preface for a repair message, so the agent resumes
+    with its unfinished plan in context (its PLAN.json/MEMORY.md are still on disk)."""
+    if not open_todo:
+        return ""
+    lines = "\n".join(f"  - [{it.get('id')}] {it.get('task')}" for it in open_todo[:20])
+    return (
+        "Your PLAN.json still has unfinished build tasks (not done yet):\n"
+        f"{lines}\nYour PLAN.json, REQUIREMENTS.json and MEMORY.md are still on disk -- keep driving "
+        "the plan with plan.py, finish these, and make sure every requirement is met.\n\n"
+    )
+
+
 def _repair_message(
-    *, run_error: str | None, sanity_error: str | None, audit_findings: str | None = None
+    *,
+    run_error: str | None,
+    sanity_error: str | None,
+    audit_findings: str | None = None,
+    open_todo: list[dict] | None = None,
 ) -> str:
+    prefix = _todo_reminder(open_todo)
     if run_error is not None:
         # Point the agent at the concrete fix for a known crash-inducing tool misuse: calling the
         # `view_image` tool with an absolute path fails with "manifest path must be relative" and
@@ -239,20 +288,20 @@ def _repair_message(
                 "workspace-RELATIVE path. Write your review frames into the workspace and call it "
                 'like `view_image("review_start.png")`, never with an absolute /private/var/... path.'
             )
-        return (
+        return prefix + (
             f"Your previous attempt in this same workspace did not finish cleanly: {run_error}.{hint} "
             "Any files you already produced are still on disk -- inspect them (ls, cat), pick up "
             "from where you left off, and finish producing valid scene.json/metrics.json/"
             "replay.json/render.png/replay.gif."
         )
     if sanity_error is not None:
-        return (
+        return prefix + (
             "A previous attempt in this same workspace did not pass an independent outer check "
             f"using the real, unmodified schema: {sanity_error}. Your existing files from that "
             "attempt are still on disk -- inspect them, fix the specific problem described, and "
             "re-run to produce all five artifact files again."
         )
-    return (
+    return prefix + (
         "Your previous attempt in this same workspace produced valid artifacts but an independent "
         "reviewer found that it does not faithfully implement the spec -- it fakes a requirement "
         "rather than really doing it:\n"
@@ -319,6 +368,27 @@ async def _run_async(
 
     stage("Preparing isolated sandbox workspace (copy of schema/engine/navigation/validation/render/assets)...")
     workspace_dir = build_workspace_dir(out_dir, assets_mode=assets_mode)
+
+    # Derive an independent requirements checklist from the (refined) prompt and seed it into the
+    # workspace as the agent's live TODO (+ MEMORY.md + the todo.py tool). This makes fidelity to the
+    # prompt a per-item, tracked contract the agent works through via tool calls, the auditor
+    # enforces, and the run's metrics/GUI surface. Best-effort: no key/failure -> empty checklist,
+    # the agent self-derives its TODO (see sandbox_agent.md / seed_todo).
+    from infinienv.sandbox.checklist import build_checklist
+    from infinienv.sandbox.workspace import open_plan_items, read_plan, read_requirements, seed_workspace
+
+    stage("Deriving the requirements from the prompt...")
+    checklist_result = build_checklist(prompt)
+    # REQUIREMENTS.json = the acceptance criteria (the auditor's contract). PLAN.json starts empty --
+    # the agent authors its own build plan (the parts of the program to build) that must add up to
+    # meet these requirements; that plan is what the GUI's live goals popup shows.
+    seed_workspace(workspace_dir, checklist_result.items)
+    if checklist_result.items:
+        stage(f"Requirements derived ({len(checklist_result.items)}); the agent will plan a build to meet them.")
+        for _it in checklist_result.items:
+            stage(f"REQ_SEED {_it['id']}: {_it['requirement']}")
+    else:
+        stage(f"Requirements not pre-derived ({checklist_result.note}); the agent will derive them itself.")
 
     # Real, live-caught bug (see notes.md): inside a sandboxed run, HOME resolves within that
     # one attempt's ephemeral workspace filesystem, not the host's real home directory -- so the
@@ -387,7 +457,8 @@ async def _run_async(
     audit_note: str | None = None
     missing: list[str] = list(ARTIFACT_FILES)
     repair_history: list[dict] = []
-    message = f"Seed: {seed}\nTask: {prompt}\nAssets mode: {assets_mode}\n{_interpreter_briefing()}"
+    playable_env: bool | None = None
+    message = f"Seed: {seed}\nTask: {prompt}\nAssets mode: {assets_mode}\n{_interpreter_briefing()}{_todo_brief()}"
 
     try:
         for attempt in range(max_repair_attempts + 1):
@@ -426,6 +497,13 @@ async def _run_async(
             except Exception:
                 pass
 
+            # The acceptance criteria (auditor's contract) + the agent's build plan (as it left it
+            # this attempt), read from the synced workspace -- for the audit, repair re-injection,
+            # and metrics.
+            requirements = read_requirements(workspace_dir)
+            plan = read_plan(workspace_dir)
+            open_todo = open_plan_items(plan)
+
             missing = [name for name in ARTIFACT_FILES if name not in artifact_paths]
             if run_error is None and "scene.json" in artifact_paths:
                 sane, sanity_error = outer_sanity_check(out_dir)
@@ -446,7 +524,7 @@ async def _run_async(
             audit_note = None
             if run_error is None and sane and not missing:
                 stage("Independent reviewer auditing the run for faithfulness to the spec...")
-                audit = audit_run(out_dir, prompt)
+                audit = audit_run(out_dir, prompt, checklist=requirements)
                 audited, audit_passed = audit.audited, audit.passed
                 audit_findings, audit_note = audit.findings, audit.note
                 if audited and not audit_passed:
@@ -482,9 +560,29 @@ async def _run_async(
                 break
             stage(f"Attempt {attempt + 1} failed a check, repairing: {fail_reason}")
             if audited and not audit_passed:
-                message = _repair_message(run_error=None, sanity_error=None, audit_findings=audit_findings)
+                message = _repair_message(
+                    run_error=None, sanity_error=None, audit_findings=audit_findings, open_todo=open_todo
+                )
             else:
-                message = _repair_message(run_error=run_error, sanity_error=sanity_error)
+                message = _repair_message(
+                    run_error=run_error, sanity_error=sanity_error, open_todo=open_todo
+                )
+
+        # The make_env contract: can an external controller (a vision policy) drive this game?
+        # Cheap smoke check in the same live session -- records the fact in metrics rather than
+        # discovering a missing/broken interface only at faithful-play time. Best-effort.
+        playable_env = None
+        if run_error is None and "scene.json" in artifact_paths:
+            try:
+                probe = await session.exec(
+                    sys.executable,
+                    "-c",
+                    "from run_scene import make_env; e=make_env(); e.reset(); e.step(e.actions[0])",
+                    timeout=120,
+                )
+                playable_env = bool(probe.ok)
+            except Exception:
+                playable_env = None
     finally:
         await session.aclose()
 
@@ -515,9 +613,18 @@ async def _run_async(
             "audit_passed": audit_passed,
             "audit_findings": audit_findings,
             "audit_note": audit_note,
+            # The acceptance criteria (auditor's contract) and the agent's build plan (its progress
+            # points). Separate: requirements = "true to the prompt"; build_plan = the parts the agent
+            # built to meet them (shown live in the GUI's goals popup).
+            "requirements": read_requirements(workspace_dir),
+            "requirements_note": checklist_result.note,
+            "build_plan": read_plan(workspace_dir),
             # The real deterministic validator's verdict on the sandbox scene (geometry enforced by
             # the outer check, the rest recorded -- see workspace.deterministic_validation_summary).
             "deterministic_validation": deterministic_validation_summary(out_dir),
+            # Whether run_scene.make_env() is importable + drivable -- i.e. whether a vision policy
+            # can faithfully play this world (see sandbox/vision_runner.py). None => not checked.
+            "playable_env": playable_env,
             "missing_artifacts": missing,
             "repair_attempts": len(repair_history) - 1,
             "repair_history": repair_history,

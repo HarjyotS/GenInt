@@ -717,3 +717,33 @@ def test_sandbox_run_streams_agent_narration_through_on_stage(tmp_path, patched_
     assert "Thinking: Adding a chase NPC." in stages
     # never a diff line
     assert not any("-a" in s or "+b" in s for s in stages)
+
+
+def test_repair_message_reinjects_open_build_tasks():
+    from infinienv.sandbox.runner import _repair_message, _todo_reminder
+
+    open_todo = [{"id": "t2", "task": "gem pickup + counter"}]
+    msg = _repair_message(run_error=None, sanity_error="outer check X", open_todo=open_todo)
+    assert "unfinished build tasks" in msg
+    assert "[t2] gem pickup + counter" in msg
+    assert "outer check X" in msg  # still carries the underlying failure
+    # no open items -> no reminder preface
+    assert _todo_reminder([]) == ""
+    assert _todo_reminder(None) == ""
+
+
+def test_tool_output_surfaces_plan_lines_on_success():
+    # plan.py progress must reach the GUI even on a successful command (from the clean OUTPUT), so the
+    # build-plan popup doesn't have to parse fragile shell command lines. Regression for the run that
+    # showed the whole spec + a `&&` shell fragment as one garbled popup item.
+    from types import SimpleNamespace
+
+    from infinienv.sandbox.runner import _describe_tool_output
+
+    add = SimpleNamespace(output="Process exited with code 0\nOutput:\nPLAN_ADD t1: gravity + jump physics\n")
+    assert _describe_tool_output(add) == "PLAN_ADD t1: gravity + jump physics"
+    done = SimpleNamespace(output="Process exited with code 0\nOutput:\nPLAN_UPDATE t2 done\nPLAN_PROGRESS 2/4 done\n")
+    assert _describe_tool_output(done) == "PLAN_UPDATE t2 done\nPLAN_PROGRESS 2/4 done"
+    # a normal successful command stays silent; a failure still surfaces
+    assert _describe_tool_output(SimpleNamespace(output="Process exited with code 0\nOutput:\nok\n")) is None
+    assert "command failed" in _describe_tool_output(SimpleNamespace(output="Process exited with code 1\nOutput:\nboom\n"))

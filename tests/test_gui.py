@@ -90,6 +90,12 @@ def test_classify_stage_maps_narration_prefixes():
         "Preparing isolated sandbox workspace (copy of ...)...": "workspace",
         "  command failed (exit 1): boom": "error",
         "Viewing an image it produced...": "image",
+        # TODO harness: requirements + build-plan (plan.py) narration.
+        "REQ_SEED r1: the player can jump": "todo",
+        "PLAN_ADD t1: gravity + jump physics": "todo",
+        "$ /venv/bin/python plan.py start t2": "todo",
+        "Requirements derived (18); the agent will plan a build to meet them.": "todo",
+        "$ /venv/bin/python run_scene.py": "command",
         "something unrecognized": "status",
     }
     for msg, kind in cases.items():
@@ -275,3 +281,255 @@ def test_sandbox_generate_accepts_claude_model_with_claude_backend(client, monke
     assert res.status_code == 202
     _consume_sse(client.get(f"/api/stream/{res.get_json()['job_id']}"))
     assert _fake_run_sandbox_generation.last_model == "claude-opus-4-8"
+
+
+# ---- navigate (vision-policy) mode ----
+
+import os
+
+
+def _write_example_scene(tmp_path) -> str:
+    """A trivial pickup scene under examples/ so the navigate flow has something to play."""
+    ex_dir = tmp_path / "examples"
+    ex_dir.mkdir(exist_ok=True)
+    scene = {
+        "version": "0.1", "seed": 1, "metadata": {"name": "mini", "prompt": "pick up the can"},
+        "grid": {"width": 4, "height": 2, "tile_size": 32},
+        "agent": {"id": "agent", "x": 0, "y": 0},
+        "objects": [{"id": "can_1", "type": "can", "x": 1, "y": 0, "portable": True}],
+        "walls": [], "goals": [{"id": "pick", "type": "pickup", "object_id": "can_1"}],
+    }
+    (ex_dir / "mini.json").write_text(json.dumps(scene))
+    return "examples/mini.json"
+
+
+class _FakeVisionPolicy:
+    backend = "openai"
+    model = "fake-vision"
+
+    def __init__(self, *a, **k):
+        self._plan = iter(["right", "interact"])
+
+    def act(self, frame, goal, **kw):
+        return [next(self._plan, "wait")], "fake"  # a (one-action) plan, per the new contract
+
+    def judge_final_frame(self, frame, goal):
+        return True, "YES"
+
+
+def test_index_page_has_both_modes(client):
+    res = client.get("/")
+    assert b'data-mode="generate"' in res.data and b'data-mode="navigate"' in res.data
+    assert b'id="scene"' in res.data and b'id="vision_backend"' in res.data
+
+
+def test_scenes_endpoint_lists_examples(client, tmp_path):
+    _write_example_scene(tmp_path)
+    res = client.get("/api/scenes")
+    assert res.status_code == 200
+    paths = [s["path"] for s in res.get_json()["scenes"]]
+    assert "examples/mini.json" in paths
+
+
+def test_scenes_endpoint_includes_generated_runs(client, tmp_path):
+    # A generated (incl. sandbox) run's scene.json must be selectable for navigate.
+    _write_example_scene(tmp_path)
+    run = tmp_path / "runs" / "gui_sandbox_world"
+    run.mkdir(parents=True)
+    (run / "scene.json").write_text(json.dumps({
+        "version": "0.1", "seed": 1, "metadata": {"name": "w"},
+        "grid": {"width": 3, "height": 2, "tile_size": 32},
+        "agent": {"id": "agent", "x": 0, "y": 0},
+        "objects": [{"id": "exit", "type": "exit", "x": 2, "y": 0, "solid": False}],
+        "walls": [], "goals": [{"id": "g", "type": "reach", "target_id": "exit"}],
+    }))
+    res = client.get("/api/scenes")
+    entries = {s["path"]: s["label"] for s in res.get_json()["scenes"]}
+    assert "runs/gui_sandbox_world/scene.json" in entries
+    assert entries["runs/gui_sandbox_world/scene.json"].startswith("run:")
+
+
+def test_scenes_picker_orders_runs_by_mtime_not_name(client, tmp_path):
+    # Regression: a recently-created named run (e.g. "absence") must surface by recency, not
+    # alphabetically -- the picker used to sort by name and bury/cut it under the run cap.
+    import os
+    import time
+
+    runs = tmp_path / "runs"
+    scene = json.dumps({
+        "version": "0.1", "seed": 1, "metadata": {"name": "w"},
+        "grid": {"width": 3, "height": 2, "tile_size": 32}, "agent": {"id": "agent", "x": 0, "y": 0},
+        "objects": [{"id": "exit", "type": "exit", "x": 2, "y": 0, "solid": False}],
+        "walls": [], "goals": [{"id": "g", "type": "reach", "target_id": "exit"}],
+    })
+    # "zeta_old" is created first (older), "absence" second (newer) -- name order would put "zeta"
+    # first (reverse-alpha), so a name sort hides the newer "absence".
+    (runs / "zeta_old").mkdir(parents=True)
+    (runs / "zeta_old" / "scene.json").write_text(scene)
+    time.sleep(0.02)
+    (runs / "absence").mkdir(parents=True)
+    (runs / "absence" / "scene.json").write_text(scene)
+    os.utime(runs / "absence", None)  # ensure absence is newest
+
+    paths = [s["path"] for s in client.get("/api/scenes").get_json()["scenes"]]
+    assert "runs/absence/scene.json" in paths
+    # newest-first: absence (newer) before zeta_old (older)
+    assert paths.index("runs/absence/scene.json") < paths.index("runs/zeta_old/scene.json")
+
+
+def test_navigate_rejects_unknown_scene(client, tmp_path):
+    _write_example_scene(tmp_path)
+    res = client.post("/api/navigate", json={"scene": "runs/../secret.json"})
+    assert res.status_code == 400
+
+
+def test_navigate_flow_streams_stage_and_done_events(client, tmp_path, monkeypatch):
+    scene_path = _write_example_scene(tmp_path)
+    import infinienv.evaluation.vision_runner as vr
+    monkeypatch.setattr(vr, "VisionPolicy", _FakeVisionPolicy)
+
+    res = client.post("/api/navigate", json={"scene": scene_path, "vision_backend": "openai"})
+    assert res.status_code == 202
+    job_id = res.get_json()["job_id"]
+
+    events = _consume_sse(client.get(f"/api/stream/{job_id}"))
+    done = next(e for e in events if e["type"] == "done")
+    assert done["mode"] == "navigate"
+    # Success is the CODE-defined verdict; the faked policy solves the pickup.
+    assert done["success"] is True
+    assert done["metrics"]["source"] == "vision_navigation"
+    assert done["metrics"]["vision_success"] is True
+    assert done["metrics"]["vlm_judge_success"] is True
+    assert done["out_dir"].startswith("runs/nav_")
+
+    # episode.gif was written and is served
+    gif = client.get(f"/artifact/{done['out_dir']}/episode.gif")
+    assert gif.status_code == 200
+
+
+def test_navigate_routes_a_sandbox_world_to_faithful_play(client, tmp_path, monkeypatch):
+    # A sandbox world (dir with sandbox_workspace/, metrics source==sandbox) must be played
+    # FAITHFULLY (its real game inside the sandbox), not through the deterministic top-down env.
+    run = tmp_path / "runs" / "gui_sbx"
+    (run / "sandbox_workspace").mkdir(parents=True)
+    (run / "scene.json").write_text(json.dumps({
+        "version": "0.1", "seed": 1, "metadata": {"name": "w", "prompt": "a platformer"},
+        "grid": {"width": 3, "height": 2, "tile_size": 32}, "agent": {"id": "agent", "x": 0, "y": 0},
+        "objects": [{"id": "exit", "type": "exit", "x": 2, "y": 0, "solid": False}],
+        "walls": [], "goals": [{"id": "g", "type": "reach", "target_id": "exit"}],
+    }))
+    (run / "metrics.json").write_text(json.dumps({"source": "sandbox", "success": True}))
+
+    captured = {}
+
+    def fake_play(run_dir, out_dir, **kw):
+        captured["run_dir"] = run_dir
+        return {"source": "vision_navigation", "faithful": True, "vision_success": True,
+                "steps": 5, "max_steps": 60, "model": "gpt-5.6-terra", "backend": "openai"}
+
+    import infinienv.sandbox.vision_runner as vr
+    monkeypatch.setattr(vr, "play_sandbox_world", fake_play)
+
+    res = client.post("/api/navigate", json={"scene": "runs/gui_sbx/scene.json", "vision_backend": "openai"})
+    assert res.status_code == 202
+    events = _consume_sse(client.get(f"/api/stream/{res.get_json()['job_id']}"))
+    done = next(e for e in events if e["type"] == "done")
+    assert captured["run_dir"] == "runs/gui_sbx"  # routed to faithful play on the run dir
+    assert done["faithful"] is True
+    assert done["success"] is True
+    assert done["metrics"]["vision_success"] is True
+
+
+# ---- play (human keyboard) mode ----
+
+
+def test_index_has_play_mode(client):
+    res = client.get("/")
+    assert b'data-mode="play"' in res.data
+    assert b'id="play_scene"' in res.data and b'id="play-stage"' in res.data
+
+
+def test_play_start_returns_frame_goal_and_session(client, tmp_path):
+    scene = _write_example_scene(tmp_path)
+    res = client.post("/api/play/start", json={"scene": scene})
+    assert res.status_code == 200
+    d = res.get_json()
+    assert d["session_id"]
+    assert d["frame"].startswith("data:image/png;base64,")
+    assert "forward" in d["actions"] and "interact" in d["actions"]
+    assert d["steps"] == 0 and d["won"] is False and d["done"] is False
+    assert d["goal"]  # a natural-language goal is provided
+
+
+def test_play_step_moves_and_wins_by_code(client, tmp_path):
+    # agent at (0,0), can at (1,0): move right onto it, interact to pick it up -> pickup goal complete.
+    scene = _write_example_scene(tmp_path)
+    sid = client.post("/api/play/start", json={"scene": scene}).get_json()["session_id"]
+
+    d = client.post("/api/play/step", json={"session_id": sid, "action": "right"}).get_json()
+    assert d["steps"] == 1 and d["resolved"] == "move_right" and d["won"] is False
+
+    d = client.post("/api/play/step", json={"session_id": sid, "action": "interact"}).get_json()
+    # Win is CODE-judged (is_goal_complete), never pixels.
+    assert d["won"] is True and d["done"] is True
+
+
+def test_play_rejects_unknown_scene_session_and_action(client, tmp_path):
+    scene = _write_example_scene(tmp_path)
+    assert client.post("/api/play/start", json={"scene": "runs/../secret.json"}).status_code == 400
+    assert client.post("/api/play/step", json={"session_id": "nope", "action": "right"}).status_code == 404
+    sid = client.post("/api/play/start", json={"scene": scene}).get_json()["session_id"]
+    assert client.post("/api/play/step", json={"session_id": sid, "action": "fly"}).status_code == 400
+
+
+def test_play_world_assets_use_the_runs_generated_sprites(client, tmp_path):
+    # A generated run keeps its sprites in runs/<name>/sandbox_workspace/asset_cache/<type>.png.
+    # Play's default `world` assets mode must render with THOSE (no re-generation), not flat cells.
+    from PIL import Image
+
+    from infinienv.gui import app as A
+
+    run = tmp_path / "runs" / "mygame"
+    cache = run / "sandbox_workspace" / "asset_cache"
+    cache.mkdir(parents=True)
+    scene = {
+        "version": "0.1", "seed": 1, "metadata": {"name": "g", "prompt": "get the can"},
+        "grid": {"width": 4, "height": 2, "tile_size": 32},
+        "agent": {"id": "agent", "x": 0, "y": 0},
+        "objects": [{"id": "can_1", "type": "can", "x": 1, "y": 0, "portable": True}],
+        "walls": [], "goals": [{"id": "pick", "type": "pickup", "object_id": "can_1"}],
+    }
+    (run / "scene.json").write_text(json.dumps(scene))
+    for t in ("agent", "can"):  # the run's autogenerated sprites
+        Image.new("RGBA", (16, 16), (10, 200, 90, 255)).save(cache / f"{t}.png")
+
+    A._play_sessions.clear()
+    res = client.post("/api/play/start", json={"scene": "runs/mygame/scene.json"})  # default assets=world
+    assert res.status_code == 200
+    env = list(A._play_sessions.values())[-1]["env"]
+    # the env resolved the run's OWN sprites (paths under that run's asset_cache), not the repo cache
+    assert env.asset_paths.get("can", "").endswith("mygame/sandbox_workspace/asset_cache/can.png")
+    assert env.asset_paths.get("agent", "").endswith("mygame/sandbox_workspace/asset_cache/agent.png")
+
+
+def test_play_session_ends_after_win(client, tmp_path):
+    # After the episode ends the session is freed, so a further step 404s (client restarts a new one).
+    scene = _write_example_scene(tmp_path)
+    sid = client.post("/api/play/start", json={"scene": scene}).get_json()["session_id"]
+    client.post("/api/play/step", json={"session_id": sid, "action": "right"})
+    client.post("/api/play/step", json={"session_id": sid, "action": "interact"})  # wins -> frees session
+    assert client.post("/api/play/step", json={"session_id": sid, "action": "wait"}).status_code == 404
+
+
+def test_runs_listing_includes_a_vision_run(client, tmp_path):
+    out = tmp_path / "runs" / "nav_demo"
+    out.mkdir(parents=True)
+    (out / "episode.gif").write_bytes(b"GIF89a-fake")
+    (out / "metrics.json").write_text(json.dumps({"source": "vision_navigation", "vision_success": True}))
+
+    res = client.get("/api/runs")
+    names = {r["name"]: r for r in res.get_json()["runs"]}
+    assert "nav_demo" in names
+    assert names["nav_demo"]["vision"] is True
+    assert names["nav_demo"]["success"] is True
+    assert names["nav_demo"]["replay_url"].endswith("/episode.gif")

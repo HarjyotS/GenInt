@@ -85,10 +85,32 @@ def _declared_rules(out_dir: str) -> str | None:
     return None
 
 
-def _build_review_input(refined_prompt: str, code: str, trace: str | None, rules: str | None) -> str:
+def _format_checklist(checklist: list[dict] | None) -> str:
+    if not checklist:
+        return "(no requirements checklist was derived)"
+    lines = []
+    for it in checklist:
+        status = it.get("status", "?")
+        vb = it.get("verified_by")
+        lines.append(
+            f"- [{'x' if status == 'done' else ' '}] ({it.get('id')}) {it.get('requirement')}"
+            + (f"  -- author says verified by: {vb}" if vb else "")
+        )
+    return "\n".join(lines)
+
+
+def _build_review_input(
+    refined_prompt: str, code: str, trace: str | None, rules: str | None, checklist: list[dict] | None
+) -> str:
     parts = [
         "## What the game was supposed to be (the spec handed to the author)\n",
         refined_prompt.strip(),
+        "\n\n## The requirements checklist (the author's TODO -- every item must be genuinely done)\n",
+        "Each item below is a requirement of the spec. Verify BOTH: (a) the checklist is complete "
+        "(no requirement of the spec is missing from it), and (b) EACH item the author marked done is "
+        "genuinely implemented in the code below -- not faked, not a hollow `verified_by`. A missing "
+        "requirement, or a `done` item that the code doesn't really do, is a FAIL naming that item.\n",
+        _format_checklist(checklist),
         "\n\n## The author's declared rules (its own claimed invariants), if any\n",
         rules or "(none declared)",
         "\n\n## The code the author actually wrote (run_scene.py)\n```python\n",
@@ -125,9 +147,13 @@ def _parse_verdict(raw: str) -> tuple[bool, str | None] | None:
     return passed, findings
 
 
-def audit_run(out_dir: str, refined_prompt: str, *, model: str | None = None) -> AuditResult:
-    """Audit a completed sandbox run for faithfulness to `refined_prompt`. Never raises; on any
-    inability to run, returns `audited=False, passed=True` with a `note`."""
+def audit_run(
+    out_dir: str, refined_prompt: str, *, model: str | None = None, checklist: list[dict] | None = None
+) -> AuditResult:
+    """Audit a completed sandbox run for faithfulness to `refined_prompt`. `checklist` is the agent's
+    TODO (the per-item requirements + their final status) -- the auditor checks completeness + that
+    each `done` item is genuinely implemented. Never raises; on any inability to run, returns
+    `audited=False, passed=True` with a `note`."""
     if os.environ.get("INFINIENV_SANDBOX_AUDIT", "1").strip() == "0":
         return AuditResult(False, True, note="auditor disabled via INFINIENV_SANDBOX_AUDIT=0")
     if not os.environ.get("OPENAI_API_KEY"):
@@ -142,7 +168,7 @@ def audit_run(out_dir: str, refined_prompt: str, *, model: str | None = None) ->
         return AuditResult(False, True, note="no run_scene.py to audit; skipped")
     trace = _read_text(os.path.join(out_dir, "replay.json"))
     rules = _declared_rules(out_dir)
-    review_input = _build_review_input(refined_prompt, code, trace, rules)
+    review_input = _build_review_input(refined_prompt, code, trace, rules, checklist)
 
     model = model or os.environ.get("INFINIENV_SANDBOX_AUDITOR_MODEL", _DEFAULT_AUDITOR_MODEL)
     instructions = _load_auditor_prompt()

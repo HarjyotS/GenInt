@@ -141,3 +141,20 @@ def test_audit_call_failure_degrades_gracefully(tmp_path, monkeypatch):
     monkeypatch.setattr(openai, "OpenAI", _Boom)
     result = audit_run(_make_run_dir(tmp_path), "make a maze")
     assert result.audited is False and result.passed is True and "failed" in result.note
+
+
+def test_auditor_review_input_includes_the_checklist():
+    from infinienv.sandbox.auditor import _build_review_input, _format_checklist
+
+    checklist = [
+        {"id": "r1", "requirement": "break any placed block", "status": "done", "verified_by": "place+mine each"},
+        {"id": "r2", "requirement": "mine a diamond", "status": "pending", "verified_by": None},
+    ]
+    fmt = _format_checklist(checklist)
+    assert "[x] (r1) break any placed block" in fmt
+    assert "[ ] (r2) mine a diamond" in fmt
+    review = _build_review_input("the spec", "code", None, None, checklist)
+    assert "requirements checklist" in review.lower()
+    assert "break any placed block" in review
+    # no checklist -> a clear placeholder, never a crash
+    assert "no requirements checklist" in _format_checklist(None).lower()

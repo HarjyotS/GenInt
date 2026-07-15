@@ -67,6 +67,46 @@ Requirements, non-negotiable regardless of how you implement the mechanic:
   so a viewer can see collisions register and whether the objective was met. See principle 8.
 - Run whatever you build (via the shell) before finishing, and fix errors you encounter -- don't
   hand back code you haven't executed.
+- **Expose your game as a drivable env so an external controller (e.g. a vision policy) can play
+  it -- the `make_env` contract.** `run_scene.py` must define a **module-level** function
+  `make_env()` that returns a fresh, playable episode of THIS game with exactly this interface:
+  - `env.actions` -> a tuple of the controller action-name strings a player chooses among (e.g.
+    `("left", "right", "jump", "wait")`) -- the SAME closed action set your own play loop uses.
+  - `env.reset()` -> the real rendered first frame as a `PIL.Image` -- your actual game rendering,
+    **with the same real sprites your replay uses**. If ASSETS_MODE isn't "none", resolve assets
+    (`resolve_assets(scene, mode, os.path.abspath("asset_cache"))`) and build your `SpriteBook`
+    inside `make_env` from those `asset_paths`, exactly as your `main()`/replay does -- do NOT return
+    primitive-drawn frames from `make_env` while your replay.gif uses generated sprites. The
+    `asset_cache/` is kept, so this reuses the already-generated sprites (no re-generation). A player
+    that sees a cruder frame than your replay can't play your game well.
+  - `env.step(action: str)` -> `(frame: PIL.Image, reward: float, done: bool, info: dict)` --
+    apply that one action through your real physics, render the real frame, return your
+    code-defined `reward` (positive when a real objective advances), `done` True on win or loss,
+    and `info` carrying `{"won": bool}` set from your own win condition (the same one your replay
+    uses -- e.g. gems collected AND exit reached). Also put `"moved": bool` in `info` (did this
+    action actually change the state, or was it blocked by a wall) -- a vision player uses it to
+    tell when it's stuck and turn instead of bashing the same wall; without it the player can't
+    reliably recover from a blocked move.
+  - **For a GRID/maze game, expose the layout so a vision player can actually route it** (else it can
+    only guess from one frame and fails deep mazes): put the player's integer cell in `info` as
+    `"position": (x, y)`, and expose the maze on the env object -- a walls set (any of
+    `env.obstacle_cells` / `env.walls` / `env.blocked`) OR a walkable set (`env.walkable`), plus the
+    goal cell (any of `env.goal` / `env.package` / `env.target` / `env.exit`). The faithful player
+    builds a text minimap from these and plans a real path. Optional/best-effort -- a continuous
+    (non-grid) game just omits them and the player stays on pixels + feedback.
+  - Also expose `env.dt` = the seconds of game time one `step()` advances (your physics timestep,
+    e.g. `DT = 0.05`), or `env.fps`. This lets the vision-play replay play back in REAL time and
+    finish exactly when the game ends -- without it the replay falls back to a ~20fps guess.
+  Build `make_env()` by factoring the per-step loop you already wrote (your `ActionSpace` +
+  physics + draw + win check) so *action selection* is the only thing left to an outside caller --
+  everything else (physics, rendering, the win rule) stays identical to your own play. Two hard
+  rules that make this usable: (1) `make_env` lives at **module level**, and (2) keep every
+  generation/self-play side effect under `if __name__ == "__main__":`, so `from run_scene import
+  make_env` imports cleanly WITHOUT re-running your whole script. Verify it yourself:
+  `{python} -c "from run_scene import make_env; e=make_env(); e.reset(); print(e.step(e.actions[0]))"`
+  must print a `(frame, reward, done, info)` tuple without error. This is what lets a vision policy
+  play the exact game you built, on your real frames -- so build the closed action set and win
+  condition to be genuinely playable by someone who only sees the frames.
 
 ## Reusable building blocks already in your workspace
 
@@ -182,14 +222,31 @@ hardcoded list with a decorative RNG for cosmetic noise; smooth motion interpola
 precomputed route with no physics; a self-check that only asserts `won`. All the same cheat. The
 test for any requirement: **could you change what the requirement is about (the seed, the perceived
 cells, the physics) and have the run still be genuinely correct -- or did you hardcode/fake the
-appearance of it?** Two things now depend on you getting this right rather than merely looking right:
+appearance of it?** These things now depend on you getting this right rather than merely looking right:
 
+- **Requirements vs. build plan -- keep them separate, and make the plan add up to the requirements.**
+  Your workspace has `REQUIREMENTS.json`: the acceptance criteria -- every concrete thing the finished
+  game MUST do. You do NOT edit it; an independent reviewer audits your finished game against every
+  requirement. Your job is to author and work a **build plan** that satisfies them: `PLAN.json`, your
+  own live todo of the concrete PARTS OF THE PROGRAM to build (exactly like a coding agent's todo
+  list), driven through the `plan.py` tool. First `cat REQUIREMENTS.json`, then plan the build:
+  `python plan.py add "<build task>"` for each real part -- e.g. "tile world generation", "gravity +
+  jump physics", "gem pickup + counter", "exit gate logic", "HUD + win banner" -- until the tasks
+  together cover every requirement (a build task is a piece of *work*, not a restatement of a
+  requirement). Then build, calling `python plan.py start <id>` when you begin a task and `python
+  plan.py done <id>` when it's built and actually working. Keep decisions/gotchas in `MEMORY.md`
+  (`python plan.py note "..."`); it persists across repair attempts, so if you're repairing, your
+  prior plan progress + memory are already on disk -- continue them, don't restart. **Do not finish
+  until every plan task is done AND every requirement is genuinely met.** As you build, verify each
+  requirement with a real programmatic check -- a check that would *fail* if it were faked. A
+  completeness trap that fails a lot of runs: if a mechanic has paired/inverse operations or
+  type-keyed tables (place/break, collect/place, a break-time or recipe table), **every item the
+  player can obtain must round-trip through every table the operation touches** -- a placeable block
+  with no break entry, or a collectible missing from the hotbar, is a faked requirement.
 - **Declare your rules as a contract.** Write a `rules` field into `metrics.json` (a list of
-  `{"requirement": "...", "enforced_by": "..."}` entries): every meaningful thing the spec asks for,
-  paired with the concrete trace invariant or code path that actually makes it real. This is the
-  same `RULES.md` discipline (principle 1), made explicit and machine-readable -- a requirement with
-  no honest `enforced_by`, or one silently missing from the list, is the tell that it was faked or
-  dropped.
+  `{"requirement": "...", "enforced_by": "..."}` entries) covering every requirement: paired with the
+  concrete trace invariant or code path that actually makes it real. A requirement with no honest
+  `enforced_by`, or one silently missing, is the tell that it was faked or dropped.
 - **An independent reviewer audits you.** After your run passes the mechanical outer check, a
   separate reviewer (a different model instance, with no stake in your run passing) reads your actual
   code and trace against the spec and fails the run if it finds a requirement you faked rather than
@@ -249,8 +306,15 @@ matter.** A hazard the character's real actions can never bring it near is decor
 obstacle -- if the task describes something the character is meant to actively avoid, your control
 logic has to move it *through* space that hazard can reach, reacting to current hazard state each
 step, not pre-planned to dodge the hazard's existence entirely, and not "stop and wait" as the only
-response to danger. Build the specific behavior the task actually describes, not whatever's
-easiest to code -- read the task's own positional/behavioral language ("from below," "emerges,"
+response to danger. Concretely: a hazard placed geometrically out of the character's reach (mounted
+so far above that its jump arc never gets near, walled off from the traversed space) or quietly left
+out of the avoidance/collision set is decorative, no matter how threatening it looks in the render.
+The same collapse applies to the *level as a whole*: if the task describes ledges, verticality,
+uneven terrain, or branching/riskier routes, and you confine play to a flat strip while every
+required objective sits on the easy ground and the structure above is scenery, you built the
+easiest possible level, not the one described -- the required objectives (or the only safe route to
+them) have to live in that structure so play actually uses it (verified in self-review below). Build
+the specific behavior the task actually describes, not whatever's easiest to code -- read the task's own positional/behavioral language ("from below," "emerges,"
 "erupts," "guards a doorway," "chases") and implement the motion pattern that language actually
 implies, rather than defaulting to a generic side-to-side patrol just because it would technically
 satisfy "the hazard is reachable." Before hand-coding that motion, check `engine/motion_patterns.py`
@@ -481,8 +545,29 @@ bugs that actually reach a viewer -- these do:
   collectibles sit on real supports, not in a pit or off-level). A hardcoded `platforms`/`ladders`/
   `terrain` constant -- even with a decorative `random.Random(fixed_seed)` nearby -- fails this
   immediately, which is exactly the cheese it's here to catch.
-- **Every declared hazard came within a plausible threat distance of the agent at least once**
-  (principle 3) -- one that never did is decorative.
+- **The required objectives actually make the player use the structure and risk the task
+  describes** (principle 3) -- don't collapse the level to its easiest version. If the task
+  describes ledges, verticality, uneven terrain, branching or "riskier" routes, or hazards to route
+  around, walk your *successful* trace and assert it genuinely engages them: at least one *required*
+  objective forced the player off the flat starting ground (a real jump/climb to a different height,
+  or a step through a declared risk), and the declared structure (platforms, ledges, alternate
+  routes) is load-bearing -- the winning path actually traverses it -- not scenery the player strolls
+  past on the ground. A run that satisfies every objective without ever leaving the starting floor,
+  while the upper space and ledges sit unused and every collectible sits on the safe walking path,
+  collapsed the level even though each individual rule "passed" -- put the required objectives (or
+  the only safe route to them) into the structure so reaching them *requires* using it, rather than
+  placing everything on the easiest line and leaving the rest as backdrop.
+- **Every declared hazard actually threatened the agent's real path -- check each one, by trace
+  position, not by existence.** For *each* declared hazard, walk the trace and assert the agent's
+  own positions came within contact/threat distance of it at least once. Asserting the hazard merely
+  *exists*, or counting how many there are, or that its type appears -- these are proxies that pass
+  for a decorative hazard and catch nothing. A hazard the agent's real movement can never bring it
+  near is decorative and fails this: e.g. one mounted so far above the character that its jump arc
+  never reaches (compare the hazard's position to the character's max reachable height), one walled
+  off from the traversed space, or one that your own avoidance/collision set silently excludes so it
+  can never register a hit. If a declared hazard can't pass this, the fix is to place it *on the
+  path the objectives force the player through* (see the next check) or give it motion that brings
+  it into reach -- not to drop the assertion.
 - **A reactive NPC's behavior state actually changed** across the trace (principle 3) -- not stuck
   in one state.
 - **Competitors share the player's physics** (principle 1): an opponent/AI/enemy that does the same
