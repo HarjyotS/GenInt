@@ -4163,3 +4163,34 @@ first agent call raises a TPM error, retry succeeds, repair_attempts stays 0; as
 Note: the real ceiling is the OpenAI account's TPM tier (500k) -- the sandbox agent's huge system
 prompt burns ~480k/min, so this smooths transient spikes but a sustained over-limit still needs a
 higher tier (or the Claude backend). Only the OpenAI runner is patched (that's where it fired).
+
+---
+
+## 2026-07-16 -- Live feed shows command output, edit diffs, and a "now doing" indicator
+
+User: the feed should also show command outputs, what it's doing right now, and edit diffs -- "in a
+good manner." Reversed two earlier deliberate choices (hide successful command output, hide diffs).
+
+Backend narration (both sandbox runruntimes):
+- Shared helpers in `sandbox/runner.py`: `_output_block(text)` (trimmed, "Output:"-tagged, collapsible)
+  and `_make_diff(old, new)` (compact unified diff, no ---/+++ headers). Imported by `claude_runner`.
+- OpenAI backend (`_describe_tool_called`/`_describe_tool_output`): apply_patch now appends the +/-
+  hunk body after the file list; a SUCCESSFUL command's output is surfaced as an `Output:` block (was
+  silent); failures unchanged; non-exec results (apply_patch/view_image) stay silent.
+- Claude backend (`_describe_block`): `Edit` -> old->new diff, `Write` -> content-as-additions diff;
+  a `Bash` command's result output is surfaced as an `Output:` block. To avoid dumping every file
+  `Read`, a caller-owned `{tool_use_id: name}` map is threaded through `_describe_claude_message` so a
+  result knows its source tool -- output is surfaced only for `Bash`.
+- `gui/app.py::_classify_stage`: `Output:` -> kind `output`.
+
+Frontend (`index.html`): `KINDS.output`; `pushEvent` renders an `edit` message's `\n`-appended diff via
+`renderDiff` (green `+`, red `-`, accent `@@`, dim context) and an `output` message via `renderOutput`
+(recessed scrollable mono block); a `#now` "what it's doing right now" line above the feed (`updateNow`,
+shows the current event's icon+label+short text), hidden on run end/reset. CSS for `.now`, `pre.diff`,
+`pre.outblock`.
+
+Tests: claude narration (edit diff, write diff, Bash-output-only-via-tool_names), gui classify `output`,
+and updated the OpenAI narration tests that asserted the old "no diff / silent success" behavior. Full
+suite -> 473 passed (OPENAI_API_KEY unset). JS syntax-checked with `node --check`. Honest: couldn't grab
+a live screenshot this run (the browse daemon lost localhost networking); verified via tests + the
+served HTML containing the new code + a clean JS parse.

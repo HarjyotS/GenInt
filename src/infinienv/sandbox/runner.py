@@ -116,6 +116,43 @@ def _truncate(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+# Narration blocks shown in the live feed (command output + edit diffs). Both backends emit these
+# via on_stage with a recognizable prefix the GUI classifier maps to a kind; the GUI renders them as
+# a collapsible mono output block / a colored +/- diff. Kept compact so the feed stays readable.
+_OUTPUT_MAX_LINES = 14
+_DIFF_MAX_LINES = 40
+
+
+def _output_block(text: str, *, max_lines: int = _OUTPUT_MAX_LINES) -> str | None:
+    """A trimmed command/tool output tagged `Output:` for the GUI to render as a collapsible block.
+    Returns None for empty output (nothing worth showing)."""
+    lines = text.splitlines()
+    while lines and not lines[-1].strip():
+        lines.pop()
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    if not lines:
+        return None
+    if len(lines) > max_lines:
+        lines = lines[:max_lines] + [f"… ({len(lines) - max_lines} more lines)"]
+    return "Output:\n" + "\n".join(lines)
+
+
+def _make_diff(old: str, new: str, *, max_lines: int = _DIFF_MAX_LINES) -> str:
+    """A compact unified diff (no `---`/`+++` file headers) of old->new, so an edit shows its actual
+    change. Empty string when there's no textual difference."""
+    import difflib
+
+    lines = [
+        ln
+        for ln in difflib.unified_diff(old.splitlines(), new.splitlines(), lineterm="")
+        if not (ln.startswith("--- ") or ln.startswith("+++ "))
+    ]
+    if len(lines) > max_lines:
+        lines = lines[:max_lines] + [f"… ({len(lines) - max_lines} more diff lines)"]
+    return "\n".join(lines)
+
+
 def _safe_json_object(raw: object) -> dict:
     if not isinstance(raw, str) or not raw:
         return {}
@@ -144,7 +181,17 @@ def _describe_tool_called(item: object) -> str | None:
             f"{_PATCH_VERB.get(verb, verb.lower())} {path.strip()}"
             for verb, path in _PATCH_OP_RE.findall(patch_text)
         ]
-        return f"Editing: {', '.join(ops)}" if ops else "Editing files..."
+        header = f"Editing: {', '.join(ops)}" if ops else "Editing files..."
+        # Include the actual change (the patch's +/- hunk lines, minus the `*** ...` file headers the
+        # `ops` list already covers), so the feed shows the diff, rendered colorized by the GUI.
+        body = [ln for ln in patch_text.splitlines() if not ln.startswith("*** ")]
+        while body and not body[-1].strip():
+            body.pop()
+        while body and not body[0].strip():
+            body.pop(0)
+        if len(body) > _DIFF_MAX_LINES:
+            body = body[:_DIFF_MAX_LINES] + [f"… ({len(body) - _DIFF_MAX_LINES} more diff lines)"]
+        return f"{header}\n" + "\n".join(body) if body else header
     if name == "view_image":
         return "Viewing an image it produced..."
     if name:
@@ -153,9 +200,10 @@ def _describe_tool_called(item: object) -> str | None:
 
 
 def _describe_tool_output(item: object) -> str | None:
-    """Only surface tool output when it's actually informative -- a shell command that failed.
-    Successful commands and every `apply_patch` result stay silent: the intent was already
-    announced by `_describe_tool_called`, and this project never surfaces diffs.
+    """A tool result -> a narration line. Surfaces a shell command's output (both success, as a
+    collapsible block, and failure, as a first/last-line summary) so the feed shows what each step
+    produced. Non-exec results (apply_patch/view_image) stay silent -- their intent/diff was already
+    announced by `_describe_tool_called`.
     """
     output = getattr(item, "output", None)
     if not isinstance(output, str):
@@ -173,8 +221,12 @@ def _describe_tool_output(item: object) -> str | None:
     if todo_lines:
         return "\n".join(todo_lines)
     match = re.search(r"Process exited with code (-?\d+)", output)
-    if not match or match.group(1) == "0":
-        return None
+    if match is None:
+        return None  # not a shell/exec output (e.g. an apply_patch/view_image result) -- stay silent
+    if match.group(1) == "0":
+        # A successful command: surface its output too (truncated), so the feed shows what each step
+        # produced, not just the command. Rendered as a compact collapsible block by the GUI.
+        return _output_block(output.split("Output:", 1)[-1])
     tail = output.split("Output:", 1)[-1].strip()
     lines = [ln for ln in tail.splitlines() if ln.strip()]
     if not lines:

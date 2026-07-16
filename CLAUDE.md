@@ -1134,12 +1134,16 @@ new plumbing needed on either the CLI or the GUI, since both already render ever
 message as its own line. `sandbox/runner.py::_describe_stream_event` maps:
 
 - a shell command the agent runs (`exec_command` tool call) → `$ <command>`
-- files the agent edits via `apply_patch` → `Editing: edit <path>, add <path>, ...` — the file
-  list only, parsed from the patch's own `*** Add/Update/Delete File:` headers, **never the hunk
-  content itself** (the user explicitly didn't want a diff surfaced, just the decision)
-- a failed shell command's exit code and first line of output (successful commands and every
-  `apply_patch` result stay silent, since the intent was already announced and a `0` exit isn't
-  informative)
+- files the agent edits → `Editing: <path>` **followed by the actual diff** — the patch's +/- hunk
+  lines (`apply_patch`), or an old→new unified diff built with `difflib` (the Claude backend's
+  `Edit`/`Write`). The GUI renders these as a colorized +/- block. (An earlier version deliberately
+  showed only the file list; the user later asked to show the diffs, in a good manner.)
+- a shell command's **output** → an `Output:` block (both success and failure), so the feed shows
+  what each step produced, not just the command; the GUI renders it as a compact scrollable block.
+  Only genuine command output is surfaced — on the Claude backend a `{tool_use_id: name}` map
+  (threaded through `_describe_claude_message`) restricts output to `Bash` results, so a big file
+  `Read` doesn't flood the feed. `plan.py`'s structured `PLAN_*`/`MEMORY_NOTE` lines still take
+  precedence (they drive the build-plan popup)
 - the model's own reasoning summary and any intermediate message text, when the model produces
   one (`Thinking: ...` / `Agent: ...`) — this is what actually surfaces the agent's *decisions*
   ("Python is picking a blocked venv; I'll rerun with system isolation disabled."), not just its

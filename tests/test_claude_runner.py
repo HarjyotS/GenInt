@@ -57,6 +57,43 @@ def test_describe_block_read_and_grep_stay_silent():
     assert claude_runner._describe_block(_Block(name="Grep", input={"pattern": "x"})) is None
 
 
+def test_describe_block_edit_shows_a_diff():
+    line = claude_runner._describe_block(
+        _Block(name="Edit", input={"file_path": "run_scene.py", "old_string": "a = 1", "new_string": "a = 2"})
+    )
+    assert line.startswith("Editing: run_scene.py\n")
+    assert "-a = 1" in line and "+a = 2" in line
+
+
+def test_describe_block_write_shows_added_content_as_a_diff():
+    line = claude_runner._describe_block(
+        _Block(name="Write", input={"file_path": "x.py", "content": "print('hi')"})
+    )
+    assert line.startswith("Editing: x.py\n")
+    assert "+print('hi')" in line
+
+
+def test_describe_block_surfaces_bash_command_output_only():
+    names: dict = {}
+    # a Bash tool call records id -> name so its later result can be correlated
+    assert (
+        claude_runner._describe_block(_Block(name="Bash", id="t1", input={"command": "ls"}), tool_names=names)
+        == "$ ls"
+    )
+    assert names == {"t1": "Bash"}
+    # the Bash result surfaces the command output as a block
+    assert (
+        claude_runner._describe_block(_Block(is_error=False, content="file_a\nfile_b", tool_use_id="t1"), tool_names=names)
+        == "Output:\nfile_a\nfile_b"
+    )
+    # a NON-Bash tool's result (e.g. a big file Read) stays silent, even with tool_names
+    names["t2"] = "Read"
+    assert (
+        claude_runner._describe_block(_Block(is_error=False, content="file contents", tool_use_id="t2"), tool_names=names)
+        is None
+    )
+
+
 def test_describe_block_surfaces_only_failed_tool_results():
     assert claude_runner._describe_block(_Block(is_error=False, content="ok")) is None
     line = claude_runner._describe_block(_Block(is_error=True, content="Traceback: boom"))

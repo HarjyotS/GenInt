@@ -624,7 +624,7 @@ class TestDescribeStreamEvent:
         item = SimpleNamespace(raw_item=SimpleNamespace(name="exec_command", arguments="not json"))
         assert _describe_stream_event(_fake_event("tool_called", item)) == "Running a shell command..."
 
-    def test_apply_patch_call_lists_touched_files_without_diff_content(self):
+    def test_apply_patch_call_lists_files_then_shows_the_diff(self):
         patch_text = (
             "*** Begin Patch\n"
             "*** Update File: navigation/policy.py\n"
@@ -635,11 +635,11 @@ class TestDescribeStreamEvent:
         )
         item = SimpleNamespace(raw_item=SimpleNamespace(name="apply_patch", input=patch_text))
         msg = _describe_stream_event(_fake_event("tool_called", item))
-        assert msg == "Editing: edit navigation/policy.py, add engine/npc.py"
-        # never surface the actual hunk/diff content
-        assert "-old" not in msg
-        assert "+new" not in msg
-        assert "class NPC" not in msg
+        # header lists the files, then the actual +/- hunk lines follow (the `*** ...` headers are
+        # dropped -- the files are already named in the header).
+        assert msg.startswith("Editing: edit navigation/policy.py, add engine/npc.py\n")
+        assert "-old" in msg and "+new" in msg and "+class NPC: ..." in msg
+        assert "*** Begin Patch" not in msg and "*** Update File" not in msg
 
     def test_unknown_tool_call_gets_a_generic_message(self):
         item = SimpleNamespace(raw_item=SimpleNamespace(name="view_image"))
@@ -681,10 +681,11 @@ class TestDescribeStreamEvent:
         msg = _describe_stream_event(_fake_event("tool_output", item))
         assert msg == "  command failed (exit 2): command not found"
 
-    def test_successful_shell_command_output_stays_silent(self):
+    def test_successful_shell_command_output_is_surfaced_as_a_block(self):
         output = "Chunk ID: abc123\nWall time: 0.5000 seconds\nProcess exited with code 0\nOutput:\nok"
         item = SimpleNamespace(output=output)
-        assert _describe_stream_event(_fake_event("tool_output", item)) is None
+        # a successful command's output is now shown (as an "Output:" block the GUI renders compactly)
+        assert _describe_stream_event(_fake_event("tool_output", item)) == "Output:\nok"
 
     def test_apply_patch_output_stays_silent_to_avoid_duplicating_the_call_announcement(self):
         item = SimpleNamespace(output="Updated navigation/policy.py")
@@ -748,10 +749,10 @@ def test_sandbox_run_streams_agent_narration_through_on_stage(tmp_path, patched_
         )
 
     assert "$ ls" in stages
-    assert "Editing: edit navigation/policy.py" in stages
+    # the edit narration now carries the header AND the actual +/- diff lines
+    edit = next(s for s in stages if s.startswith("Editing: edit navigation/policy.py"))
+    assert "-a" in edit and "+b" in edit
     assert "Thinking: Adding a chase NPC." in stages
-    # never a diff line
-    assert not any("-a" in s or "+b" in s for s in stages)
 
 
 def test_repair_message_reinjects_open_build_tasks():
@@ -779,6 +780,6 @@ def test_tool_output_surfaces_plan_lines_on_success():
     assert _describe_tool_output(add) == "PLAN_ADD t1: gravity + jump physics"
     done = SimpleNamespace(output="Process exited with code 0\nOutput:\nPLAN_UPDATE t2 done\nPLAN_PROGRESS 2/4 done\n")
     assert _describe_tool_output(done) == "PLAN_UPDATE t2 done\nPLAN_PROGRESS 2/4 done"
-    # a normal successful command stays silent; a failure still surfaces
-    assert _describe_tool_output(SimpleNamespace(output="Process exited with code 0\nOutput:\nok\n")) is None
+    # a normal successful command now surfaces its output too (as an "Output:" block)
+    assert _describe_tool_output(SimpleNamespace(output="Process exited with code 0\nOutput:\nok\n")) == "Output:\nok"
     assert "command failed" in _describe_tool_output(SimpleNamespace(output="Process exited with code 1\nOutput:\nboom\n"))

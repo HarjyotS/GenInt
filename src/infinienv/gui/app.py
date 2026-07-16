@@ -83,6 +83,8 @@ def _classify_stage(msg: str) -> str:
         return "command"
     if s.startswith("Editing"):
         return "edit"
+    if s.startswith("Output:"):
+        return "output"
     if s.startswith("Viewing an image"):
         return "image"
     if s.startswith("Thinking:"):

@@ -80,6 +80,7 @@ def test_classify_stage_maps_narration_prefixes():
         "$ ls -la": "command",
         "Calling tool: view_image": "command",
         "Editing: edit run_scene.py, add engine/x.py": "edit",
+        "Output:\nfile_a\nfile_b": "output",
         "Thinking: I'll gate the climb on being on the ladder": "decision",
         "Agent: building the cave": "agent",
         "Auditor: the run faithfully implements the spec.": "audit",

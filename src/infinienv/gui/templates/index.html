@@ -160,7 +160,27 @@
   .evt .body { flex: 1; min-width: 0; }
   .evt .k { font-size: 11px; font-weight: 600; color: var(--faint); margin-bottom: 2px; }
   .evt .txt { word-break: break-word; color: var(--ink); }
+  /* current-activity indicator ("what it's doing right now") */
+  .now { display: none; align-items: center; gap: 8px; font-size: 12.5px; color: var(--dim);
+    padding: 0 0 10px; }
+  .now.show { display: flex; }
+  .now .now-ic { color: var(--accent); }
+  .now .now-lbl { font-weight: 600; color: var(--ink); }
+  .now .now-txt { color: var(--dim); min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* command output + edit diffs: compact scrollable mono blocks under an event */
+  pre.diff, pre.outblock { margin: 6px 0 0; font-family: var(--mono); font-size: 11.5px;
+    line-height: 1.5; background: var(--void); border: 1px solid var(--line-soft);
+    border-radius: var(--radius-sm); padding: 8px 10px; max-height: 220px; overflow: auto;
+    white-space: pre; }
+  pre.outblock { color: var(--dim); }
+  pre.diff .dl { display: block; }
+  pre.diff .dl.add { color: var(--ok); }
+  pre.diff .dl.del { color: var(--err); }
+  pre.diff .dl.hunk { color: var(--accent); }
+  pre.diff .dl.ctx { color: var(--dim); }
   .evt.command { background: var(--void); border-color: var(--line-soft); }
+  .evt.output { border-color: var(--line-soft); }
+  .evt.output .ic, .evt.output .k { color: var(--dim); }
   .evt.command .ic { color: var(--dim); }
   .evt.command .txt { font-family: var(--mono); font-size: 12px; color: var(--dim); white-space: pre-wrap; }
   .evt.decision { border-left: 3px solid var(--accent); }
@@ -481,6 +501,7 @@
       <div class="phase-steps" id="phase-steps"></div>
       <div class="phase-meta" id="phase-meta"></div>
     </div>
+    <div class="now" id="now"></div>
     <div class="banner" id="banner"></div>
     <div class="feed" id="feed"><div class="empty">Describe a world on the left and hit Compile.<br><br>A build runs a real agent for a few minutes &mdash; every decision, command, code edit, asset, and the audit appears here live as it happens.</div></div>
 
@@ -597,6 +618,7 @@ const KINDS = {
   workspace: {ic:'▣', label:'Workspace'},
   decision:  {ic:'◆', label:'Decision'},
   command:   {ic:'›', label:'Command'},
+  output:    {ic:'≡', label:'Output'},
   edit:      {ic:'✎', label:'Wrote code'},
   image:     {ic:'▤', label:'Reviewed frame'},
   agent:     {ic:'▸', label:'Agent'},
@@ -651,23 +673,61 @@ function pushEvent(kind, message) {
   if (kind === 'step' || kind === 'goal') setPhase('Play');
   if (kind === 'judge') setPhase('Judge');
   const meta = KINDS[kind] || KINDS.status;
-  let txt = message;
+  let txt = message, diffBody = '', outputBody = '';
   if (kind === 'command') txt = message.replace(/^\$\s*/, '');
   else if (kind === 'decision') txt = message.replace(/^Thinking:\s*/, '');
   else if (kind === 'agent') txt = message.replace(/^Agent:\s*/, '');
-  else if (kind === 'edit') txt = message.replace(/^Editing:\s*/, '');
   else if (kind === 'audit') txt = message.replace(/^Auditor:\s*/, '');
+  else if (kind === 'edit') {
+    const nl = message.indexOf('\n');   // "Editing: <path>\n<diff>"
+    txt = (nl === -1 ? message : message.slice(0, nl)).replace(/^Editing:\s*/, '');
+    diffBody = nl === -1 ? '' : message.slice(nl + 1);
+  } else if (kind === 'output') {
+    txt = ''; outputBody = message.replace(/^Output:\n?/, '');
+  }
+
+  updateNow(meta, txt || (kind === 'output' ? 'command output' : ''));
+
   const row = document.createElement('div');
   const fail = kind === 'audit' && /fake|does not|not independently/i.test(message);
   row.className = 'evt ' + kind + (fail ? ' fail' : '');
   const b = document.createElement('div'); b.className = 'body';
   const k = document.createElement('div'); k.className = 'k'; k.textContent = meta.label;
-  const t = document.createElement('div'); t.className = 'txt'; t.textContent = txt;
-  b.appendChild(k); b.appendChild(t);
+  b.appendChild(k);
+  if (txt) { const t = document.createElement('div'); t.className = 'txt'; t.textContent = txt; b.appendChild(t); }
+  if (diffBody) b.appendChild(renderDiff(diffBody));
+  if (outputBody) b.appendChild(renderOutput(outputBody));
   row.innerHTML = `<div class="ic">${meta.ic}</div>`;
   row.appendChild(b);
   feedEl.appendChild(row);
   feedEl.scrollTop = feedEl.scrollHeight;
+}
+
+// A colorized +/- diff block for an edit event.
+function renderDiff(body) {
+  const pre = document.createElement('pre'); pre.className = 'diff';
+  body.split('\n').forEach((line) => {
+    const span = document.createElement('span');
+    const c = line[0] === '+' ? 'add' : line[0] === '-' ? 'del' : line.startsWith('@@') ? 'hunk' : 'ctx';
+    span.className = 'dl ' + c; span.textContent = line;
+    pre.appendChild(span);
+  });
+  return pre;
+}
+// A recessed mono block for a command's output.
+function renderOutput(body) {
+  const pre = document.createElement('pre'); pre.className = 'outblock';
+  pre.textContent = body;
+  return pre;
+}
+// The "what it's doing right now" line above the feed.
+function updateNow(meta, txt) {
+  const el = $('now'); if (!el) return;
+  el.innerHTML = '<span class="now-ic"></span><span class="now-lbl"></span><span class="now-txt"></span>';
+  el.querySelector('.now-ic').textContent = meta.ic;
+  el.querySelector('.now-lbl').textContent = meta.label;
+  el.querySelector('.now-txt').textContent = txt ? ('· ' + txt.slice(0, 140)) : '';
+  el.classList.add('show');
 }
 
 const backendSelect = $('sandbox_backend'), modelSelect = $('sandbox_model');
@@ -846,6 +906,7 @@ function resetLog() {
   $('fig-replay').style.display = '';
   $('cap-render').textContent = 'render.png';
   const stale = document.getElementById('nav-extra'); if (stale) stale.remove();
+  const n = $('now'); if (n) { n.classList.remove('show'); n.innerHTML = ''; }
   curPhase = -1;
 }
 
@@ -861,7 +922,7 @@ function startRun() {
   setPhase(mode === 'navigate' ? 'Play' : 'Refine');
   setMeta('');
 }
-function stopTimer() { clearInterval(runTimer); runTimer = null; document.body.classList.remove('building'); setMeta(lastAttemptText); }
+function stopTimer() { clearInterval(runTimer); runTimer = null; document.body.classList.remove('building'); setMeta(lastAttemptText); const n = $('now'); if (n) n.classList.remove('show'); }
 
 function verdictCard(h, v, cls, sub) {
   return `<div class="vcard ${cls}"><div class="h">${h}</div><div class="v">${v}</div>${sub ? `<div class="sub">${sub}</div>` : ''}</div>`;

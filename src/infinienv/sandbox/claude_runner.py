@@ -40,6 +40,8 @@ from infinienv.sandbox.runner import (
     _MAX_NARRATION_CHARS,
     _interpreter_briefing,
     _load_prompt,
+    _make_diff,
+    _output_block,
     _repair_message,
     _todo_brief,
     _truncate,
@@ -64,25 +66,31 @@ DEFAULT_SANDBOX_CLAUDE_MODEL = "claude-sonnet-5"
 _EDIT_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 
 
-def _describe_claude_message(message: object, *, stage: Callable[[str], None]) -> None:
+def _describe_claude_message(
+    message: object, *, stage: Callable[[str], None], tool_names: dict | None = None
+) -> None:
     """Turn one Claude Agent SDK stream message into zero or more `on_stage` narration lines.
     Duck-typed against the message/block shapes (no isinstance against SDK classes, wrapped so a
     future shape change degrades to silence rather than crashing) -- same best-effort discipline
     as runner.py's `_describe_stream_event`.
+
+    `tool_names` (a caller-owned {tool_use_id: tool_name} dict, persistent across messages) lets a
+    tool RESULT know which tool produced it -- so command OUTPUT is surfaced only for `Bash` results,
+    not every file read. `None` (e.g. in unit tests) just disables that cross-message correlation.
     """
     try:
         content = getattr(message, "content", None)
         if not isinstance(content, list):
             return
         for block in content:
-            line = _describe_block(block)
+            line = _describe_block(block, tool_names=tool_names)
             if line:
                 stage(line)
     except Exception:
         return
 
 
-def _describe_block(block: object) -> str | None:
+def _describe_block(block: object, *, tool_names: dict | None = None) -> str | None:
     text = getattr(block, "text", None)
     if isinstance(text, str) and text.strip():
         return f"Agent: {_truncate(text, 300)}"
@@ -91,6 +99,10 @@ def _describe_block(block: object) -> str | None:
         return f"Thinking: {_truncate(thinking, _MAX_NARRATION_CHARS)}"
     name = getattr(block, "name", None)
     if name is not None and getattr(block, "input", None) is not None:
+        if tool_names is not None:  # remember this tool call so its later RESULT knows its source
+            bid = getattr(block, "id", None)
+            if bid:
+                tool_names[bid] = name
         args = getattr(block, "input", None)
         args = args if isinstance(args, dict) else {}
         if name == "Bash":
@@ -98,7 +110,16 @@ def _describe_block(block: object) -> str | None:
             return f"$ {_truncate(cmd, _MAX_NARRATION_CHARS)}" if cmd else "Running a shell command..."
         if name in _EDIT_TOOLS:
             path = str(args.get("file_path") or args.get("notebook_path") or "").strip()
-            return f"Editing: {path}" if path else "Editing files..."
+            if not path:
+                return "Editing files..."
+            old, new, content = args.get("old_string"), args.get("new_string"), args.get("content")
+            if isinstance(old, str) and isinstance(new, str):
+                diff = _make_diff(old, new)  # an Edit -> the old->new change
+            elif isinstance(content, str):
+                diff = _make_diff("", content)  # a Write -> the new content as additions
+            else:
+                diff = ""
+            return f"Editing: {path}\n{diff}" if diff else f"Editing: {path}"
         if name in ("Read", "Glob", "Grep", "TodoWrite"):
             return None  # too noisy to surface; the agent's own text covers intent
         return f"Calling tool: {name}"
@@ -121,6 +142,11 @@ def _describe_block(block: object) -> str | None:
     if getattr(block, "is_error", False):
         detail = detail.strip()
         return f"  tool failed{': ' + _truncate(detail, _MAX_NARRATION_CHARS) if detail else ''}"
+    # A successful result: surface the OUTPUT, but only for a `Bash` command (not every file read),
+    # as a compact collapsible block. Needs the caller-owned tool_names map to know the source.
+    source = tool_names.get(getattr(block, "tool_use_id", None)) if tool_names else None
+    if source == "Bash":
+        return _output_block(detail)
     return None
 
 
@@ -255,9 +281,10 @@ async def _run_async(
         )
         agent_summary = None
         run_error = None
+        tool_names: dict[str, str] = {}  # tool_use_id -> tool name, so a result knows its source
         try:
             async for msg in query(prompt=message, options=options):
-                _describe_claude_message(msg, stage=stage)
+                _describe_claude_message(msg, stage=stage, tool_names=tool_names)
                 if isinstance(msg, ResultMessage):
                     result = getattr(msg, "result", None)
                     if isinstance(result, str) and result.strip():
