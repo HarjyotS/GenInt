@@ -1694,10 +1694,10 @@ dispatches on the env var.
   code that explicitly wants the raw key (the `anthropic` provider reads `CL_KEY` -> then a
   user-set `ANTHROPIC_API_KEY`, and passes it *directly* to `anthropic.Anthropic(api_key=...)` --
   never via the global env var, so it can't clobber the CLI's login). The default model for this
-  backend is `claude-haiku-4-5-20251001` (`DEFAULT_SANDBOX_CLAUDE_MODEL` --
-  Haiku, chosen deliberately: sandbox runs are long and iterative, doing many
-  build-and-rerun cycles, so the cheapest/fastest tier is the sensible default; use Sonnet or Opus
-  via the override (`INFINIENV_SANDBOX_MODEL` / the GUI model picker) for the hardest prompts),
+  backend is `claude-sonnet-5` (`DEFAULT_SANDBOX_CLAUDE_MODEL` -- Sonnet is the balanced default for
+  the long, iterative build-and-rerun sandbox loop; briefly defaulted to Haiku, reverted to Sonnet at
+  the user's call. Haiku/Opus/Fable remain available via `INFINIENV_SANDBOX_MODEL` / the GUI model
+  picker for cheaper or harder runs),
   overridable via `INFINIENV_SANDBOX_MODEL`, distinct from the OpenAI backend's `gpt-5.5` default.
 - **Live narration** works the same as the OpenAI backend: `_describe_claude_message` maps the SDK's
   streamed `AssistantMessage`/`ResultMessage` blocks to the same `on_stage` lines (`$ <command>` for a
@@ -2360,7 +2360,7 @@ python -m infinienv navigate examples/kitchen_can.json --out runs/vision_demo \
   # SDK) or openai (OpenAI Agents SDK).
   # claude (Anthropic's Claude Agent SDK -- authenticates via the `claude` CLI's own claude.ai
   # login; ANTHROPIC_API_KEY is deliberately NOT set from CL_KEY, see section 11's auth note. Needs
-  # the `claude` CLI on PATH and `pip install infinienv[claude]`; default model claude-haiku-4-5).
+  # the `claude` CLI on PATH and `pip install infinienv[claude]`; default model claude-sonnet-5).
   # Interchangeable:
   # same workspace, artifacts, outer check, and metrics.json shape -- only `provider`/`model` differ.
   # See section 11's Claude Agent SDK backend subsection.
@@ -2408,12 +2408,12 @@ equivalent of `INFINIENV_SANDBOX_BACKEND` (section 11's Claude Agent SDK backend
 override (falling back to the env var, then `openai`, when the frontend doesn't send one) -- so the
 choice is a GUI control, not a second code path, same discipline as every other sandbox field.
 Alongside it is an **Agent model** picker whose options track the selected runtime -- OpenAI
-(`gpt-5.6-terra`/`sol`/`luna`, `gpt-5.5`/`-pro`) or Claude (`claude-haiku-4-5`/`-sonnet-5`/`-opus-4-8`/`-fable-5`),
+(`gpt-5.6-terra`/`sol`/`luna`, `gpt-5.5`/`-pro`) or Claude (`claude-sonnet-5`/`-haiku-4-5`/`-opus-4-8`/`-fable-5`),
 the account's actually-available variants. It POSTs `sandbox_model`, validated against
 `gui/app.py::SANDBOX_MODELS` for the chosen backend (an unlisted/mismatched model is a 400, not
 forwarded) and threaded to `run_sandbox_generation`'s existing `model` parameter -- the frontend
 equivalent of `INFINIENV_SANDBOX_MODEL`, a per-run override of the backend's default. First option is
-the default (`gpt-5.6-terra` / `claude-haiku-4-5-20251001`); absent -> the env/default fallback, unchanged.
+the default (`gpt-5.6-terra` / `claude-sonnet-5`); absent -> the env/default fallback, unchanged.
 Streams the same per-attempt `on_stage`
 progress messages
 (`sandbox/runner.py`'s repair loop now takes an `on_stage` callback mirroring

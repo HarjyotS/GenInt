@@ -1,5 +1,6 @@
 # Fly.io deploy config. First run: `fly launch --no-deploy` (or `fly apps create <name>`), then set
 # your app name below and your keys as secrets, then `fly deploy`:
+#   fly secrets set INFINIENV_GUI_PASSWORD=...       # REQUIRED (public bind refuses to start without it)
 #   fly secrets set OPENAI_API_KEY=sk-...            # refine/audit/assets/navigate
 #   fly secrets set ANTHROPIC_API_KEY=sk-ant-...     # the Claude sandbox backend (headless auth)
 # See docs/deploy.md.

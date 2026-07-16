@@ -14,6 +14,8 @@ services:
     envVars:
       - key: INFINIENV_SANDBOX_BACKEND
         value: claude          # or "openai" (then only OPENAI_API_KEY is needed)
+      - key: INFINIENV_GUI_PASSWORD   # REQUIRED — the app binds publicly and refuses to start without it
+        sync: false
       - key: OPENAI_API_KEY
         sync: false
       - key: ANTHROPIC_API_KEY

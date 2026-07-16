@@ -4107,3 +4107,31 @@ Honest note: I couldn't build the Docker image here (no local Docker) or test a 
 configs are written to the documented Fly/Render/Docker contracts but are un-exercised against a real
 host; flagged in docs/deploy.md that a given host may need memory/timeout tuning for a heavy sandbox
 run, and that running locally is the verified path. `pytest` (affected files) -> 49 passed.
+
+---
+
+## 2026-07-15 -- Public-deploy hardening: password + rate limits; Sonnet + auto defaults
+
+Prompted by the public Oracle VM deploy (open, no auth). `gui/app.py`:
+- **Password gate**: `INFINIENV_GUI_PASSWORD` -> HTTP Basic Auth `before_request` on every route
+  (constant-time compare, any username). Unset -> open (local/tests). `launch()` **refuses to start a
+  public bind** (host not in `{127.0.0.1,localhost,::1}`) without the password
+  (`_public_bind`/`_password_required_message`, both unit-tested); localhost prints an UNAUTH warning.
+  The Docker CMD binds 0.0.0.0, so a deploy without the password won't start -- by design.
+- **Rate limits** on the credit-spending endpoints (`/api/generate`,`/api/navigate`): a concurrency
+  cap (`INFINIENV_GUI_MAX_CONCURRENT`, default 1) counting non-done `_jobs`, and a per-IP sliding
+  window (`INFINIENV_GUI_RATE_LIMIT`=20 / `INFINIENV_GUI_RATE_WINDOW`=3600s), both -> 429 with an
+  `{error}` body the existing frontend already surfaces. Skipped under `TESTING`; per-IP state is
+  per-app (no cross-test bleed). Frontend needed no change (button already disables mid-run).
+- **Sonnet default** (reverted Haiku): `DEFAULT_SANDBOX_CLAUDE_MODEL="claude-sonnet-5"`;
+  `SANDBOX_MODELS["claude"]` + the index.html picker reordered Sonnet-first.
+- **Auto assets default** for the real flow: CLI `generate --assets` default `auto`; GUI api_generate
+  defaults `auto` **only when sandbox** (`"auto" if sandbox else "none"`) -- the non-sandbox mock path
+  stays `none` so hermetic tests never trigger image gen (a real hang I hit: auto + a live
+  OPENAI_API_KEY made the mock-generate tests call the Images API with backoff sleeps).
+
+Tests: added password-gate (401/200/wrong-pw), public-bind helper, rate-limit 429, concurrency 429
+(injects a fake active `_jobs` entry) in test_gui.py; updated the sandbox assets-default assertion to
+`auto`. Docs updated (docs/deploy.md access-control section + the run commands incl.
+INFINIENV_GUI_PASSWORD; fly.toml/render.yaml; CLAUDE.md model-default revert; docs/cli.md). Full
+suite (run with OPENAI_API_KEY unset) -> 469 passed.

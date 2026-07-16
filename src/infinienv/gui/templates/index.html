@@ -328,10 +328,10 @@
 
       <label for="assets">Assets</label>
       <select id="assets">
-        <option value="none" selected>none &middot; flat colored cells</option>
+        <option value="auto" selected>auto &middot; generate sprites, fall back to placeholders</option>
+        <option value="none">none &middot; flat colored cells</option>
         <option value="local">local &middot; checked-in placeholders</option>
         <option value="generated">generated &middot; real sprites via the image API</option>
-        <option value="auto">auto &middot; generate the complex, draw simple ones locally</option>
       </select>
       <div class="hint">Sprites the agent resolves inside its workspace.</div>
 
@@ -682,8 +682,8 @@ const SANDBOX_MODELS = {
     ['gpt-5.5-pro', 'GPT-5.5 pro'],
   ],
   claude: [
-    ['claude-haiku-4-5-20251001', 'Claude Haiku 4.5 (default)'],
-    ['claude-sonnet-5', 'Claude Sonnet 5'],
+    ['claude-sonnet-5', 'Claude Sonnet 5 (default)'],
+    ['claude-haiku-4-5-20251001', 'Claude Haiku 4.5'],
     ['claude-opus-4-8', 'Claude Opus 4.8'],
     ['claude-fable-5', 'Claude Fable 5'],
   ],

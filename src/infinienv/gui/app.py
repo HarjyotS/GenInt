@@ -8,6 +8,7 @@ on top of it, not a second implementation.
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import threading
@@ -19,6 +20,30 @@ from infinienv.llm.base import ProviderError
 
 _jobs: dict[str, "Job"] = {}
 _jobs_lock = threading.Lock()
+
+# Binding any host other than these exposes the GUI beyond localhost, which requires an access
+# password (enforced in launch()). "" covers an empty/unset host.
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", ""})
+
+
+def _public_bind(host: str) -> bool:
+    """True if serving on `host` makes the GUI reachable beyond localhost (so a password is required)."""
+    return (host or "").strip().lower() not in _LOOPBACK_HOSTS
+
+
+def _password_required_message(host: str, password: str | None) -> str | None:
+    """The refuse-to-start message when a public bind has no access password set, else None.
+
+    The GUI has no built-in accounts and can spend real API credit, so exposing it publicly without
+    a password is unsafe -- launch() turns this message into a ProviderError that stops startup."""
+    if _public_bind(host) and not password:
+        return (
+            f"Refusing to start: binding host {host!r} exposes the GUI to the network, but no access "
+            "password is set. Set INFINIENV_GUI_PASSWORD to a strong value (e.g. add "
+            "`-e INFINIENV_GUI_PASSWORD=...` to your `docker run`), or bind `--host 127.0.0.1` for "
+            "local-only use."
+        )
+    return None
 
 # Live human-play sessions: a server-side InfiniEnv per session, driven by the browser's keypresses
 # (the human is just another controller over the same deterministic engine `navigate` uses). Kept in
@@ -35,7 +60,7 @@ _PLAY_MAX_STEPS = 2000  # generous, so a human is never truncated mid-play
 # INFINIENV_SANDBOX_MODEL env var, which these override in turn when the frontend sends one.
 SANDBOX_MODELS: dict[str, tuple[str, ...]] = {
     "openai": ("gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.5", "gpt-5.5-pro"),
-    "claude": ("claude-haiku-4-5-20251001", "claude-sonnet-5", "claude-opus-4-8", "claude-fable-5"),
+    "claude": ("claude-sonnet-5", "claude-haiku-4-5-20251001", "claude-opus-4-8", "claude-fable-5"),
 }
 
 
@@ -478,6 +503,60 @@ def create_app():
 
     app = Flask(__name__)
 
+    # --- Access control + rate limiting -------------------------------------------------------
+    # The GUI has no accounts and can spend real API credit, so a public deploy needs a front door
+    # and a spend cap. A single shared password (HTTP Basic Auth) gates every route when
+    # INFINIENV_GUI_PASSWORD is set; launch() additionally refuses to start a *public* bind with no
+    # password (see _password_required_message). Rate/concurrency limits cap the credit-spending job
+    # endpoints. All config is env-driven; per-IP state is per-app (fresh each create_app), and the
+    # limits are skipped under TESTING so the test suite is unaffected.
+    password = os.environ.get("INFINIENV_GUI_PASSWORD")
+    max_concurrent = int(os.environ.get("INFINIENV_GUI_MAX_CONCURRENT", "1"))
+    rate_limit = int(os.environ.get("INFINIENV_GUI_RATE_LIMIT", "20"))
+    rate_window = int(os.environ.get("INFINIENV_GUI_RATE_WINDOW", "3600"))
+    rate_hits: dict[str, list[float]] = {}  # per-IP request timestamps, this app instance only
+
+    if password:
+
+        @app.before_request
+        def _require_password():
+            auth = request.authorization
+            # Accept any username; the shared password is the secret. Constant-time compare.
+            if auth is None or not hmac.compare_digest(auth.password or "", password):
+                resp = jsonify({"error": "authentication required"})
+                resp.status_code = 401
+                resp.headers["WWW-Authenticate"] = 'Basic realm="InfiniEnv"'
+                return resp
+            return None
+
+    def _client_ip() -> str:
+        forwarded = request.headers.get("X-Forwarded-For")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+        return request.remote_addr or "unknown"
+
+    def _check_limits():
+        """Guard the credit-spending job endpoints. Returns a Flask (response, 429) tuple to return
+        to the client when a limit is hit, or None when the request is allowed. Skipped under
+        TESTING so the existing suite (which posts many jobs from one client) is unaffected."""
+        if app.config.get("TESTING"):
+            return None
+        active = sum(1 for j in _jobs.values() if not j.done)
+        if active >= max_concurrent:
+            return jsonify(
+                {"error": "A run is already in progress on this server — please wait for it to finish."}
+            ), 429
+        now = time.time()
+        ip = _client_ip()
+        hits = [t for t in rate_hits.get(ip, []) if now - t < rate_window]
+        if len(hits) >= rate_limit:
+            return jsonify(
+                {"error": "Rate limit reached — too many runs from your address. Try again later."}
+            ), 429
+        hits.append(now)
+        rate_hits[ip] = hits
+        return None
+
     @app.get("/")
     def index():
         return render_template("index.html", providers=PROVIDER_NAMES)
@@ -509,7 +588,9 @@ def create_app():
         out_dir = (data.get("out") or "").strip() or f"runs/gui_{int(time.time())}"
         sandbox = bool(data.get("sandbox"))
 
-        assets_mode = data.get("assets") or "none"
+        # Default to `auto` for the real (sandbox) flow so worlds get generated sprites out of the
+        # box; the non-sandbox path (test/legacy only) stays `none` so it never triggers image gen.
+        assets_mode = data.get("assets") or ("auto" if sandbox else "none")
         if assets_mode not in ("none", "local", "generated", "auto"):
             return jsonify({"error": f"unknown assets mode {assets_mode!r}"}), 400
 
@@ -533,6 +614,10 @@ def create_app():
                 return jsonify(
                     {"error": f"unknown sandbox model {sandbox_model!r} for backend {effective_backend!r}"}
                 ), 400
+
+        limited = _check_limits()  # rate/concurrency cap (spends API credit) -- 429 if exceeded
+        if limited:
+            return limited
 
         job = Job()
         job_id = uuid.uuid4().hex
@@ -619,6 +704,10 @@ def create_app():
 
         judge = data.get("judge", True) is not False
         out_dir = (data.get("out") or "").strip() or f"runs/nav_{int(time.time())}"
+
+        limited = _check_limits()  # rate/concurrency cap (spends API credit) -- 429 if exceeded
+        if limited:
+            return limited
 
         job = Job()
         job_id = uuid.uuid4().hex
@@ -856,6 +945,15 @@ def launch(host: str = "127.0.0.1", port: int = 5050, *, open_browser: bool = Tr
         raise ProviderError(
             "The 'flask' package is not installed. Install it with `pip install infinienv[gui]`."
         ) from exc
+
+    # A public bind with no access password is unsafe (the GUI has no accounts and spends API
+    # credit) -- refuse to start. A localhost bind is allowed without one, but say so plainly.
+    password = os.environ.get("INFINIENV_GUI_PASSWORD")
+    refuse = _password_required_message(host, password)
+    if refuse:
+        raise ProviderError(refuse)
+    if not password:
+        print("WARNING: no INFINIENV_GUI_PASSWORD set -- the GUI is running UNAUTHENTICATED (localhost only).")
 
     app = create_app()
     if open_browser:

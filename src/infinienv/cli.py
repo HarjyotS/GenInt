@@ -424,12 +424,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     g.add_argument(
         "--assets",
-        default="none",
+        default="auto",
         choices=["none", "local", "generated", "auto"],
-        help="none: flat colored cells (default). local: checked-in placeholder sprites, no key "
-        "needed. generated: OpenAI image generation only, no silent fallback. auto: OpenAI-generate "
-        "every type that needs a sprite, falling back to a local placeholder on failure. Resolved "
-        "inside the sandbox workspace via a copy of assets/resolver.py.",
+        help="auto (default): OpenAI-generate every type that needs a sprite, falling back to a "
+        "local placeholder on failure. none: flat colored cells. local: checked-in placeholder "
+        "sprites, no key needed. generated: OpenAI image generation only, no silent fallback. "
+        "Resolved inside the sandbox workspace via a copy of assets/resolver.py.",
     )
     g.add_argument(
         "--no-refine-prompt",

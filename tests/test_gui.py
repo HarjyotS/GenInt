@@ -186,7 +186,7 @@ def test_sandbox_generate_flow_streams_stage_and_done_events(client, monkeypatch
     assert done["agent_summary"] == "built a fake sandbox scene"
     assert done["metrics"]["outer_sanity_passed"] is True
     assert "scene" not in done  # sandbox path doesn't re-validate/re-parse a SceneSpec itself
-    assert _fake_run_sandbox_generation.last_assets_mode == "none"
+    assert _fake_run_sandbox_generation.last_assets_mode == "auto"  # auto is the default now
 
     runs = client.get("/api/runs").get_json()["runs"]
     assert any(r["sandbox"] is True for r in runs)
@@ -621,3 +621,82 @@ def test_run_failure_is_sent_on_failed_channel_not_error(client, monkeypatch):
     assert "no API key" in terminal["data"]["message"]
     # And it's recoverable via the result endpoint too.
     assert client.get(f"/api/result/{job_id}").get_json()["result"]["type"] == "error"
+
+
+# --- Access control + rate limiting (public-deploy hardening) ---------------------------------
+
+def test_public_bind_and_password_required_helpers():
+    from infinienv.gui.app import _password_required_message, _public_bind
+
+    assert _public_bind("0.0.0.0") is True
+    assert _public_bind("192.168.1.5") is True
+    assert _public_bind("127.0.0.1") is False
+    assert _public_bind("localhost") is False
+    # A public bind with no password is refused; localhost or a set password is fine.
+    assert _password_required_message("0.0.0.0", None) is not None
+    assert _password_required_message("0.0.0.0", "pw") is None
+    assert _password_required_message("127.0.0.1", None) is None
+
+
+def test_password_gate_blocks_without_and_allows_with_credentials(monkeypatch, tmp_path):
+    import base64
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("INFINIENV_GUI_PASSWORD", "hunter2")
+    app = create_app()
+    c = app.test_client()
+
+    # No credentials -> 401 with a Basic challenge (browser shows a login prompt).
+    r = c.get("/")
+    assert r.status_code == 401
+    assert r.headers.get("WWW-Authenticate", "").startswith("Basic")
+
+    # Correct password (any username) -> 200.
+    ok = base64.b64encode(b"anyuser:hunter2").decode()
+    assert c.get("/", headers={"Authorization": f"Basic {ok}"}).status_code == 200
+
+    # Wrong password -> 401.
+    bad = base64.b64encode(b"anyuser:nope").decode()
+    assert c.get("/", headers={"Authorization": f"Basic {bad}"}).status_code == 401
+
+
+def test_no_password_env_leaves_gui_open(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("INFINIENV_GUI_PASSWORD", raising=False)
+    app = create_app()
+    assert app.test_client().get("/").status_code == 200
+
+
+def test_rate_limit_returns_429(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("INFINIENV_GUI_PASSWORD", raising=False)
+    monkeypatch.setenv("INFINIENV_GUI_RATE_LIMIT", "1")
+    monkeypatch.setenv("INFINIENV_GUI_MAX_CONCURRENT", "100")  # isolate the RATE path from concurrency
+    app = create_app()  # note: NOT TESTING -> limits are active
+    c = app.test_client()
+    body = {"prompt": "a kitchen task", "provider": "mock", "sandbox": False, "seed": 1}
+
+    assert c.post("/api/generate", json=body).status_code == 202
+    r2 = c.post("/api/generate", json=body)
+    assert r2.status_code == 429
+    assert "error" in r2.get_json()
+
+
+def test_concurrency_cap_returns_429(monkeypatch, tmp_path):
+    from infinienv.gui import app as gui_app
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("INFINIENV_GUI_PASSWORD", raising=False)
+    monkeypatch.setenv("INFINIENV_GUI_MAX_CONCURRENT", "1")
+    monkeypatch.setenv("INFINIENV_GUI_RATE_LIMIT", "1000")  # isolate the CONCURRENCY path
+    app = gui_app.create_app()
+    c = app.test_client()
+
+    # Simulate one already-running job (Job.done defaults False -> counts as active).
+    gui_app._jobs["fake-active"] = gui_app.Job()
+    try:
+        r = c.post("/api/generate", json={"prompt": "x", "provider": "mock", "sandbox": False, "seed": 1})
+        assert r.status_code == 429
+        assert "in progress" in r.get_json()["error"]
+    finally:
+        gui_app._jobs.pop("fake-active", None)

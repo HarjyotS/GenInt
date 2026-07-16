@@ -115,7 +115,7 @@ force-based physics can't preserve that guarantee and lives in `--sandbox` inste
 
 ## Asset pipeline
 
-`--assets {none,local,generated,auto}` on `generate` (default `none`):
+`--assets {none,local,generated,auto}` on `generate` (default **`auto`**):
 
 - `none` — flat colored cells, no sprites (zero dependencies).
 - `local` — checked-in placeholder sprites (`src/infinienv/assets/base/*.png`, no key/network).

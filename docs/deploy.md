@@ -49,7 +49,7 @@ compute- and time-heavy, and cost API credit regardless of host):
 
 ```bash
 fly launch --no-deploy          # or `fly apps create <name>`; then set `app` in fly.toml
-fly secrets set OPENAI_API_KEY=sk-... ANTHROPIC_API_KEY=sk-ant-...
+fly secrets set INFINIENV_GUI_PASSWORD=choose-a-strong-password OPENAI_API_KEY=sk-... ANTHROPIC_API_KEY=sk-ant-...
 fly deploy
 ```
 
@@ -65,6 +65,7 @@ fill in `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` when prompted.
 git clone https://github.com/HarjyotS/GenInt && cd GenInt
 docker build -t infinienv .
 docker run -d --restart unless-stopped -p 80:5050 \
+  -e INFINIENV_GUI_PASSWORD='choose-a-strong-password' \
   -e OPENAI_API_KEY=sk-... \
   -e ANTHROPIC_API_KEY=sk-ant-... \
   -e INFINIENV_SANDBOX_BACKEND=claude \
@@ -72,8 +73,30 @@ docker run -d --restart unless-stopped -p 80:5050 \
   infinienv
 ```
 
+The container binds `0.0.0.0` (a public bind), so **it refuses to start without
+`INFINIENV_GUI_PASSWORD`** — that's deliberate (see below). Set it to a strong value.
+
 (No Docker? `pip install -e ".[gui,claude,openai]"`, install the `claude` CLI, then run the `gui`
 command under `systemd`/`tmux`/`pm2` so it stays up.)
+
+## Access control & rate limiting
+
+The GUI has no accounts and can spend real API credit, so a public deploy is protected:
+
+- **Password (required on public binds).** Set `INFINIENV_GUI_PASSWORD` and the whole GUI is behind
+  a single shared password (a browser login prompt / HTTP Basic Auth) — enter it once per browser.
+  Because the deploy binds `0.0.0.0`, the server **refuses to start without it** (a plain
+  `python -m infinienv gui` on `127.0.0.1` doesn't require one). On Fly/Render, set it as a secret /
+  env var alongside the API keys.
+- **Rate limits (on by default).** The credit-spending endpoints (`/api/generate`, `/api/navigate`)
+  are capped:
+  - `INFINIENV_GUI_MAX_CONCURRENT` (default **1**) — only this many runs at once; extra requests get
+    a `429` "a run is already in progress". Keeps a small VM from being overwhelmed.
+  - `INFINIENV_GUI_RATE_LIMIT` (default **20**) per `INFINIENV_GUI_RATE_WINDOW` seconds (default
+    **3600**), per client IP — a `429` past that.
+
+  Tune these up if you have a bigger box / more trusted users. Even with a password, the concurrency
+  cap is what protects a 1 GB VM from a burst of heavy sandbox runs.
 
 ## Honest caveats
 
