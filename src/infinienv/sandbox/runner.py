@@ -679,8 +679,9 @@ def run_sandbox_generation(
 
     The agent runtime is selected by `backend`: `openai` (OpenAI Agents SDK, this module) or
     `claude` (Anthropic's Claude Agent SDK, `sandbox/claude_runner.py`). When `backend` is None
-    (the default), it falls back to `INFINIENV_SANDBOX_BACKEND`, then to `openai` -- so the CLI/GUI
-    can pass an explicit per-run choice while the env var stays the default for anyone who doesn't.
+    (the default), it falls back to `INFINIENV_SANDBOX_BACKEND`, then to `claude` (the default
+    runtime) -- so the CLI/GUI can pass an explicit per-run choice while the env var stays the
+    default for anyone who doesn't.
     Selecting the runtime this way (rather than a new `--sandbox` sub-mode) keeps `--sandbox`'s
     meaning stable: the two backends are interchangeable -- same workspace copy, same five
     artifacts, same outer sanity check and repair loop, same `metrics.json` shape (only `provider`/`model`
@@ -689,7 +690,7 @@ def run_sandbox_generation(
     attempts = (
         DEFAULT_SANDBOX_MAX_REPAIR_ATTEMPTS if max_repair_attempts is None else max_repair_attempts
     )
-    backend = (backend or os.environ.get("INFINIENV_SANDBOX_BACKEND", "openai")).strip().lower()
+    backend = (backend or os.environ.get("INFINIENV_SANDBOX_BACKEND", "claude")).strip().lower()
     if backend == "claude":
         from infinienv.sandbox import claude_runner
 

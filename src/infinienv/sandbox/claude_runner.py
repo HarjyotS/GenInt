@@ -57,7 +57,7 @@ from infinienv.sandbox.workspace import (
     seed_workspace,
 )
 
-DEFAULT_SANDBOX_CLAUDE_MODEL = "claude-sonnet-5"
+DEFAULT_SANDBOX_CLAUDE_MODEL = "claude-haiku-4-5-20251001"
 
 # Claude Code tool names -> how to narrate them, mirroring runner.py's `_describe_*` for the
 # OpenAI backend (announce the intent -- a command, or the files touched -- never a diff).

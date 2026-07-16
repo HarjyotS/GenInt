@@ -3908,3 +3908,131 @@ NOT pursued further: pointing the faithful minimap at the nearest item when empt
 considered and rejected -- the task needs the RED soda specifically, so "nearest can" could steer it
 to a wrong/dangerous deposit. The deterministic navigate (fixed-vocabulary scenes) + human Play mode
 both work reliably; faithful solving of a hard bespoke task is the honest limit.
+
+---
+
+## 2026-07-15 -- GUI redesign: "clean product UI" (comprehension + polish)
+
+The web GUI (`gui/templates/index.html`) worked but read as visually busy and hard to parse for a
+time-boxed reviewer -- exactly the wrong signal against the GI brief's explicit **Clarity** criterion
+("we will not have hours to review it"). User picked the "clean product UI" direction (over "refine the
+existing game-console identity" or "comprehension changes only").
+
+Scope: a **CSS-first restyle + additive markup**, single file, no logic changes. Every element `id`
+and every JS-toggled class kept its name; the whole `<style>` block was rewritten under the same
+selectors, and all legacy CSS custom-property *names* were kept defined (values remapped) because
+markup and `buildResult`'s injected `nav-extra` reference `var(--gem/--dim/--faint)`. So the SSE feed,
+phase bar, verdict cards, goals popup, Play mode, and runs gallery all stayed wired.
+
+What changed:
+- **Design system**: neutral dark surface ramp (near-black -> two elevated surfaces), a single indigo
+  accent (`--accent #6e8efb`), and semantics (`--ok/--warn/--err`) used *only* on status elements --
+  replacing the old 5-saturated-color coding (teal/yellow/green/red/purple all active at once). Removed
+  the fixed grid `.substrate`, radial-gradient bg, neon glow shadows, and `gridpulse`.
+- **Typography**: sans-first for all reading text; mono reserved for code/data (commands, scene.json,
+  metrics, log). Dropped uppercase + wide letter-spacing from labels/headers/buttons/captions; hierarchy
+  now via size+weight+color. Raised `--dim`/`--faint` for AA contrast on the new bg.
+- **Comprehension**: a plain-language explainer strip at the top of the stage mapping the loop
+  (describe -> agent writes & runs engine code -> independent checks + audit -> code decides), an
+  `<details class="advanced">` collapsing the advanced knobs (agent runtime/model, seed, repair
+  attempts, output dir) so only Prompt + Refine + Assets show by default, a better empty/loading state
+  that sets the "a few minutes" expectation, and plainer copy.
+
+Verified live with the gstack `/browse` skill against a running server: Generate empty state, an
+existing sandbox run's detail (render.png/replay.gif side by side), Advanced expand (all field `id`s
+resolve), Play mode (kitchen_can renders, keyboard drives it), and the <900px single-column
+breakpoint. No console errors; `pytest tests/test_gui.py` -> 30 passed (template + endpoints unchanged).
+
+---
+
+## 2026-07-15 -- GUI: a dropped SSE stream is no longer reported as a run failure
+
+User hit "✕ Failed / Error: connection error" in the GUI on a run that was actually still going.
+Root cause: the frontend's `EventSource` `error` handler was fatal, and it conflated two very
+different things. `EventSource` dispatches an event of type `error` for BOTH (a) a genuine app-level
+failure the server sent as `event: error`, and (b) a native TRANSPORT drop (the socket closed --
+common on a multi-minute sandbox build behind a proxy, on laptop sleep, etc.). The handler painted
+"Failed" and `source.close()`d for either -- so any network blip killed the UI even though the job
+kept running server-side, and the old stream endpoint *popped the job the instant it emitted a
+terminal event*, so there was nothing to reconnect to.
+
+Fix -- make the stream resumable and tell the two error kinds apart:
+
+- **Server (`gui/app.py`)**: `Job` is now an append-only event **log** (with a `threading.Condition`)
+  instead of a consume-once `queue.Queue`; `emit()` appends and never removes. Finished jobs are
+  **retained** (capped at `_JOBS_CAP=32`, oldest-finished evicted via `_prune_jobs()` on new-job
+  registration) so a reconnect/poll can still fetch the result. `/api/stream/<id>` now emits an `id:`
+  per event and a `retry: 2000` hint, and **resumes from `Last-Event-ID`** (the header the browser
+  resends automatically on reconnect) or `?from=`, replaying only missed events -- so a dropped
+  stream catches back up losslessly incl. the terminal event, instead of the run looking failed. A
+  genuine failure is emitted on a distinct SSE event name **`failed`** (not `error`) precisely so the
+  client can distinguish it from a transport drop. New `/api/result/<id>` poll fallback returns the
+  finished terminal payload (404 -> unknown/evicted).
+- **Frontend (`templates/index.html`)**: a `settled` flag guards a single terminal handling.
+  `done` -> `finishDone`; `failed` -> `finishFailure` (a real failure, ends the run). The native
+  `error` handler is now NON-fatal: if `readyState === CONNECTING` it shows a one-time
+  "reconnecting…" status and lets the browser auto-reconnect (which resends `Last-Event-ID`); if
+  `CLOSED` it polls `/api/result` (`pollResult`, re-polls every 3s while `running`) so a completed
+  run is recovered rather than shown as a failure.
+
+Verified: `pytest tests/test_gui.py` -> 33 passed (added `test_stream_is_resumable_from_last_event_id`,
+`test_result_endpoint_recovers_a_finished_run`, `test_run_failure_is_sent_on_failed_channel_not_error`).
+Also verified live with curl against a running server: the raw SSE carries `retry: 2000` + per-event
+`id:` (0..4) + `event:` names ending in `done`; a reconnect with `Last-Event-ID: 0` starts at id 1;
+`/api/result/<job>` returns the finished payload after the stream ended. Page loads with no console
+errors; the refactored `done`/`failed`/`error` handlers parse cleanly.
+
+---
+
+## 2026-07-15 -- Default SDK -> Claude; `auto` generates everything; image requests anonymised
+
+Three user asks, driven by a run whose `asset_notes` were full of `moderation_blocked` (on the
+`agent__walk/climb` sprites) and `429 rate_limit_exceeded`:
+
+1. **Default sandbox SDK -> Anthropic.** `sandbox/runner.py::run_sandbox_generation` now defaults
+   `INFINIENV_SANDBOX_BACKEND` to `claude` (was `openai`); the GUI backend `<select>` defaults to the
+   Claude option. `openai` is still fully reachable (env var or the GUI picker). Tests updated:
+   `test_backend_dispatch_default_is_claude` + `test_backend_dispatch_openai_is_still_reachable_explicitly`.
+
+2. **`--assets auto` generates EVERY sprite via OpenAI.** Removed `resolver.py::SIMPLE_LOCAL_TYPES`
+   and the auto-only "draw simple structural types locally, no API call" shortcut. `auto` now
+   generates the same set as `generated` (incl. wall/floor), and differs only in failure handling:
+   auto falls back to a local placeholder, generated leaves a hole. (The old shortcut existed to
+   dodge the 5/min rate limit; that's now handled by backoff, below.) The two auto tests were
+   rewritten (`..._falls_back_to_local_on_generation_failure`, `..._generates_every_type`).
+
+3. **Anonymise content-generation requests + retry recoverable failures** (the real complaint,
+   "this should not happen"). The Images API applies *output* moderation and rejected the `agent`
+   sprite because its description embeds the scene prompt ("an Italian man in green rescues a
+   princess..." reads as copyrighted IP). `generator_openai.py`:
+   - `_anonymize_description()` scrubs every description before the call: named characters/brands ->
+     neutral archetypes (`_IP_REPLACEMENTS`: mario->"a plumber-style hero", peach->"a royal", ...),
+     nationality words dropped (`_NATIONALITY_WORDS`). Applied at the API boundary, so
+     `_scene_descriptions` stays informative for logging/diffusion; only the OpenAI request is
+     scrubbed. Not an exhaustive IP list -- paired with:
+   - `_ORIGINAL_DESIGN_CLAUSE` appended to every prompt ("depict an ORIGINAL, generic design ... not
+     any named/copyrighted character"), which does the heavy lifting since moderation fires on the
+     generated *image*.
+   - A retry loop in `generate_sprite`: a `429` waits and retries (`_rate_limit_sleep` reads the
+     server's "try again in Ns" hint, else ~12s backoff capped 30s; `INFINIENV_IMAGE_MAX_RETRIES`
+     default 4), and a `moderation_blocked` retries ONCE with a fully generic description
+     (`_GENERIC_SPRITE_DESC`) before giving up (auto then falls back to local). Tests:
+     `test_generate_sprite_anonymizes_the_description`, `_retries_on_rate_limit`,
+     `_retries_generically_on_moderation` (all hermetic, `time.sleep` stubbed).
+
+Honest note: this reduces but can't fully eliminate moderation rejections -- output moderation is
+probabilistic and can flag a clean prompt whose generated image happens to look IP-ish; that's why
+the generic retry + local fallback exist. And `auto` generating everything (incl. wall/floor) makes
+more calls, so the 429 backoff is load-bearing, not optional -- a many-sprite scene will now take
+longer (serial backoff waits) rather than silently dropping sprites. Not yet re-verified live against
+the real Images API on the exact failing prompt (would consume image quota + several minutes);
+flagged for a live check. `pytest` -> 455 passed (one non-obvious fixup: the default-backend flip
+surfaced a latent coupling -- `test_sandbox_runner.py`'s `patched_sdk` fixture patches the *OpenAI*
+Agents SDK `Runner` but called `run_sandbox_generation` with no explicit backend, so under the new
+`claude` default those tests routed to the real `claude` CLI and hung; fixed by pinning
+`INFINIENV_SANDBOX_BACKEND=openai` in that fixture).
+
+> Follow-up (same day): the Claude backend's default model was changed from `claude-sonnet-5` to
+> `claude-haiku-4-5-20251001` (Haiku 4.5) per the user -- the cheapest/fastest tier as the default for
+> long iterative sandbox runs; Sonnet/Opus remain available via `INFINIENV_SANDBOX_MODEL` or the GUI
+> picker (Haiku is now the first/default entry in `SANDBOX_MODELS["claude"]`).

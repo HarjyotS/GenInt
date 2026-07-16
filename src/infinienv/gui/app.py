@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import os
-import queue
 import threading
 import time
 import uuid
@@ -36,7 +35,7 @@ _PLAY_MAX_STEPS = 2000  # generous, so a human is never truncated mid-play
 # INFINIENV_SANDBOX_MODEL env var, which these override in turn when the frontend sends one.
 SANDBOX_MODELS: dict[str, tuple[str, ...]] = {
     "openai": ("gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.5", "gpt-5.5-pro"),
-    "claude": ("claude-sonnet-5", "claude-opus-4-8", "claude-fable-5"),
+    "claude": ("claude-haiku-4-5-20251001", "claude-sonnet-5", "claude-opus-4-8", "claude-fable-5"),
 }
 
 
@@ -109,10 +108,58 @@ def _sandbox_assets_summary(out_dir: str) -> dict:
     return {"items": items, "notes": notes}
 
 
+# Finished jobs are retained (not popped the instant a client reads them) so a dropped stream or a
+# late reload can still fetch the result; capped so memory stays bounded on a long-lived server.
+_JOBS_CAP = 32
+
+
 class Job:
+    """A background run's append-only event log.
+
+    Events are appended and never removed, so a client whose SSE stream drops mid-run can reconnect
+    and *replay from where it left off* (via the SSE `Last-Event-ID` the browser resends) instead of
+    the run being reported as a failure. A long sandbox build survives a network blip, a laptop
+    sleep, or a proxy timeout -- the job keeps running server-side and the UI catches back up."""
+
     def __init__(self) -> None:
-        self.events: queue.Queue = queue.Queue()
+        self.log: list[dict] = []
         self.done = False
+        self.finished_at: float | None = None
+        self._cond = threading.Condition()
+
+    def emit(self, event: dict) -> None:
+        with self._cond:
+            self.log.append(event)
+            if event["type"] in ("done", "error"):
+                self.done = True
+                self.finished_at = time.time()
+            self._cond.notify_all()
+
+    def wait_for_index(self, index: int, timeout: float) -> None:
+        """Block until log entry `index` exists (or the job finishes, or `timeout` elapses)."""
+        with self._cond:
+            if len(self.log) > index or self.done:
+                return
+            self._cond.wait(timeout)
+
+    @property
+    def terminal(self) -> dict | None:
+        """The final `done`/`error` event once the job has finished, else None."""
+        return self.log[-1] if (self.done and self.log) else None
+
+
+def _prune_jobs() -> None:
+    """Bound retained jobs: once over the cap, drop the oldest *finished* ones (never a running
+    job). Called when a new job is registered, so a session that kicks off many runs can't leak."""
+    with _jobs_lock:
+        if len(_jobs) <= _JOBS_CAP:
+            return
+        finished = sorted(
+            (item for item in _jobs.items() if item[1].done),
+            key=lambda item: item[1].finished_at or 0.0,
+        )
+        for jid, _job in finished[: len(_jobs) - _JOBS_CAP]:
+            _jobs.pop(jid, None)
 
 
 def _run_job(
@@ -129,7 +176,7 @@ def _run_job(
     from infinienv.evaluation.runner import run_generation
 
     def on_stage(msg: str) -> None:
-        job.events.put({"type": "stage", "kind": _classify_stage(msg), "message": msg})
+        job.emit({"type": "stage", "kind": _classify_stage(msg), "message": msg})
 
     try:
         provider = get_provider(provider_name)
@@ -143,7 +190,7 @@ def _run_job(
             assets_mode=assets_mode,
             on_stage=on_stage,
         )
-        job.events.put(
+        job.emit(
             {
                 "type": "done",
                 "success": result.metrics["success"],
@@ -154,9 +201,9 @@ def _run_job(
             }
         )
     except ProviderError as exc:
-        job.events.put({"type": "error", "message": str(exc)})
+        job.emit({"type": "error", "message": str(exc)})
     except Exception as exc:  # a GUI must never crash the server on a bad run; surface it instead
-        job.events.put({"type": "error", "message": f"unexpected error: {exc}"})
+        job.emit({"type": "error", "message": f"unexpected error: {exc}"})
     finally:
         job.done = True
 
@@ -176,7 +223,7 @@ def _run_sandbox_job(
     from infinienv.sandbox.runner import run_sandbox_generation
 
     def on_stage(msg: str) -> None:
-        job.events.put({"type": "stage", "kind": _classify_stage(msg), "message": msg})
+        job.emit({"type": "stage", "kind": _classify_stage(msg), "message": msg})
 
     try:
         result = run_sandbox_generation(
@@ -193,7 +240,7 @@ def _run_sandbox_job(
         # No SceneSpec/validation-errors payload here (unlike the non-sandbox path): a
         # sandbox scene.json is only checked for basic schema well-formedness, not
         # re-validated/re-solved by this process -- see outer_sanity_* in metrics below.
-        job.events.put(
+        job.emit(
             {
                 "type": "done",
                 "success": result["success"],
@@ -208,9 +255,9 @@ def _run_sandbox_job(
             }
         )
     except ProviderError as exc:
-        job.events.put({"type": "error", "message": str(exc)})
+        job.emit({"type": "error", "message": str(exc)})
     except Exception as exc:  # a GUI must never crash the server on a bad run; surface it instead
-        job.events.put({"type": "error", "message": f"unexpected error: {exc}"})
+        job.emit({"type": "error", "message": f"unexpected error: {exc}"})
     finally:
         job.done = True
 
@@ -232,7 +279,7 @@ def _run_navigate_job(
     from infinienv.schema.scene_schema import scene_spec_from_dict
 
     def on_stage(msg: str) -> None:
-        job.events.put({"type": "stage", "kind": _classify_stage(msg), "message": msg})
+        job.emit({"type": "stage", "kind": _classify_stage(msg), "message": msg})
 
     try:
         with open(scene_path) as f:
@@ -248,7 +295,7 @@ def _run_navigate_job(
             on_stage=on_stage,
         )
         rel_out = os.path.relpath(out_dir, os.getcwd())
-        job.events.put(
+        job.emit(
             {
                 "type": "done",
                 "mode": "navigate",
@@ -260,9 +307,9 @@ def _run_navigate_job(
             }
         )
     except ProviderError as exc:
-        job.events.put({"type": "error", "message": str(exc)})
+        job.emit({"type": "error", "message": str(exc)})
     except Exception as exc:  # a GUI must never crash the server on a bad run; surface it instead
-        job.events.put({"type": "error", "message": f"unexpected error: {exc}"})
+        job.emit({"type": "error", "message": f"unexpected error: {exc}"})
     finally:
         job.done = True
 
@@ -282,7 +329,7 @@ def _run_faithful_play_job(
     from infinienv.sandbox.vision_runner import play_sandbox_world
 
     def on_stage(msg: str) -> None:
-        job.events.put({"type": "stage", "kind": _classify_stage(msg), "message": msg})
+        job.emit({"type": "stage", "kind": _classify_stage(msg), "message": msg})
 
     try:
         metrics = play_sandbox_world(
@@ -295,7 +342,7 @@ def _run_faithful_play_job(
             on_stage=on_stage,
         )
         rel_out = os.path.relpath(out_dir, os.getcwd())
-        job.events.put(
+        job.emit(
             {
                 "type": "done",
                 "mode": "navigate",
@@ -307,9 +354,9 @@ def _run_faithful_play_job(
             }
         )
     except ProviderError as exc:
-        job.events.put({"type": "error", "message": str(exc)})
+        job.emit({"type": "error", "message": str(exc)})
     except Exception as exc:
-        job.events.put({"type": "error", "message": f"unexpected error: {exc}"})
+        job.emit({"type": "error", "message": f"unexpected error: {exc}"})
     finally:
         job.done = True
 
@@ -491,6 +538,7 @@ def create_app():
         job_id = uuid.uuid4().hex
         with _jobs_lock:
             _jobs[job_id] = job
+        _prune_jobs()  # retain finished jobs for reconnect/poll, but bound memory
 
         if sandbox:
             # --sandbox ignores provider/no_fallback -- same as the CLI (see CLAUDE.md section
@@ -576,6 +624,7 @@ def create_app():
         job_id = uuid.uuid4().hex
         with _jobs_lock:
             _jobs[job_id] = job
+        _prune_jobs()  # retain finished jobs for reconnect/poll, but bound memory
 
         # A sandbox world (a side-view platformer whose real game lives in its own code) is played
         # FAITHFULLY -- a vision policy drives its real game inside the sandbox -- not through the
@@ -687,22 +736,53 @@ def create_app():
         if job is None:
             abort(404)
 
+        # Where to resume from. On an automatic reconnect the browser resends the last event id it
+        # saw as the `Last-Event-ID` header; `?from=` is a manual fallback. So a dropped stream
+        # replays exactly the events it missed and continues, rather than the run looking failed.
+        resume = request.headers.get("Last-Event-ID")
+        if resume is None:
+            resume = request.args.get("from")
+        try:
+            next_index = int(resume) + 1 if resume not in (None, "") else 0
+        except (TypeError, ValueError):
+            next_index = 0
+
+        def sse_name(event: dict) -> str:
+            # A genuine run failure is sent as `failed`, NOT `error`: EventSource also dispatches a
+            # native transport error (a dropped connection) as `error`, and the frontend must be
+            # able to tell a transient disconnect (reconnect) apart from a real failure (give up).
+            return "failed" if event["type"] == "error" else event["type"]
+
         def generate_events():
+            yield "retry: 2000\n\n"  # ask the browser to reconnect quickly after a drop
+            i = max(next_index, 0)
             while True:
-                try:
-                    event = job.events.get(timeout=1.0)
-                except queue.Empty:
-                    if job.done:
+                job.wait_for_index(i, 1.0)
+                while i < len(job.log):
+                    event = job.log[i]
+                    yield f"id: {i}\nevent: {sse_name(event)}\ndata: {json.dumps(event)}\n\n"
+                    is_terminal = event["type"] in ("done", "error")
+                    i += 1
+                    if is_terminal:
                         return
-                    yield ": keep-alive\n\n"  # SSE comment line, keeps the connection open
-                    continue
-                yield f"event: {event['type']}\ndata: {json.dumps(event)}\n\n"
-                if event["type"] in ("done", "error"):
-                    with _jobs_lock:
-                        _jobs.pop(job_id, None)
-                    return
+                if job.done and i >= len(job.log):
+                    return  # already delivered everything (e.g. a reconnect after completion)
+                yield ": keep-alive\n\n"  # SSE comment line, keeps the connection open
 
         return Response(generate_events(), mimetype="text/event-stream")
+
+    @app.get("/api/result/<job_id>")
+    def api_result(job_id: str):
+        """Poll fallback for when the SSE stream can't be re-established at all (the browser gave up
+        reconnecting). Returns the finished run's terminal event so the UI can recover the result
+        instead of showing a false failure. 404 once the job is unknown/evicted -> stop polling."""
+        with _jobs_lock:
+            job = _jobs.get(job_id)
+        if job is None:
+            return jsonify({"status": "unknown"}), 404
+        if not job.done:
+            return jsonify({"status": "running", "events": len(job.log)})
+        return jsonify({"status": "finished", "result": job.terminal})
 
     @app.get("/artifact/<path:filepath>")
     def artifact(filepath: str):

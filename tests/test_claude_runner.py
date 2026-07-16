@@ -113,7 +113,25 @@ def test_backend_dispatch_routes_to_claude_with_a_claude_model(monkeypatch, tmp_
     assert captured["kwargs"]["refine_prompt"] is False
 
 
-def test_backend_dispatch_default_is_openai(monkeypatch, tmp_path):
+def test_backend_dispatch_default_is_claude(monkeypatch, tmp_path):
+    # With no INFINIENV_SANDBOX_BACKEND set, the default runtime is now the Claude Agent SDK.
+    captured = {}
+
+    async def fake_claude_run(prompt, seed, out_dir, *, model, **kwargs):
+        captured["model"] = model
+        return {"routed": "claude"}
+
+    monkeypatch.delenv("INFINIENV_SANDBOX_BACKEND", raising=False)
+    monkeypatch.delenv("INFINIENV_SANDBOX_MODEL", raising=False)
+    monkeypatch.setattr(claude_runner, "_run_async", fake_claude_run)
+
+    result = run_sandbox_generation("make a maze", 1, str(tmp_path / "run"), refine_prompt=False)
+
+    assert result == {"routed": "claude"}
+    assert captured["model"] == claude_runner.DEFAULT_SANDBOX_CLAUDE_MODEL  # the Claude default
+
+
+def test_backend_dispatch_openai_is_still_reachable_explicitly(monkeypatch, tmp_path):
     from infinienv.sandbox import runner as runner_mod
 
     captured = {}
@@ -122,7 +140,7 @@ def test_backend_dispatch_default_is_openai(monkeypatch, tmp_path):
         captured["model"] = model
         return {"routed": "openai"}
 
-    monkeypatch.delenv("INFINIENV_SANDBOX_BACKEND", raising=False)
+    monkeypatch.setenv("INFINIENV_SANDBOX_BACKEND", "openai")
     monkeypatch.delenv("INFINIENV_SANDBOX_MODEL", raising=False)
     monkeypatch.setattr(runner_mod, "_run_async", fake_openai_run)
 

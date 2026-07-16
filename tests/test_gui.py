@@ -533,3 +533,91 @@ def test_runs_listing_includes_a_vision_run(client, tmp_path):
     assert names["nav_demo"]["vision"] is True
     assert names["nav_demo"]["success"] is True
     assert names["nav_demo"]["replay_url"].endswith("/episode.gif")
+
+
+def _consume_sse_raw(response) -> list[dict]:
+    """Parse SSE into a list of {id, event, data} records (data parsed as JSON). Unlike
+    _consume_sse this keeps the SSE event NAME and id, so a test can tell a `failed` event from a
+    `done` one and assert the id-based resume contract."""
+    out: list[dict] = []
+    buf = ""
+    for chunk in response.response:
+        buf += chunk.decode() if isinstance(chunk, bytes) else chunk
+        while "\n\n" in buf:
+            raw, buf = buf.split("\n\n", 1)
+            if not raw.strip() or raw.lstrip().startswith(":"):
+                continue
+            rec: dict = {}
+            for line in raw.splitlines():
+                if line.startswith("id: "):
+                    rec["id"] = line[len("id: "):]
+                elif line.startswith("event: "):
+                    rec["event"] = line[len("event: "):]
+                elif line.startswith("data: "):
+                    rec["data"] = json.loads(line[len("data: "):])
+            if "data" in rec:
+                out.append(rec)
+    return out
+
+
+def test_stream_is_resumable_from_last_event_id(client):
+    """A dropped stream must be able to reconnect and replay from where it left off, so a long run
+    isn't reported as failed on a network blip. The server retains the finished job and honors the
+    SSE Last-Event-ID header the browser resends."""
+    res = client.post("/api/generate", json={"prompt": "a kitchen delivery task", "provider": "mock", "seed": 1})
+    job_id = res.get_json()["job_id"]
+
+    first = _consume_sse_raw(client.get(f"/api/stream/{job_id}"))
+    assert first, "expected at least one event"
+    assert all("id" in r for r in first), "every event must carry an id for resume"
+    assert first[-1]["event"] == "done"
+    total = len(first)
+
+    # Reconnect as the browser would after a drop after seeing event 0: resume at index 1.
+    resumed = _consume_sse_raw(
+        client.get(f"/api/stream/{job_id}", headers={"Last-Event-ID": "0"})
+    )
+    assert [int(r["id"]) for r in resumed] == list(range(1, total)), "resume must replay only newer events"
+    assert resumed[-1]["event"] == "done", "the terminal event is still delivered on reconnect"
+
+
+def test_result_endpoint_recovers_a_finished_run(client):
+    """When the stream can't be re-established, the client polls /api/result; a finished run returns
+    its terminal payload so a completed run is never shown as a failure."""
+    res = client.post("/api/generate", json={"prompt": "a kitchen delivery task", "provider": "mock", "seed": 1})
+    job_id = res.get_json()["job_id"]
+    _consume_sse(client.get(f"/api/stream/{job_id}"))  # run to completion
+
+    result = client.get(f"/api/result/{job_id}")
+    assert result.status_code == 200
+    body = result.get_json()
+    assert body["status"] == "finished"
+    assert body["result"]["type"] == "done" and body["result"]["success"] is True
+
+    # An unknown/evicted job tells the client to stop polling.
+    unknown = client.get("/api/result/deadbeef")
+    assert unknown.status_code == 404
+    assert unknown.get_json()["status"] == "unknown"
+
+
+def test_run_failure_is_sent_on_failed_channel_not_error(client, monkeypatch):
+    """A genuine run failure must arrive on the `failed` SSE event, NOT `error` -- the browser also
+    dispatches native transport errors (a dropped connection) as `error`, and the frontend must tell
+    a real failure apart from a transient disconnect. The payload still carries type=='error'."""
+    from infinienv.llm.base import ProviderError
+
+    def boom(*a, **k):
+        raise ProviderError("no API key")
+
+    monkeypatch.setattr("infinienv.evaluation.runner.run_generation", boom)
+
+    res = client.post("/api/generate", json={"prompt": "a kitchen task", "provider": "mock", "seed": 1})
+    job_id = res.get_json()["job_id"]
+    events = _consume_sse_raw(client.get(f"/api/stream/{job_id}"))
+
+    terminal = events[-1]
+    assert terminal["event"] == "failed", "a real failure uses the `failed` channel, not `error`"
+    assert terminal["data"]["type"] == "error"
+    assert "no API key" in terminal["data"]["message"]
+    # And it's recoverable via the result endpoint too.
+    assert client.get(f"/api/result/{job_id}").get_json()["result"]["type"] == "error"

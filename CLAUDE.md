@@ -582,16 +582,15 @@ rendering, unchanged unless opted into):
   `assets/placeholder_gen.py`, simple Pillow-drawn icons). No key or network needed.
 - `generated` — real sprites via the OpenAI Images API (`assets/generator_openai.py`). No silent
   fallback if generation fails.
-- `auto` — **combine both, routed per type**: the simple structural types
-  (`resolver.py::SIMPLE_LOCAL_TYPES` = wall/floor/box/door/exit/key/hazard/distractor) resolve to
-  their checked-in local placeholder with **no image-API call** (note `"auto: simple type drawn
-  locally"`), and only the types that actually benefit from generation — characters (`agent`) and
-  novel/custom types (creatures, plants, props) — are OpenAI-generated, still falling back to a local
-  placeholder if a generation fails (note `"fallback: generated unavailable"`). This is deliberate:
-  wall/floor are placed in nearly every cell and were the exact types repeatedly hitting the image
-  API's 5-images/min rate limit (429), so drawing them locally is both faster and far more reliable,
-  while `agent`/custom sprites still get real generated art. `generated` mode is unchanged (generates
-  everything, no fallback).
+- `auto` — **OpenAI-generate every type that needs a sprite** (the same set as `generated`,
+  including structural types like wall/floor), but **fall back to a local placeholder if a generation
+  fails** (note `"fallback: generated unavailable"`). So `auto` = "generate everything, but never
+  leave a hole": a rate-limit or moderation failure degrades to a drawn placeholder rather than
+  leaving the type unrendered (which is exactly what bare `generated` does — no fallback). An earlier
+  version of `auto` drew the simple structural types locally with no image-API call to dodge the
+  429 rate limit; the user's explicit call is now "generate sprites with OpenAI for everything that
+  needs to be a sprite", so that shortcut was removed and the rate limit is handled by the generator's
+  429-backoff instead (see below). `generated` mode is unchanged (generates everything, no fallback).
 
 **Model:** `gpt-image-1`, not `gpt-image-2` — per OpenAI's own docs, `gpt-image-2` explicitly does
 not support `background: "transparent"`; `gpt-image-1`/`1.5`/`1-mini` do. Overridable via
@@ -616,9 +615,24 @@ palette, a bold dark outline, flat cel shading, and explicitly *no* smooth gradi
 seamlessly next to the others and the square tiles (a user ask: "make sure all images generated are
 block style so that it fits seamlessly"). Live-verified against the real Images API: a brick tile,
 coin, green-tunic hero, plant monster, and round enemy all came back as consistent chunky pixel-art
-that tiles together cleanly (see `notes.md`). Note the pre-existing, unrelated moderation caveat is
-unchanged — a *description* that reads as a copyrighted character (e.g. "Italian plumber") still
-returns `400 moderation_blocked` regardless of style; that's a description problem, not a style one.
+that tiles together cleanly (see `notes.md`).
+
+**Image requests are anonymised, and rate-limit/moderation failures are retried, not just reported.**
+The Images API applies *output* moderation — it rejects a generated sprite (`400 moderation_blocked`)
+when the image reads as a real person or a copyrighted/trademarked character; a scene prompt like "an
+Italian man in green rescues Princess Peach" drove exactly that on the `agent` sprite (its description
+embeds the scene prompt). `generator_openai.py::_anonymize_description` now scrubs every description
+before the call — named characters/brands become neutral archetypes (`mario`→"a plumber-style hero",
+`peach`→"a royal", …), nationality tags are dropped — and an original-design clause
+(`_ORIGINAL_DESIGN_CLAUSE`, "depict an ORIGINAL, generic design … not any named/copyrighted character")
+is appended to every prompt. This is deliberately **not** an exhaustive IP database (the generic-
+reframe clause does the heavy lifting); it scrubs the specific recurring triggers. On top of that,
+`generate_sprite` **retries**: a `429` waits and retries (`_rate_limit_sleep` prefers the server's
+"try again in Ns" hint, else backs off from ~12s, capped 30s; `INFINIENV_IMAGE_MAX_RETRIES`, default
+4), and a `moderation_blocked` retries **once** with a fully generic description
+(`_GENERIC_SPRITE_DESC`) as a last resort before the caller's fallback. So the old "that's a
+description problem, unfixable" caveat is now actively mitigated — a moderation-risky description gets
+anonymised, then retried generically, then (in `auto`) falls back to a local placeholder.
 
 Sprites are cached **by object type**, not per-scene or per-run, in `.infinienv_asset_cache/` at
 the repo root (gitignored) — generating "table" once means every future scene with a table reuses
@@ -1628,7 +1642,8 @@ extracted frames, not the agent's summary.
 The user has an Anthropic key and asked to run the sandbox with Anthropic's **Claude Agent SDK**
 (`claude-agent-sdk` -- Claude Code packaged as a library, distinct from the plain `anthropic`
 Messages-API SDK). This adds a *second, interchangeable agent runtime* for sandbox mode, selected
-by `INFINIENV_SANDBOX_BACKEND` (default `openai`, or `claude`) -- an env var, not a new flag, the
+by `INFINIENV_SANDBOX_BACKEND` (**default `claude`** as of the user's call to make Anthropic the
+default SDK, or `openai`) -- an env var, not a new flag, the
 same precedent as `INFINIENV_SPRITE_BACKEND` (§9), so `--sandbox`'s meaning stays stable regardless
 of which agent produces the artifacts. Both backends are genuinely interchangeable: the same
 isolated `sandbox_workspace/` copy of the engine, the same five artifacts, the same
@@ -1679,11 +1694,10 @@ dispatches on the env var.
   code that explicitly wants the raw key (the `anthropic` provider reads `CL_KEY` -> then a
   user-set `ANTHROPIC_API_KEY`, and passes it *directly* to `anthropic.Anthropic(api_key=...)` --
   never via the global env var, so it can't clobber the CLI's login). The default model for this
-  backend is `claude-sonnet-5` (`DEFAULT_SANDBOX_CLAUDE_MODEL` --
-  Sonnet, not Opus, chosen deliberately: sandbox runs are long and iterative, doing many
-  build-and-rerun cycles, so the cheaper Sonnet tier is the sensible default and stays plenty
-  capable at driving the closed-action-space discipline; use Opus via the override for the hardest
-  prompts),
+  backend is `claude-haiku-4-5-20251001` (`DEFAULT_SANDBOX_CLAUDE_MODEL` --
+  Haiku, chosen deliberately: sandbox runs are long and iterative, doing many
+  build-and-rerun cycles, so the cheapest/fastest tier is the sensible default; use Sonnet or Opus
+  via the override (`INFINIENV_SANDBOX_MODEL` / the GUI model picker) for the hardest prompts),
   overridable via `INFINIENV_SANDBOX_MODEL`, distinct from the OpenAI backend's `gpt-5.5` default.
 - **Live narration** works the same as the OpenAI backend: `_describe_claude_message` maps the SDK's
   streamed `AssistantMessage`/`ResultMessage` blocks to the same `on_stage` lines (`$ <command>` for a
@@ -2336,10 +2350,11 @@ python -m infinienv navigate examples/kitchen_can.json --out runs/vision_demo \
   # outer_sanity_* fields. By default a best-effort LLM step first expands the raw prompt into a
   # fuller build spec handed to the agent (--no-refine-prompt disables it; both the original and
   # refined prompt are recorded in metrics.json). See section 11's prompt-enrichment subsection.
-  # INFINIENV_SANDBOX_BACKEND selects the agent runtime: openai (default, OpenAI Agents SDK) or
+  # INFINIENV_SANDBOX_BACKEND selects the agent runtime: claude (DEFAULT, Anthropic's Claude Agent
+  # SDK) or openai (OpenAI Agents SDK).
   # claude (Anthropic's Claude Agent SDK -- authenticates via the `claude` CLI's own claude.ai
   # login; ANTHROPIC_API_KEY is deliberately NOT set from CL_KEY, see section 11's auth note. Needs
-  # the `claude` CLI on PATH and `pip install infinienv[claude]`; default model claude-sonnet-5).
+  # the `claude` CLI on PATH and `pip install infinienv[claude]`; default model claude-haiku-4-5).
   # Interchangeable:
   # same workspace, artifacts, outer check, and metrics.json shape -- only `provider`/`model` differ.
   # See section 11's Claude Agent SDK backend subsection.
@@ -2387,12 +2402,12 @@ equivalent of `INFINIENV_SANDBOX_BACKEND` (section 11's Claude Agent SDK backend
 override (falling back to the env var, then `openai`, when the frontend doesn't send one) -- so the
 choice is a GUI control, not a second code path, same discipline as every other sandbox field.
 Alongside it is an **Agent model** picker whose options track the selected runtime -- OpenAI
-(`gpt-5.6-terra`/`sol`/`luna`, `gpt-5.5`/`-pro`) or Claude (`claude-sonnet-5`/`-opus-4-8`/`-fable-5`),
+(`gpt-5.6-terra`/`sol`/`luna`, `gpt-5.5`/`-pro`) or Claude (`claude-haiku-4-5`/`-sonnet-5`/`-opus-4-8`/`-fable-5`),
 the account's actually-available variants. It POSTs `sandbox_model`, validated against
 `gui/app.py::SANDBOX_MODELS` for the chosen backend (an unlisted/mismatched model is a 400, not
 forwarded) and threaded to `run_sandbox_generation`'s existing `model` parameter -- the frontend
 equivalent of `INFINIENV_SANDBOX_MODEL`, a per-run override of the backend's default. First option is
-the default (`gpt-5.6-terra` / `claude-sonnet-5`); absent -> the env/default fallback, unchanged.
+the default (`gpt-5.6-terra` / `claude-haiku-4-5-20251001`); absent -> the env/default fallback, unchanged.
 Streams the same per-attempt `on_stage`
 progress messages
 (`sandbox/runner.py`'s repair loop now takes an `on_stage` callback mirroring
@@ -2619,7 +2634,13 @@ test_gui.py                         - Flask test client (no live server needed):
                                        (human keyboard): the index has the Play mode + picker,
                                        /api/play/start returns a frame+goal+session, /api/play/step
                                        moves + wins by code (is_goal_complete), unknown scene/session/
-                                       action are rejected, and the session is freed after a win
+                                       action are rejected, and the session is freed after a win;
+                                       resilient streaming: the SSE stream is resumable (every event
+                                       carries an `id:`; a reconnect with `Last-Event-ID` replays only
+                                       newer events incl. the terminal), /api/result recovers a
+                                       finished run's payload (404 on unknown), and a real run failure
+                                       is sent on the `failed` SSE channel (not `error`, which the
+                                       browser also fires on a transport drop)
 ```
 
 Before considering a change done:

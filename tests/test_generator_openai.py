@@ -111,14 +111,65 @@ def test_generate_sprite_quality_kwarg_overrides_env(tmp_path, monkeypatch):
     assert calls[0]["quality"] == "medium"
 
 
-def test_generate_sprite_description_override_replaces_default(tmp_path, monkeypatch):
+def test_generate_sprite_anonymizes_the_description(tmp_path, monkeypatch):
+    # The Images API output-moderation-rejects a sprite that reads as a real person or a
+    # copyrighted character, so the request is anonymised: nationality tags and named characters are
+    # scrubbed and an original-design clause is appended. (A real, user-reported failure: an "Italian
+    # man in green" / "Princess Peach" prompt got the agent sprite moderation_blocked.)
     calls = _install_fake_openai(monkeypatch, with_alpha_border=False)
-    generate_sprite("agent", str(tmp_path), description="a green-clothed Italian rescuer with a mustache")
+    generate_sprite("agent", str(tmp_path), description="a green-clothed Italian rescuer named Mario with a mustache")
+    low = calls[0]["prompt"].lower()
+    assert "italian" not in low  # nationality tag scrubbed
+    assert "mario" not in low  # named character scrubbed
+    assert "green-clothed" in low and "rescuer" in low  # safe visual detail survives
+    assert "original" in low and "franchise" in low  # original/non-branded design demanded
     assert "small friendly robot" not in calls[0]["prompt"]
-    assert "green-clothed Italian rescuer" in calls[0]["prompt"]
 
 
 def test_generate_sprite_without_description_uses_object_descriptions_default(tmp_path, monkeypatch):
     calls = _install_fake_openai(monkeypatch, with_alpha_border=False)
     generate_sprite("agent", str(tmp_path))
     assert "small friendly robot" in calls[0]["prompt"]
+
+
+def _install_flaky_openai(monkeypatch, *, errors):
+    """Like _install_fake_openai but each generate() call consumes the next entry of `errors`
+    (an Exception to raise, or None to succeed). time.sleep is stubbed so retries don't wait."""
+    calls = []
+    seq = list(errors)
+
+    class FakeImages:
+        def generate(self, **kwargs):
+            calls.append(kwargs)
+            exc = seq.pop(0) if seq else None
+            if exc is not None:
+                raise exc
+            b64 = base64.b64encode(_fake_png_bytes(with_alpha_border=False)).decode()
+            return SimpleNamespace(data=[SimpleNamespace(b64_json=b64)])
+
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            self.images = FakeImages()
+
+    import openai
+
+    monkeypatch.setattr(openai, "OpenAI", FakeClient)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
+    monkeypatch.setattr("infinienv.assets.generator_openai.time.sleep", lambda *_a, **_k: None)
+    return calls
+
+
+def test_generate_sprite_retries_on_rate_limit(tmp_path, monkeypatch):
+    err = Exception("Error code: 429 - rate_limit_exceeded. Please try again in 2s.")
+    calls = _install_flaky_openai(monkeypatch, errors=[err, None])
+    path = generate_sprite("key", str(tmp_path))
+    assert len(calls) == 2  # retried once after the 429, then succeeded
+    assert path.endswith("key.png")
+
+
+def test_generate_sprite_retries_generically_on_moderation(tmp_path, monkeypatch):
+    err = Exception("Error code: 400 - moderation_blocked: rejected by the safety system")
+    calls = _install_flaky_openai(monkeypatch, errors=[err, None])
+    generate_sprite("agent", str(tmp_path), description="an Italian plumber named Mario")
+    assert len(calls) == 2  # a moderation rejection retries once with a fully generic description
+    assert "no particular identity" in calls[1]["prompt"].lower()

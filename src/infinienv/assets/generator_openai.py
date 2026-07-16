@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import base64
 import os
+import re
+import time
 
 from infinienv.llm.base import ProviderError
 
@@ -56,6 +58,68 @@ OBJECT_DESCRIPTIONS: dict[str, str] = {
     "hazard": "a red hazard warning sign",
     "distractor": "a purple decorative gem",
 }
+
+
+# --- Request anonymisation ---------------------------------------------------------------------
+# The Images API applies OUTPUT moderation: it rejects a generated sprite (400 moderation_blocked)
+# when the image reads as a real person or a copyrighted/trademarked character. A scene prompt like
+# "an Italian man in green rescues Princess Peach" drove exactly that failure on the agent sprite
+# (moderation_blocked on agent__walk/climb). So every description is anonymised before it reaches the
+# API -- named characters/brands become neutral archetypes, nationality tags are dropped -- and the
+# prompt gets an appended clause demanding an ORIGINAL, non-branded design. This is deliberately NOT
+# an exhaustive IP database: the generic-reframe clause does the heavy lifting, a moderation
+# rejection additionally retries once with a fully generic description (see generate_sprite), and
+# this list just scrubs the specific, recurring triggers.
+_NATIONALITY_WORDS = (
+    "italian japanese american chinese korean mexican french german spanish russian british "
+    "english irish indian egyptian greek roman nordic scandinavian"
+).split()
+
+_IP_REPLACEMENTS = {
+    "donkey kong": "a large ape", "pac-man": "a round eater", "pacman": "a round eater",
+    "spider-man": "a masked hero", "spiderman": "a masked hero", "princess peach": "a royal",
+    "mario": "a plumber-style hero", "luigi": "a plumber-style hero", "peach": "a royal",
+    "bowser": "a spiked-shell boss", "sonic": "a speedy creature", "pikachu": "an electric creature",
+    "pokemon": "a small creature", "pokémon": "a small creature", "zelda": "an adventurer",
+    "link": "a green-clad adventurer", "kirby": "a round pink creature", "yoshi": "a friendly dinosaur",
+    "goomba": "a walking mushroom", "koopa": "a shelled creature", "minecraft": "blocky",
+    "steve": "a blocky miner", "batman": "a caped hero", "superman": "a caped hero", "nintendo": "",
+    "sega": "", "disney": "cartoon",
+}
+
+_ORIGINAL_DESIGN_CLAUSE = (
+    " Depict an ORIGINAL, generic design of no particular identity -- do NOT depict any real person, "
+    "celebrity, brand, logo, mascot, or any named/copyrighted/trademarked character from any existing "
+    "game, film, or franchise."
+)
+
+_GENERIC_SPRITE_DESC = "a simple original game character, a plain generic figure of no particular identity"
+_GENERIC_TEXTURE_DESC = "a plain generic surface material"
+
+# On a 429 (this account's Images limit is 5/min) the request is retried after a wait; on an output
+# moderation rejection it's retried once with a fully generic description. Overridable via env.
+_IMAGE_MAX_RETRIES = int(os.environ.get("INFINIENV_IMAGE_MAX_RETRIES", "4"))
+
+
+def _anonymize_description(desc: str) -> str:
+    """Strip identity/IP signals from a sprite description so output moderation doesn't reject the
+    result. Best-effort and general (not an exhaustive IP list); pairs with the appended
+    original-design clause and the moderation retry in generate_sprite."""
+    text = f" {desc} "
+    for term in sorted(_IP_REPLACEMENTS, key=len, reverse=True):  # longest first ("donkey kong" > "kong")
+        text = re.sub(rf"(?i)\b{re.escape(term)}\b", _IP_REPLACEMENTS[term], text)
+    text = re.sub(r"(?i)\b(" + "|".join(_NATIONALITY_WORDS) + r")\b", "", text)
+    text = re.sub(r"\s{2,}", " ", text).strip(" ,.-")
+    return text or desc
+
+
+def _rate_limit_sleep(message: str, attempt: int) -> float:
+    """Seconds to wait before retrying a 429: prefer the server's own 'try again in Ns' hint, else
+    back off from a ~12s base (the 5/min limit resets on roughly that cadence), capped at 30s."""
+    m = re.search(r"try again in ([\d.]+)\s*s", message, re.IGNORECASE)
+    if m:
+        return min(float(m.group(1)) + 1.0, 30.0)
+    return min(12.0 * (attempt + 1), 30.0)
 
 
 def _crop_to_content(img, *, pad_ratio: float = 0.03):
@@ -120,23 +184,45 @@ def generate_sprite(
     # "low" -- overridable via INFINIENV_IMAGE_QUALITY for anyone who wants higher-fidelity
     # source images (e.g. if the render resolution is ever raised well above 64px).
     quality = quality or os.environ.get("INFINIENV_IMAGE_QUALITY", "low")
-    desc = description or OBJECT_DESCRIPTIONS.get(object_type, object_type.replace("_", " "))
+    raw_desc = description or OBJECT_DESCRIPTIONS.get(object_type, object_type.replace("_", " "))
     is_texture = object_type in TEXTURE_TILE_TYPES
-    prompt = (TEXTURE_PROMPT_TEMPLATE if is_texture else SPRITE_PROMPT_TEMPLATE).format(desc=desc)
+    template = TEXTURE_PROMPT_TEMPLATE if is_texture else SPRITE_PROMPT_TEMPLATE
+    # Anonymise the request so the API's output moderation doesn't reject the sprite.
+    desc = _anonymize_description(raw_desc)
 
     client = OpenAI()
-    try:
-        response = client.images.generate(
-            model=model,
-            prompt=prompt,
-            size="1024x1024",
-            quality=quality,
-            background="opaque" if is_texture else "transparent",
-            output_format="png",
-            n=1,
-        )
-    except Exception as exc:
-        raise ProviderError(f"image generation failed for {object_type!r}: {exc}") from exc
+    response = None
+    generic_retry_used = False
+    last_exc: Exception | None = None
+    for attempt in range(_IMAGE_MAX_RETRIES + 1):
+        prompt = template.format(desc=desc) + _ORIGINAL_DESIGN_CLAUSE
+        try:
+            response = client.images.generate(
+                model=model,
+                prompt=prompt,
+                size="1024x1024",
+                quality=quality,
+                background="opaque" if is_texture else "transparent",
+                output_format="png",
+                n=1,
+            )
+            break
+        except Exception as exc:  # classify by message; retry the recoverable kinds, else give up
+            last_exc = exc
+            msg = str(exc).lower()
+            # Rate limit (this account: 5 images/min) -- wait and retry the same request.
+            if ("rate_limit" in msg or "429" in msg) and attempt < _IMAGE_MAX_RETRIES:
+                time.sleep(_rate_limit_sleep(str(exc), attempt))
+                continue
+            # Output moderation flagged the generated image as IP/a real person -- retry ONCE with a
+            # fully generic description, the last resort before falling back to a local placeholder.
+            if ("moderation" in msg or "safety system" in msg) and not generic_retry_used:
+                desc = _GENERIC_TEXTURE_DESC if is_texture else _GENERIC_SPRITE_DESC
+                generic_retry_used = True
+                continue
+            raise ProviderError(f"image generation failed for {object_type!r}: {exc}") from exc
+    if response is None:
+        raise ProviderError(f"image generation failed for {object_type!r}: {last_exc}")
 
     b64 = response.data[0].b64_json
     if not b64:

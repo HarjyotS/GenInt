@@ -4,9 +4,10 @@ Modes (matches PATHWAY.md section 8):
   none      -> no sprites; renderer keeps drawing flat colored cells.
   local     -> only the checked-in placeholders in assets/base/.
   generated -> only OpenAI-generated sprites (Images API); no silent fallback.
-  auto      -> combine both: draw the simple structural types locally (SIMPLE_LOCAL_TYPES, no API
-               call), OpenAI-generate the types that benefit from it (characters, novel/custom),
-               and fall back to a local placeholder if a generation fails.
+  auto      -> OpenAI-generate EVERY type that needs a sprite (same as generated), but fall back to
+               a local placeholder if a generation fails. So `auto` = "generate everything, but never
+               end up with a hole": a rate-limit/moderation failure degrades to a drawn placeholder
+               instead of leaving the type unrendered (which is what bare `generated` does).
 """
 
 from __future__ import annotations
@@ -19,14 +20,6 @@ from infinienv.llm.base import ProviderError
 from infinienv.schema.scene_schema import SceneSpec
 
 ASSET_MODES = ("none", "local", "generated", "auto")
-
-# In `auto` mode, these structural/primitive types resolve to their checked-in local placeholder
-# without an image-generation call: a flat drawn icon is genuinely adequate for them, they're cheap,
-# and they're exactly the types that otherwise burn the image API's rate limit (wall/floor are placed
-# in nearly every cell and repeatedly hit 429). Generation is then reserved for the types that
-# actually benefit from it -- characters (agent) and novel/custom types (creatures, plants, props).
-# `generated` mode still generates everything; only `auto` splits the work this way.
-SIMPLE_LOCAL_TYPES = frozenset({"wall", "floor", "box", "door", "exit", "key", "hazard", "distractor"})
 
 
 def scene_asset_types(scene: SceneSpec) -> list[str]:
@@ -179,18 +172,10 @@ def resolve_assets(
         else:
             pending.append(t)
 
-    # `auto` = OpenAI-generate what needs it, draw the simple stuff locally. Route the simple
-    # structural types straight to their local placeholder (no API call) and only generate the rest.
-    if mode == "auto":
-        still_pending: list[str] = []
-        for t in pending:
-            local_path = os.path.join(local_dir, f"{t}.png")
-            if t in SIMPLE_LOCAL_TYPES and os.path.exists(local_path):
-                manifest[t] = AssetEntry(t, "local", local_path, note="auto: simple type drawn locally")
-            else:
-                still_pending.append(t)
-        pending = still_pending
-
+    # `auto` now generates EVERY pending type via OpenAI (same set as `generated`); the only
+    # difference is the failure handling below (auto falls back to a local placeholder, generated
+    # leaves a hole). So there is no simple-type-drawn-locally shortcut anymore -- everything that
+    # needs a sprite gets a real generated one when possible.
     descriptions = {**_scene_descriptions(scene), **(extra_descriptions or {})}
     backend, generate_sprite_fn = _select_sprite_generator()
     generated_paths, generation_errors = _generate_many(pending, cache_dir, descriptions, generate_sprite_fn)

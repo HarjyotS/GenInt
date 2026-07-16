@@ -206,6 +206,10 @@ def patched_sdk(tmp_path, monkeypatch):
     # non-sandbox path) -- chdir into tmp_path so tests' `str(tmp_path / "run")` out_dirs
     # satisfy that check.
     monkeypatch.chdir(tmp_path)
+    # These tests exercise the OpenAI Agents SDK runner path specifically (they patch `Runner`), so
+    # pin the backend to openai. The default sandbox backend is now `claude`; without this, these
+    # tests would route to the real Claude Agent SDK / `claude` CLI and hang.
+    monkeypatch.setenv("INFINIENV_SANDBOX_BACKEND", "openai")
     # Disable the independent faithfulness auditor for the plain repair-loop tests -- they're about
     # the SDK loop / outer sanity check, not the auditor, and this keeps them hermetic (no real
     # OpenAI call) regardless of whether OPENAI_API_KEY happens to be set. The dedicated
