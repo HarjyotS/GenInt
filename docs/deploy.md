@@ -76,10 +76,16 @@ docker run -d --restart unless-stopped -p 80:5050 \
 Two things baked into the image:
 - It binds `0.0.0.0` (a public bind), so **it refuses to start without `INFINIENV_GUI_PASSWORD`** —
   deliberate (see below). Set it to a strong value.
-- It runs as a **non-root user** — the `claude` CLI refuses the sandbox agent's permission-bypass
-  mode as root. So persist `runs/` with a **named volume** (`-v infinienv_runs:/app/runs`, as above),
-  not a host bind-mount — a bind-mount is owned by the host user and the container user can't write to
-  it. (Or omit `-v` for an ephemeral demo.)
+- It runs as a **non-root user** (uid 10001 `appuser`) — the `claude` CLI refuses the sandbox agent's
+  permission-bypass mode as root.
+
+**`Permission denied: /app/runs/...`?** That's the non-root user hitting a mount it can't write.
+Pick one:
+- **Ephemeral** (simplest): omit `-v` entirely — `runs/` lives in the container, lost on `docker rm`.
+- **Fresh named volume**: `-v infinienv_runs:/app/runs` — but a volume created by an *earlier* (root)
+  run stays root-owned, so remove it first: `docker volume rm infinienv_runs`.
+- **Host bind-mount**: `-v "$PWD/runs:/app/runs"` only works if you chown the host dir to the
+  container user first: `mkdir -p runs && sudo chown -R 10001:10001 runs`.
 
 (No Docker? `pip install -e ".[gui,claude,openai]"`, install the `claude` CLI, then run the `gui`
 command under `systemd`/`tmux`/`pm2` so it stays up.)
