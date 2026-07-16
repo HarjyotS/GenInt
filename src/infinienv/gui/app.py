@@ -59,7 +59,7 @@ _PLAY_MAX_STEPS = 2000  # generous, so a human is never truncated mid-play
 # what's actually available on this account (see notes.md); a run may still override via the
 # INFINIENV_SANDBOX_MODEL env var, which these override in turn when the frontend sends one.
 SANDBOX_MODELS: dict[str, tuple[str, ...]] = {
-    "openai": ("gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.5", "gpt-5.5-pro"),
+    "openai": ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.5-pro"),
     "claude": ("claude-sonnet-5", "claude-haiku-4-5-20251001", "claude-opus-4-8", "claude-fable-5"),
 }
 

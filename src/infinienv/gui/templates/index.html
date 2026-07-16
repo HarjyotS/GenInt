@@ -23,11 +23,12 @@
     --radius: 10px; --radius-sm: 7px;
   }
   * { box-sizing: border-box; }
-  html, body { height: 100%; }
+  html, body { height: 100%; max-width: 100%; }
   body {
     margin: 0; color: var(--ink); font-family: var(--body); font-size: 14px; line-height: 1.55;
     background: var(--bg); -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
   }
+  img { max-width: 100%; }
 
   /* ---------- header ---------- */
   header {
@@ -45,10 +46,10 @@
     box-shadow: 0 0 0 3px rgba(65,201,138,.14); }
 
   /* ---------- layout ---------- */
-  .layout { position: relative; z-index: 1; display: grid; grid-template-columns: 400px 1fr;
+  .layout { position: relative; z-index: 1; display: grid; grid-template-columns: 400px minmax(0, 1fr);
     align-items: start; min-height: calc(100vh - 60px); }
-  .deck { padding: 24px 22px; border-right: 1px solid var(--line); background: var(--surface); }
-  .stage { padding: 24px 26px; display: flex; flex-direction: column; gap: 16px; }
+  .deck { padding: 24px 22px; border-right: 1px solid var(--line); background: var(--surface); min-width: 0; }
+  .stage { padding: 24px 26px; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 
   /* ---------- console controls ---------- */
   label { display: block; font-size: 12.5px; font-weight: 600; color: var(--ink); margin: 18px 0 7px; }
@@ -273,9 +274,9 @@
   .asset .t { font-family: var(--mono); font-size: 10px; color: var(--dim); margin-top: 6px; word-break: break-word; }
   .notes { font-size: 12px; color: var(--dim); margin-top: 11px; }
   .notes .warn { color: var(--warn); }
-  .media { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-  .media figure { margin: 0; }
-  .media img { width: 100%; border: 1px solid var(--line); border-radius: var(--radius-sm); display: block; background: var(--void);
+  .media { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
+  .media figure { margin: 0; min-width: 0; }
+  .media img { width: 100%; max-width: 100%; height: auto; border: 1px solid var(--line); border-radius: var(--radius-sm); display: block; background: var(--void);
     image-rendering: pixelated; box-shadow: var(--shadow); }
   .media figcaption { font-size: 11.5px; color: var(--faint); margin-top: 8px; }
   details { border-top: 1px solid var(--line-soft); padding-top: 12px; }
@@ -368,8 +369,8 @@
           <div id="backend-row">
             <label for="sandbox_backend">Agent runtime</label>
             <select id="sandbox_backend">
-              <option value="claude" selected>Claude Agent SDK (default)</option>
-              <option value="openai">OpenAI Agents SDK</option>
+              <option value="openai" selected>OpenAI Agents SDK (default)</option>
+              <option value="claude">Claude Agent SDK</option>
             </select>
             <div class="hint">Which agent writes and runs the engine code. Interchangeable -- same
               workspace, artifacts, and checks. Claude needs CL_KEY/ANTHROPIC_API_KEY, the
@@ -764,8 +765,8 @@ const backendSelect = $('sandbox_backend'), modelSelect = $('sandbox_model');
 // Kept in sync with SANDBOX_MODELS in gui/app.py (first entry is the default).
 const SANDBOX_MODELS = {
   openai: [
-    ['gpt-5.6-terra', 'GPT-5.6 terra (default)'],
-    ['gpt-5.6-sol', 'GPT-5.6 sol'],
+    ['gpt-5.6-sol', 'GPT-5.6 sol (default)'],
+    ['gpt-5.6-terra', 'GPT-5.6 terra'],
     ['gpt-5.6-luna', 'GPT-5.6 luna'],
     ['gpt-5.5', 'GPT-5.5'],
     ['gpt-5.5-pro', 'GPT-5.5 pro'],
