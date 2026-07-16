@@ -127,6 +127,11 @@ def _cmd_generate_sandbox(args: argparse.Namespace) -> int:
     print()
 
     def on_stage(msg: str) -> None:
+        # LIVE partial-model-output deltas are for the GUI's live bubble; they'd flood the terminal
+        # (hundreds of token fragments per turn), so skip them here -- the CLI still shows the
+        # finalized Agent:/Thinking: lines and every command/edit.
+        if msg.startswith("⁣LIVE⁣"):
+            return
         print(f"[sandbox] {msg}")
 
     try:

@@ -37,6 +37,7 @@ from typing import Callable
 from infinienv.artifacts.writer import resolve_out_dir
 from infinienv.llm.base import ProviderError
 from infinienv.sandbox.runner import (
+    LIVE_PREFIX,
     _MAX_NARRATION_CHARS,
     _interpreter_briefing,
     _load_prompt,
@@ -79,6 +80,15 @@ def _describe_claude_message(
     not every file read. `None` (e.g. in unit tests) just disables that cross-message correlation.
     """
     try:
+        # A StreamEvent (partial-message streaming, include_partial_messages=True) carries a raw
+        # Anthropic stream event -- surface its text/thinking deltas LIVE so a slow turn shows the
+        # model generating instead of dead air.
+        event = getattr(message, "event", None)
+        if isinstance(event, dict):
+            delta = _stream_delta_text(event)
+            if delta:
+                stage(LIVE_PREFIX + delta)
+            return
         content = getattr(message, "content", None)
         if not isinstance(content, list):
             return
@@ -88,6 +98,19 @@ def _describe_claude_message(
                 stage(line)
     except Exception:
         return
+
+
+def _stream_delta_text(event: dict) -> str | None:
+    """The incremental text from a raw Anthropic `content_block_delta` stream event (a `text_delta`
+    or `thinking_delta`), or None for any other event type (block start/stop, ping, etc.)."""
+    if event.get("type") != "content_block_delta":
+        return None
+    delta = event.get("delta") or {}
+    if delta.get("type") == "text_delta":
+        return delta.get("text") or None
+    if delta.get("type") == "thinking_delta":
+        return delta.get("thinking") or None
+    return None
 
 
 def _describe_block(block: object, *, tool_names: dict | None = None) -> str | None:
@@ -258,6 +281,10 @@ async def _run_async(
         # would otherwise be picked up by walking up from cwd and confuse the sandbox agent with
         # instructions meant for the outer project, not the isolated task.
         setting_sources=[],
+        # Stream partial message events so the model's thinking/text shows live in the feed. Each
+        # turn over the huge system prompt takes ~a minute; without this the feed is silent for that
+        # whole time and looks hung. See _describe_claude_message's StreamEvent handling.
+        include_partial_messages=True,
     )
 
     agent_summary: str | None = None

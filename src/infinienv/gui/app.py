@@ -70,6 +70,10 @@ def _classify_stage(msg: str) -> str:
     sandbox/runner.py's `_describe_stream_event` and the repair-loop `stage()` calls (documented in
     CLAUDE.md section 11). An unrecognized line falls through to `status`, so this never breaks a run
     -- worst case a line is shown in the generic style."""
+    # LIVE partial-model-output deltas (streamed thinking/text) carry an invisible sentinel prefix.
+    # Check the RAW message (before strip, which would drop the leading invisible char).
+    if (msg or "").startswith("⁣LIVE⁣"):
+        return "live"
     s = (msg or "").strip()
     low = s.lower()
     # TODO harness: the seeded requirements, the agent's plan.py tool calls, memory notes.

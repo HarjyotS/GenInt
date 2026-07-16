@@ -4194,3 +4194,33 @@ and updated the OpenAI narration tests that asserted the old "no diff / silent s
 suite -> 473 passed (OPENAI_API_KEY unset). JS syntax-checked with `node --check`. Honest: couldn't grab
 a live screenshot this run (the browse daemon lost localhost networking); verified via tests + the
 served HTML containing the new code + a clean JS parse.
+
+---
+
+## 2026-07-16 -- Diagnosed the Claude "stuck": slow silent turns; added live streaming
+
+Ran the Claude backend locally on the Mario prompt and profiled it. It is NOT hung -- the sandbox
+`claude` CLI sits at ~0.4% CPU (idle, waiting on I/O) during each model turn, which produces NO feed
+output until the turn completes, so a slow turn looks frozen. Timing (measured, `--assets none
+--no-refine-prompt`):
+- Requirements derivation (OpenAI `build_checklist`): **~45s** every run, before the Claude agent
+  even starts.
+- Claude turns: **~60s each on a COLD run** (first-ever), but **~2-3s each once warm** -- i.e.
+  Anthropic prompt caching of the huge system prompt: the first run after inactivity is dramatically
+  slower than subsequent ones (cache TTL ~5min). The agent also does many exploration turns (reading
+  module after module) before building, so cold runs feel stuck for minutes.
+
+Fix (the user's earlier ask): live-stream the model's thinking/text. `ClaudeAgentOptions(
+include_partial_messages=True)` now yields `StreamEvent`s; `_describe_claude_message` surfaces their
+`content_block_delta` text/thinking deltas via `on_stage` with an invisible `LIVE_PREFIX` sentinel
+(`runner.LIVE_PREFIX`, U+2063-wrapped). `app._classify_stage` maps it to kind `live`; the GUI
+accumulates deltas into a single in-place "Thinking live" bubble with a blinking caret (superseded by
+the finalized event), plus a `heartbeat()` "still going -- Ns" line after >8s of silence. The CLI
+suppresses live deltas (they'd flood the terminal). **Live-verified against the real SDK**: LIVE
+deltas appeared at +57s in the timestamped run, confirming streaming works end to end.
+
+Honest: the profiling run stopped at ~78s mid-exploration with no artifacts (didn't finish; cause of
+the truncation not pinned down -- possibly an external kill in the test harness). Streaming makes the
+wait legible; it doesn't make turns faster. Levers not taken here: speeding up the ~45s requirements
+step (faster/optional checklist model), and cold-cache first-run latency. Tests: claude StreamEvent
+-> live delta, gui classify `live`; JS syntax-checked. Full suite -> 474 passed.

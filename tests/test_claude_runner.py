@@ -94,6 +94,29 @@ def test_describe_block_surfaces_bash_command_output_only():
     )
 
 
+def test_stream_event_deltas_are_surfaced_live():
+    from infinienv.sandbox.runner import LIVE_PREFIX
+
+    seen: list = []
+    # a StreamEvent text delta streams live (with the invisible LIVE sentinel prefix)
+    claude_runner._describe_claude_message(
+        _Block(event={"type": "content_block_delta", "delta": {"type": "text_delta", "text": "Plann"}}),
+        stage=seen.append,
+    )
+    assert seen == [LIVE_PREFIX + "Plann"]
+    # a thinking delta streams live too
+    seen.clear()
+    claude_runner._describe_claude_message(
+        _Block(event={"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "gravity"}}),
+        stage=seen.append,
+    )
+    assert seen == [LIVE_PREFIX + "gravity"]
+    # a non-delta stream event (block start / ping) stays silent
+    seen.clear()
+    claude_runner._describe_claude_message(_Block(event={"type": "content_block_start"}), stage=seen.append)
+    assert seen == []
+
+
 def test_describe_block_surfaces_only_failed_tool_results():
     assert claude_runner._describe_block(_Block(is_error=False, content="ok")) is None
     line = claude_runner._describe_block(_Block(is_error=True, content="Traceback: boom"))

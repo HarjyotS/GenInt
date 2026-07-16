@@ -181,6 +181,13 @@
   .evt.command { background: var(--void); border-color: var(--line-soft); }
   .evt.output { border-color: var(--line-soft); }
   .evt.output .ic, .evt.output .k { color: var(--dim); }
+  /* live streaming bubble: the model's thinking/text as it generates, with a blinking caret */
+  .evt.live { border-left: 3px solid var(--accent); }
+  .evt.live .ic, .evt.live .k { color: var(--accent); }
+  .evt.live .txt { white-space: pre-wrap; }
+  .evt.live .caret { display: inline-block; width: 7px; height: 13px; margin-left: 1px;
+    vertical-align: text-bottom; background: var(--accent); animation: blink 1s steps(2) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
   .evt.command .ic { color: var(--dim); }
   .evt.command .txt { font-family: var(--mono); font-size: 12px; color: var(--dim); white-space: pre-wrap; }
   .evt.decision { border-left: 3px solid var(--accent); }
@@ -617,6 +624,7 @@ const KINDS = {
   refine:    {ic:'✦', label:'Refined prompt'},
   workspace: {ic:'▣', label:'Workspace'},
   decision:  {ic:'◆', label:'Decision'},
+  live:      {ic:'✦', label:'Thinking live'},
   command:   {ic:'›', label:'Command'},
   output:    {ic:'≡', label:'Output'},
   edit:      {ic:'✎', label:'Wrote code'},
@@ -656,7 +664,28 @@ function attemptDivider(label) {
   feedEl.appendChild(d);
 }
 let lastAttemptText = '';
+let liveBubble = null;      // the in-place "streaming thinking" element, or null
+let lastEventAt = 0;        // ms of the last feed event, for the stall heartbeat
 function pushEvent(kind, message) {
+  lastEventAt = Date.now();
+  // LIVE partial-model-output deltas: accumulate into a single in-place bubble at the feed bottom,
+  // so a slow turn shows the model generating token-by-token instead of dead air.
+  if (kind === 'live') {
+    const delta = message.replace(/^⁣LIVE⁣/, '');
+    if (!liveBubble) {
+      liveBubble = document.createElement('div');
+      liveBubble.className = 'evt live';
+      liveBubble.innerHTML = '<div class="ic">✦</div><div class="body"><div class="k">Thinking live</div>'
+        + '<div class="txt"><span class="live-text"></span><span class="caret"></span></div></div>';
+    }
+    liveBubble.querySelector('.live-text').textContent += delta;
+    feedEl.appendChild(liveBubble);  // keep it pinned to the bottom as it grows
+    feedEl.scrollTop = feedEl.scrollHeight;
+    updateNow(KINDS.live, 'generating…');
+    return;  // deltas don't go to the raw log / todo tracker / normal row
+  }
+  // Any finalized event supersedes the streamed preview.
+  if (liveBubble) { liveBubble.remove(); liveBubble = null; }
   logLine(message); // keep the full raw text in the collapsible raw log
   handleTodoLine(message); // feed the floating goals tracker (seeds + todo.py updates)
   if (kind === 'refine' && message.startsWith('Refined prompt')) {
@@ -907,6 +936,7 @@ function resetLog() {
   $('cap-render').textContent = 'render.png';
   const stale = document.getElementById('nav-extra'); if (stale) stale.remove();
   const n = $('now'); if (n) { n.classList.remove('show'); n.innerHTML = ''; }
+  liveBubble = null;
   curPhase = -1;
 }
 
@@ -917,10 +947,23 @@ function startRun() {
   phasebar.style.display = 'flex';
   document.body.classList.add('building');
   runStart = Date.now();
+  lastEventAt = Date.now();
   clearInterval(runTimer);
-  runTimer = setInterval(() => setMeta(lastAttemptText), 500);
+  runTimer = setInterval(() => { setMeta(lastAttemptText); heartbeat(); }, 500);
   setPhase(mode === 'navigate' ? 'Play' : 'Refine');
   setMeta('');
+}
+// If nothing has come through for a while (time-to-first-token / a gap between turns), reassure the
+// user the run is alive rather than letting the feed look frozen.
+function heartbeat() {
+  if (!runTimer) return;
+  const idle = (Date.now() - lastEventAt) / 1000;
+  const el = $('now'); if (!el) return;
+  if (idle > 8) {
+    el.classList.add('show');
+    el.innerHTML = '<span class="now-ic">⏳</span><span class="now-lbl">Working</span>'
+      + `<span class="now-txt">· still going — ${idle.toFixed(0)}s since the last update (the model is thinking or running code)</span>`;
+  }
 }
 function stopTimer() { clearInterval(runTimer); runTimer = null; document.body.classList.remove('building'); setMeta(lastAttemptText); const n = $('now'); if (n) n.classList.remove('show'); }
 

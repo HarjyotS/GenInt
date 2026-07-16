@@ -122,6 +122,12 @@ def _truncate(text: str, limit: int) -> str:
 _OUTPUT_MAX_LINES = 14
 _DIFF_MAX_LINES = 40
 
+# Invisible sentinel prefix for LIVE partial-model-output deltas (streamed thinking/text as the model
+# generates, so a slow turn shows progress instead of dead air). `⁣` is an invisible separator
+# (valid in JSON/SSE, renders as nothing); the GUI classifier maps it to kind `live` and strips it,
+# accumulating the deltas into one in-place "live" bubble.
+LIVE_PREFIX = "⁣LIVE⁣"
+
 
 def _output_block(text: str, *, max_lines: int = _OUTPUT_MAX_LINES) -> str | None:
     """A trimmed command/tool output tagged `Output:` for the GUI to render as a collapsible block.
