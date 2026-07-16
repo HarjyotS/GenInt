@@ -1,0 +1,20 @@
+# Render Blueprint. Push this repo to GitHub, then in Render: New > Blueprint, point it here.
+# Render injects $PORT (the Docker CMD binds it). Set your keys in the dashboard (they're marked
+# sync:false so they're prompted, never committed). See docs/deploy.md.
+#
+# NOTE: the `free` plan is 512 MB RAM and spins down when idle — fine to load the UI and try light
+# runs, but a full multi-minute sandbox build may run out of memory. Use `starter` (or bigger) for
+# real sandbox generation.
+services:
+  - type: web
+    name: infinienv
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: INFINIENV_SANDBOX_BACKEND
+        value: claude          # or "openai" (then only OPENAI_API_KEY is needed)
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false

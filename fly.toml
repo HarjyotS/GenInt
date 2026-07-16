@@ -1,0 +1,29 @@
+# Fly.io deploy config. First run: `fly launch --no-deploy` (or `fly apps create <name>`), then set
+# your app name below and your keys as secrets, then `fly deploy`:
+#   fly secrets set OPENAI_API_KEY=sk-...            # refine/audit/assets/navigate
+#   fly secrets set ANTHROPIC_API_KEY=sk-ant-...     # the Claude sandbox backend (headless auth)
+# See docs/deploy.md.
+
+app = "infinienv"            # <- change to your unique Fly app name
+primary_region = "iad"       # <- pick a region near you (fly platform regions)
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+  INFINIENV_SANDBOX_BACKEND = "claude"   # or "openai" (then only OPENAI_API_KEY is needed)
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # A sandbox run is long; don't let the machine stop mid-run. Set min_machines_running = 1 to keep
+  # it always warm (costs a bit more), or 0 to let it stop when idle (cold start on next request).
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
+  min_machines_running = 0
+
+# 1GB is a sensible floor for the agent + Node/claude CLI; bump memory for the hardest prompts.
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"

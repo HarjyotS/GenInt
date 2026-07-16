@@ -4074,3 +4074,36 @@ on `input()` in a non-tty (detects `sys.stdin.isatty()`). The README quickstart 
 `python -m infinienv setup` as step 2 (install -> setup -> gui); docs/cli.md + docs/overview.md +
 CLAUDE.md updated. Tests in `tests/test_setup_env.py` (8, all hermetic). Live-verified the command
 end to end (writes the key, prints an all-OK checklist on this machine).
+
+---
+
+## 2026-07-15 -- Deploy setup (Docker + Fly/Render), and why NOT Vercel
+
+User tried to deploy the GUI to Vercel and hit "No Flask entrypoint found." Diagnosed and pushed
+back: the GUI is a **long-running, stateful** server (SSE streamed for minutes, in-memory job/play
+state + background threads, spawns the `claude` CLI subprocess, writes runs/ artifacts) -- serverless
+(Vercel/Netlify) fundamentally can't run it (short-lived, stateless, read-only FS, no long
+connections/subprocesses; and `generate` returns a job_id whose `/api/stream/<id>` would hit a
+different stateless instance -> 404). So instead of a broken serverless entrypoint, added a
+persistent-host deploy path (option A, user's choice, "cheap/free"):
+
+- `Dockerfile` -- python:3.12-slim + Node 20 + the `claude` CLI (`@anthropic-ai/claude-code`) +
+  `pip install -e ".[gui,claude,openai]"`; CMD `python -m infinienv gui --host 0.0.0.0 --port
+  ${PORT:-5050} --no-browser`. `.dockerignore` excludes `.env`/runs/caches/.git.
+- `fly.toml` (Fly.io, the recommended cheap path: Docker-native, 1gb VM, secrets for keys) and
+  `render.yaml` (Render free tier, push-to-deploy Blueprint; free = 512MB + spin-down, caveated).
+- `docs/deploy.md` -- the full guide: why not serverless, headless auth (OpenAI via OPENAI_API_KEY;
+  the Claude backend via ANTHROPIC_API_KEY so no interactive `claude login` -- the project doesn't
+  set/clobber it, so a host-provided env var flows straight to the CLI; or switch to
+  INFINIENV_SANDBOX_BACKEND=openai to skip the CLI entirely), a cheap/free host table (Oracle Always
+  Free VM = best free w/ real RAM; Fly ~a few $/mo; Render free w/ RAM caveat; Hetzner ~€4; Railway/
+  Koyeb), a bare-VM `docker run`, and honest caveats (needs ~1GB+ RAM for a full sandbox run; must
+  stay single-process -- in-memory job state + SSE can't be split across workers/replicas; local is
+  the most reliable path for evaluation). Linked from the README.
+- Code: `infinienv gui --port` now defaults to `int(os.environ.get("PORT", 5050))` so a PaaS-injected
+  $PORT binds with no flag. Test `test_gui_port_defaults_to_PORT_env`.
+
+Honest note: I couldn't build the Docker image here (no local Docker) or test a live deploy -- the
+configs are written to the documented Fly/Render/Docker contracts but are un-exercised against a real
+host; flagged in docs/deploy.md that a given host may need memory/timeout tuning for a heavy sandbox
+run, and that running locally is the verified path. `pytest` (affected files) -> 49 passed.

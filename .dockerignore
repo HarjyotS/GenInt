@@ -1,0 +1,22 @@
+# Keep the build context small and free of local state.
+.git
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+
+# Local runtime state / caches (regenerated at runtime).
+runs/*
+!runs/.gitkeep
+.infinienv_asset_cache
+.infinienv_mechanics_cache.json
+.infinienv_model_cache
+
+# Secrets — never bake keys into the image; set them as host env vars instead.
+.env
+
+# Scratch / editor
+*.log
+.DS_Store

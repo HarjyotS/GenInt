@@ -524,7 +524,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     gu = sub.add_parser("gui", help="Launch the local web GUI (requires `pip install infinienv[gui]`).")
     gu.add_argument("--host", default="127.0.0.1")
-    gu.add_argument("--port", type=int, default=5050)
+    # Most PaaS hosts (Render/Fly/Railway/…) inject the port to bind as $PORT. Default to it so a
+    # deployed `infinienv gui` binds the right port with no extra flag; falls back to 5050 locally.
+    gu.add_argument("--port", type=int, default=int(os.environ.get("PORT", 5050)))
     gu.add_argument("--no-browser", action="store_true", help="Don't auto-open a browser tab.")
     gu.set_defaults(func=cmd_gui)
 

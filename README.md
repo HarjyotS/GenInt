@@ -60,5 +60,8 @@ the rendered world and its replay appear inline. A "Recent worlds" strip browses
   the harness maps to the challenge's evaluation criteria.
 - **[CLI reference](docs/cli.md)** — every command, the runtime providers, extended mechanics,
   physics, the asset pipeline, and the mutation / curriculum / dataset tools.
+- **[Deploying it](docs/deploy.md)** — hosting the GUI on a persistent server (Docker + Fly.io /
+  Render / a cheap VM). Note: it's a long-running, stateful server, so **serverless (Vercel/Netlify)
+  won't work** — see the doc for why.
 - **[CLAUDE.md](CLAUDE.md)** — the full design doc and the non-negotiable invariants.
 - **[notes.md](notes.md)** — the running decision / bug log from the build.

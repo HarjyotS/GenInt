@@ -72,3 +72,16 @@ def test_cli_setup_non_interactive_writes_env(tmp_path, capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "Readiness check" in out
     assert "OpenAI API key" in out
+
+
+def test_gui_port_defaults_to_PORT_env(monkeypatch):
+    # A PaaS host injects the port to bind as $PORT; `infinienv gui` should default to it so a
+    # deployed run binds correctly with no extra flag (see docs/deploy.md + the Dockerfile CMD).
+    from infinienv.cli import build_parser
+
+    monkeypatch.setenv("PORT", "8080")
+    args = build_parser().parse_args(["gui"])
+    assert args.port == 8080
+
+    monkeypatch.delenv("PORT", raising=False)
+    assert build_parser().parse_args(["gui"]).port == 5050
