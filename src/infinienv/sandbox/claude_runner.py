@@ -101,15 +101,20 @@ def _describe_claude_message(
 
 
 def _stream_delta_text(event: dict) -> str | None:
-    """The incremental text from a raw Anthropic `content_block_delta` stream event (a `text_delta`
-    or `thinking_delta`), or None for any other event type (block start/stop, ping, etc.)."""
+    """The incremental text from a raw Anthropic `content_block_delta` stream event, or None for any
+    other event type (block start/stop, ping, etc.). Covers the model's TEXT and THINKING, and also
+    TOOL INPUT (`input_json_delta`) -- the last is what streams while the model writes a big file
+    (run_scene.py) in one turn, the longest and previously-silent kind of turn."""
     if event.get("type") != "content_block_delta":
         return None
     delta = event.get("delta") or {}
-    if delta.get("type") == "text_delta":
+    dtype = delta.get("type")
+    if dtype == "text_delta":
         return delta.get("text") or None
-    if delta.get("type") == "thinking_delta":
+    if dtype == "thinking_delta":
         return delta.get("thinking") or None
+    if dtype == "input_json_delta":  # tool arguments being written (e.g. the file content)
+        return delta.get("partial_json") or None
     return None
 
 

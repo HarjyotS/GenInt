@@ -431,10 +431,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--assets",
         default="auto",
         choices=["none", "local", "generated", "auto"],
-        help="auto (default): OpenAI-generate every type that needs a sprite, falling back to a "
-        "local placeholder on failure. none: flat colored cells. local: checked-in placeholder "
-        "sprites, no key needed. generated: OpenAI image generation only, no silent fallback. "
-        "Resolved inside the sandbox workspace via a copy of assets/resolver.py.",
+        help="auto (default): OpenAI-generate the types that benefit (characters/creatures/props), "
+        "draw the simple structural tiles locally, and reuse a similar cached sprite when one exists "
+        "-- far fewer image calls. none: flat colored cells. local: checked-in placeholder sprites, "
+        "no key needed. generated: OpenAI image generation for everything, no fallback. Resolved "
+        "inside the sandbox workspace via a copy of assets/resolver.py.",
     )
     g.add_argument(
         "--no-refine-prompt",

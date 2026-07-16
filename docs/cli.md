@@ -120,9 +120,9 @@ force-based physics can't preserve that guarantee and lives in `--sandbox` inste
 - `none` — flat colored cells, no sprites (zero dependencies).
 - `local` — checked-in placeholder sprites (`src/infinienv/assets/base/*.png`, no key/network).
 - `generated` — real sprites from the OpenAI Images API (`gpt-image-1`); no fallback on failure.
-- `auto` — OpenAI-generate **every** type that needs a sprite, falling back to a local placeholder
-  if a generation fails (so a rate-limit/moderation failure degrades to a placeholder instead of a
-  hole).
+- `auto` — the smart default: OpenAI-generate only the types that benefit (characters, creatures,
+  novel props), draw the simple structural tiles locally, reuse a similar cached sprite when one
+  exists, and fall back to a local placeholder on failure. Far fewer image calls than `generated`.
 
 Sprites are cached by object **type** in `.infinienv_asset_cache/`, shared across runs. Generation
 runs concurrently (`INFINIENV_ASSET_CONCURRENCY`, default 4) at `quality="low"`. Image requests are

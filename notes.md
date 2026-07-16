@@ -4224,3 +4224,31 @@ the truncation not pinned down -- possibly an external kill in the test harness)
 wait legible; it doesn't make turns faster. Levers not taken here: speeding up the ~45s requirements
 step (faster/optional checklist model), and cold-cache first-run latency. Tests: claude StreamEvent
 -> live delta, gui classify `live`; JS syntax-checked. Full suite -> 474 passed.
+
+---
+
+## 2026-07-16 -- auto reverted to smart; similarity cache reuse; live asset progress; stream tool-input
+
+Profiled a full Claude-Sonnet + `--assets auto` run: >1000s. Two dominant costs -- slow Sonnet turns
+(cold-cache) AND `--assets auto` generating EVERY sprite via OpenAI (throttled 5/min). User: revert
+auto; reuse similar cached images; show new generations live.
+
+- **auto reverted to smart** (`resolver.py`): restored `SIMPLE_LOCAL_TYPES` (wall/floor/box/... drawn
+  locally, no API call); only characters/creatures/novel props are OpenAI-generated. Far fewer calls.
+- **Similarity cache reuse**: `_similarity(a,b)` (difflib ratio + a token-subset boost, so `gray_wolf`
+  ~ `wolf` = 0.85, `golden_acorn` ~ `acorn` = 0.85, but `wall`/`ball` = 0.75 stays below the 0.8
+  threshold). `_reuse_similar_cached` copies a close cached sprite instead of generating; `_dedup_
+  similar_pending` clusters near-identical pending types so a scene makes one image call per cluster,
+  not one per type.
+- **Live asset progress**: `_progress()` prints `[assets] <type>: generated|reused '<other>'|simple
+  tile...` -- inside the sandbox these are captured as the command's stdout and shown live in the GUI
+  feed (via the command-output surfacing), so a reviewer sees each sprite resolve instead of a silent
+  multi-minute pause. (Live thumbnails would need moving asset-gen to the trusted process -- not done.)
+- **Root cause of the "241s silent turn" (local Claude, corrected from the API-throttle theory)**: the
+  longest turns are the model WRITING a big file (run_scene.py) in one turn, which streams as
+  `input_json_delta` (tool input), not `text_delta`/`thinking_delta`. `_stream_delta_text` now also
+  surfaces `input_json_delta.partial_json`, so file-writing streams live too -- the previously-silent
+  longest turns now show progress.
+
+Tests: smart-auto routing restored, similarity-reuse test, input_json_delta streaming test. Full
+suite -> 474 passed.

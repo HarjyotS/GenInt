@@ -582,15 +582,14 @@ rendering, unchanged unless opted into):
   `assets/placeholder_gen.py`, simple Pillow-drawn icons). No key or network needed.
 - `generated` — real sprites via the OpenAI Images API (`assets/generator_openai.py`). No silent
   fallback if generation fails.
-- `auto` — **OpenAI-generate every type that needs a sprite** (the same set as `generated`,
-  including structural types like wall/floor), but **fall back to a local placeholder if a generation
-  fails** (note `"fallback: generated unavailable"`). So `auto` = "generate everything, but never
-  leave a hole": a rate-limit or moderation failure degrades to a drawn placeholder rather than
-  leaving the type unrendered (which is exactly what bare `generated` does — no fallback). An earlier
-  version of `auto` drew the simple structural types locally with no image-API call to dodge the
-  429 rate limit; the user's explicit call is now "generate sprites with OpenAI for everything that
-  needs to be a sprite", so that shortcut was removed and the rate limit is handled by the generator's
-  429-backoff instead (see below). `generated` mode is unchanged (generates everything, no fallback).
+- `auto` — the **smart default**: OpenAI-generate only the types that benefit (characters,
+  creatures, novel props), draw the simple structural tiles (`SIMPLE_LOCAL_TYPES`) locally with no
+  API call, **reuse a similar already-cached sprite** when one exists (`_reuse_similar_cached` +
+  `_dedup_similar_pending`, similarity-matched with a token-subset boost so `gray_wolf` reuses
+  `wolf`), and fall back to a local placeholder on failure. Far fewer OpenAI calls than the brief
+  "generate everything" version, which crawled through the 5/min rate limit. `generated` still
+  generates everything, no fallback. Progress prints (`_progress` → `[assets] …`) surface each
+  generation/reuse live in the GUI feed as command output.
 
 **Model:** `gpt-image-1`, not `gpt-image-2` — per OpenAI's own docs, `gpt-image-2` explicitly does
 not support `background: "transparent"`; `gpt-image-1`/`1.5`/`1-mini` do. Overridable via

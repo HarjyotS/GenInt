@@ -111,6 +111,13 @@ def test_stream_event_deltas_are_surfaced_live():
         stage=seen.append,
     )
     assert seen == [LIVE_PREFIX + "gravity"]
+    # tool-input deltas stream too (this is what fills the longest turns: writing a big file)
+    seen.clear()
+    claude_runner._describe_claude_message(
+        _Block(event={"type": "content_block_delta", "delta": {"type": "input_json_delta", "partial_json": '{"content":"import'}}),
+        stage=seen.append,
+    )
+    assert seen == [LIVE_PREFIX + '{"content":"import']
     # a non-delta stream event (block start / ping) stays silent
     seen.clear()
     claude_runner._describe_claude_message(_Block(event={"type": "content_block_start"}), stage=seen.append)

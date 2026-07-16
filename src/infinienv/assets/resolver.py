@@ -4,14 +4,17 @@ Modes (matches PATHWAY.md section 8):
   none      -> no sprites; renderer keeps drawing flat colored cells.
   local     -> only the checked-in placeholders in assets/base/.
   generated -> only OpenAI-generated sprites (Images API); no silent fallback.
-  auto      -> OpenAI-generate EVERY type that needs a sprite (same as generated), but fall back to
-               a local placeholder if a generation fails. So `auto` = "generate everything, but never
-               end up with a hole": a rate-limit/moderation failure degrades to a drawn placeholder
-               instead of leaving the type unrendered (which is what bare `generated` does).
+  auto      -> the SMART default: OpenAI-generate only the types that benefit from it (characters,
+               creatures, novel/custom props) and draw the simple structural tiles locally
+               (SIMPLE_LOCAL_TYPES), with a local-placeholder fallback if a generation fails. This is
+               far faster than generating everything (fewer OpenAI calls, so it doesn't crawl through
+               the 5-images/min rate limit) while still giving real art for the hero and creatures.
+               `generated` still generates everything with no fallback.
 """
 
 from __future__ import annotations
 
+import difflib
 import os
 
 from infinienv.assets.manifest import AssetEntry
@@ -20,6 +23,13 @@ from infinienv.llm.base import ProviderError
 from infinienv.schema.scene_schema import SceneSpec
 
 ASSET_MODES = ("none", "local", "generated", "auto")
+
+# In `auto` mode, these structural/primitive types resolve to their checked-in local placeholder with
+# NO image-generation call: a flat drawn tile is adequate for them, they're placed in nearly every
+# cell, and they're exactly the types that otherwise burn the image API's 5-images/min rate limit.
+# Generation is reserved for the types that actually benefit -- characters (agent) and novel/custom
+# types (creatures, plants, props). `generated` mode still generates everything.
+SIMPLE_LOCAL_TYPES = frozenset({"wall", "floor", "box", "door", "exit", "key", "hazard", "distractor"})
 
 
 def scene_asset_types(scene: SceneSpec) -> list[str]:
@@ -172,30 +182,144 @@ def resolve_assets(
         else:
             pending.append(t)
 
-    # `auto` now generates EVERY pending type via OpenAI (same set as `generated`); the only
-    # difference is the failure handling below (auto falls back to a local placeholder, generated
-    # leaves a hole). So there is no simple-type-drawn-locally shortcut anymore -- everything that
-    # needs a sprite gets a real generated one when possible.
+    # `auto`: draw the simple structural tiles locally (no API call), and only generate the types
+    # that benefit from it (characters, creatures, novel props). Big speed win over generating all.
+    if mode == "auto":
+        still: list[str] = []
+        for t in pending:
+            local_path = os.path.join(local_dir, f"{t}.png")
+            if t in SIMPLE_LOCAL_TYPES and os.path.exists(local_path):
+                manifest[t] = AssetEntry(t, "local", local_path, note="auto: simple type drawn locally")
+                _progress(f"{t}: simple tile, drawn locally")
+            else:
+                still.append(t)
+        pending = still
+
+    # Reuse a SIMILAR sprite we already have in the cache (e.g. a scene with "wolf" and "gray_wolf",
+    # or a repair attempt reusing attempt 1's sprites) instead of generating a near-duplicate.
+    pending = _reuse_similar_cached(pending, cache_dir, manifest, notes)
+    # Dedup similar types WITHIN this batch: generate one representative per cluster, copy it to the
+    # rest -- so a scene with several near-identical types makes one image call, not many.
+    pending, reuse_map = _dedup_similar_pending(pending, notes)
+
     descriptions = {**_scene_descriptions(scene), **(extra_descriptions or {})}
     backend, generate_sprite_fn = _select_sprite_generator()
+    if pending:
+        _progress(f"generating {len(pending)} sprite(s) via {backend}: {', '.join(pending)}")
     generated_paths, generation_errors = _generate_many(pending, cache_dir, descriptions, generate_sprite_fn)
 
-    for t in pending:
-        if t in generated_paths:
-            manifest[t] = AssetEntry(t, "generated", generated_paths[t], note=f"backend: {backend}")
-            continue
-        exc = generation_errors[t]
+    def _fallback(t: str) -> None:
+        exc = generation_errors.get(t, "generation unavailable")
         notes.append(f"image generation unavailable for {t!r}: {exc}")
         local_path = os.path.join(local_dir, f"{t}.png")
-        has_local = os.path.exists(local_path)
         if mode == "generated":
             manifest[t] = AssetEntry(t, "none", None, note="generation failed and fallback not requested")
-        elif has_local:
+        elif os.path.exists(local_path):
             manifest[t] = AssetEntry(t, "local", local_path, note="fallback: generated unavailable")
         else:
             manifest[t] = AssetEntry(t, "none", None, note="no asset available")
 
+    for t in pending:
+        if t in generated_paths:
+            manifest[t] = AssetEntry(t, "generated", generated_paths[t], note=f"backend: {backend}")
+            _progress(f"{t}: generated ({backend})")
+        else:
+            _progress(f"{t}: generation failed")
+            _fallback(t)
+
+    # Give each deduped type its representative's generated sprite (or fall back if the rep failed).
+    import shutil
+
+    for dup, rep in reuse_map.items():
+        rep_path = generated_paths.get(rep)
+        if rep_path and os.path.exists(rep_path):
+            dst = os.path.join(cache_dir, f"{dup}.png")
+            try:
+                shutil.copyfile(rep_path, dst)
+                manifest[dup] = AssetEntry(dup, "generated", dst, note=f"reused similar '{rep}'")
+                _progress(f"{dup}: reused similar '{rep}'")
+                continue
+            except OSError:
+                pass
+        _fallback(dup)
+
     return manifest, notes
+
+
+def _progress(msg: str) -> None:
+    """Print an asset-resolution progress line. Inside a sandbox run this is captured as the
+    command's output and shown live in the GUI feed, so a reviewer sees each sprite as it's
+    generated/reused rather than a silent multi-minute pause."""
+    print(f"[assets] {msg}", flush=True)
+
+
+def _norm_type(s: str) -> tuple[str, frozenset]:
+    import re
+
+    text = re.sub(r"[_-]+", " ", s.lower()).strip()
+    return text, frozenset(text.split())
+
+
+def _similarity(a: str, b: str) -> float:
+    """0..1 similarity between two sprite type names -- string ratio, boosted when one's word set is
+    a subset of the other's (e.g. 'wolf' within 'gray wolf', 'acorn' within 'golden acorn')."""
+    na, ta = _norm_type(a)
+    nb, tb = _norm_type(b)
+    ratio = difflib.SequenceMatcher(None, na, nb).ratio()
+    if ta and tb and (ta <= tb or tb <= ta):
+        ratio = max(ratio, 0.85)
+    return ratio
+
+
+_SIMILARITY_THRESHOLD = 0.8
+
+
+def _reuse_similar_cached(pending, cache_dir, manifest, notes):
+    """For each pending type, if a similar sprite already exists in the cache, copy it and skip
+    generation. Returns the still-pending types."""
+    if not pending or not os.path.isdir(cache_dir):
+        return pending
+    import shutil
+
+    available = {
+        os.path.splitext(f)[0]: os.path.join(cache_dir, f)
+        for f in os.listdir(cache_dir)
+        if f.lower().endswith(".png")
+    }
+    if not available:
+        return pending
+    still = []
+    for t in pending:
+        best = max((c for c in available if c != t), key=lambda c: _similarity(t, c), default=None)
+        if best is not None and _similarity(t, best) >= _SIMILARITY_THRESHOLD:
+            dst = os.path.join(cache_dir, f"{t}.png")
+            try:
+                shutil.copyfile(available[best], dst)
+            except OSError:
+                still.append(t)
+                continue
+            manifest[t] = AssetEntry(t, "generated", dst, note=f"reused similar cached '{best}'")
+            notes.append(f"reused similar cached sprite '{best}' for {t!r}")
+            _progress(f"{t}: reused similar cached '{best}'")
+            available[t] = dst
+        else:
+            still.append(t)
+    return still
+
+
+def _dedup_similar_pending(pending, notes):
+    """Cluster near-identical pending types; keep one representative per cluster to generate and map
+    the rest to it. Returns (representatives_to_generate, {dup_type: representative_type})."""
+    reps: list[str] = []
+    reuse_map: dict[str, str] = {}
+    for t in pending:
+        match = next((r for r in reps if _similarity(t, r) >= _SIMILARITY_THRESHOLD), None)
+        if match is None:
+            reps.append(t)
+        else:
+            reuse_map[t] = match
+            notes.append(f"'{t}' will reuse the generated sprite for similar type '{match}'")
+    return reps, reuse_map
 
 
 def _generate_many(

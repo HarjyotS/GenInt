@@ -165,34 +165,15 @@ def test_resolve_assets_generated_mode_records_a_note_and_no_asset_on_failure(tm
     assert entries["agent"].source == "generated"
 
 
-def test_resolve_assets_auto_mode_falls_back_to_local_on_generation_failure(tmp_path, monkeypatch):
-    scene = kitchen_delivery("kitchen task", seed=1)
-    generated_calls = []
-
-    def fake_generate(object_type, cache_dir, **kwargs):
-        generated_calls.append(object_type)
-        raise ProviderError(f"image generation failed for {object_type!r}: boom")
-
-    monkeypatch.setenv("INFINIENV_SPRITE_BACKEND", "openai")
-    monkeypatch.setattr(generator_openai, "generate_sprite", fake_generate)
-    entries, notes = resolve_assets(scene, "auto", str(tmp_path))
-
-    # auto now generates EVERY type (incl. structural ones like wall); on failure each falls back to
-    # a local placeholder rather than being left unrendered.
-    assert "wall" in generated_calls  # a structural type is no longer short-circuited to local
-    for t, entry in entries.items():
-        assert t in generated_calls, t  # the image API was attempted for every type
-        assert entry.source == "local", (t, entry)
-        assert entry.note == "fallback: generated unavailable"
-
-
-def test_resolve_assets_auto_mode_generates_every_type(tmp_path, monkeypatch):
+def test_resolve_assets_auto_mode_draws_simple_types_locally_and_generates_the_rest(tmp_path, monkeypatch):
     from PIL import Image
+
+    from infinienv.assets.resolver import SIMPLE_LOCAL_TYPES
 
     scene = kitchen_delivery("kitchen task", seed=1)
     generated = []
 
-    def fake_generate(object_type, cache_dir, **kwargs):  # succeeds this time
+    def fake_generate(object_type, cache_dir, **kwargs):
         generated.append(object_type)
         path = os.path.join(cache_dir, f"{object_type}.png")
         Image.new("RGBA", (8, 8), (0, 200, 0, 255)).save(path)
@@ -202,12 +183,49 @@ def test_resolve_assets_auto_mode_generates_every_type(tmp_path, monkeypatch):
     monkeypatch.setattr(generator_openai, "generate_sprite", fake_generate)
     entries, notes = resolve_assets(scene, "auto", str(tmp_path))
 
-    # every type that needs a sprite is OpenAI-generated now -- including structural types like wall,
-    # which auto used to draw locally.
-    assert "wall" in generated and "agent" in generated
-    for t, entry in entries.items():
-        assert t in generated, t
-        assert entry.source == "generated"
+    simple_present = [t for t in entries if t in SIMPLE_LOCAL_TYPES]
+    assert simple_present  # the kitchen scene has wall (a simple structural type)
+    for t in simple_present:
+        assert entries[t].source == "local" and entries[t].note == "auto: simple type drawn locally"
+        assert t not in generated  # NOT sent to the image API
+    # the agent/hero (not simple) IS generated
+    assert "agent" in generated and entries["agent"].source == "generated"
+
+
+def test_resolve_assets_reuses_a_similar_cached_sprite(tmp_path, monkeypatch):
+    from PIL import Image
+
+    # a scene with two near-identical types; one is already in the cache, the other reuses it.
+    scene = scene_spec_from_dict(
+        {
+            "version": "0.1", "seed": 1, "metadata": {"name": "t"},
+            "grid": {"width": 6, "height": 6, "tile_size": 32},
+            "agent": {"id": "a", "x": 1, "y": 1},
+            "objects": [{"id": "w2", "type": "gray_wolf", "x": 3, "y": 3}],
+            "walls": [],
+            "goals": [{"id": "g", "type": "reach", "target_id": "w2"}],
+            "mechanics": {"custom_object_types": [{"id": "gray_wolf", "description": "a gray wolf"}]},
+        }
+    )
+    # seed the cache with a "wolf" sprite (as if generated earlier)
+    Image.new("RGBA", (8, 8), (100, 100, 100, 255)).save(os.path.join(tmp_path, "wolf.png"))
+    calls = []
+
+    def fake_generate(object_type, cache_dir, **kwargs):
+        calls.append(object_type)
+        path = os.path.join(cache_dir, f"{object_type}.png")
+        Image.new("RGBA", (8, 8), (0, 200, 0, 255)).save(path)
+        return path
+
+    monkeypatch.setenv("INFINIENV_SPRITE_BACKEND", "openai")
+    monkeypatch.setattr(generator_openai, "generate_sprite", fake_generate)
+    entries, notes = resolve_assets(scene, "generated", str(tmp_path))
+
+    # gray_wolf reused the cached 'wolf' instead of generating a near-duplicate
+    assert "gray_wolf" not in calls
+    assert entries["gray_wolf"].source == "generated"
+    assert "reused similar cached 'wolf'" in entries["gray_wolf"].note
+    assert any("reused similar cached sprite 'wolf'" in n for n in notes)
 
 
 def _mario_scene():
