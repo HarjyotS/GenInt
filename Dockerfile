@@ -18,9 +18,18 @@ WORKDIR /app
 COPY . .
 RUN pip install --no-cache-dir -e ".[gui,claude,openai]"
 
-ENV PYTHONUNBUFFERED=1
-# Artifacts are written under runs/ at runtime; mount a persistent volume here to keep them across
-# restarts (optional — the app works fine with an ephemeral disk, you just lose past runs on redeploy).
+# The `claude` CLI refuses --dangerously-skip-permissions (the sandbox agent's bypassPermissions
+# mode) when running as root, so run as a non-root user. Give it a real HOME (for ~/.claude auth/
+# config) and ownership of /app so the app, the per-run sandbox workspaces under runs/, and the
+# asset cache are all writable.
+RUN useradd -m -u 10001 -s /bin/bash appuser \
+    && mkdir -p /app/runs \
+    && chown -R appuser:appuser /app
+USER appuser
+ENV HOME=/home/appuser PYTHONUNBUFFERED=1
+# Artifacts are written under runs/ at runtime. To persist them, use a NAMED volume
+# (`-v infinienv_runs:/app/runs`) so it inherits appuser's ownership; a host bind-mount would be
+# owned by the host user and appuser (uid 10001) couldn't write to it.
 EXPOSE 5050
 
 # $PORT is injected by most PaaS hosts; defaults to 5050 locally. Bind 0.0.0.0 so it's reachable.

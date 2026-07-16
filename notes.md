@@ -4135,3 +4135,8 @@ Tests: added password-gate (401/200/wrong-pw), public-bind helper, rate-limit 42
 `auto`. Docs updated (docs/deploy.md access-control section + the run commands incl.
 INFINIENV_GUI_PASSWORD; fly.toml/render.yaml; CLAUDE.md model-default revert; docs/cli.md). Full
 suite (run with OPENAI_API_KEY unset) -> 469 passed.
+
+> Follow-up: the container ran as root, and the `claude` CLI refuses --dangerously-skip-permissions
+> (the sandbox agent's bypassPermissions mode) as root. Fixed by running the image as a non-root
+> user (uid 10001, HOME=/home/appuser, owns /app). Consequence: persist runs/ with a NAMED volume
+> (`-v infinienv_runs:/app/runs`), not a host bind-mount (which the non-root user can't write to).

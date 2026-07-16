@@ -69,12 +69,17 @@ docker run -d --restart unless-stopped -p 80:5050 \
   -e OPENAI_API_KEY=sk-... \
   -e ANTHROPIC_API_KEY=sk-ant-... \
   -e INFINIENV_SANDBOX_BACKEND=claude \
-  -v "$PWD/runs:/app/runs" \
+  -v infinienv_runs:/app/runs \
   infinienv
 ```
 
-The container binds `0.0.0.0` (a public bind), so **it refuses to start without
-`INFINIENV_GUI_PASSWORD`** — that's deliberate (see below). Set it to a strong value.
+Two things baked into the image:
+- It binds `0.0.0.0` (a public bind), so **it refuses to start without `INFINIENV_GUI_PASSWORD`** —
+  deliberate (see below). Set it to a strong value.
+- It runs as a **non-root user** (the `claude` CLI refuses the sandbox agent's permission-bypass mode
+  as root). So persist `runs/` with a **named volume** (`-v infinienv_runs:/app/runs`, as above), not
+  a host bind-mount — a bind-mount is owned by the host user and the container user can't write to it.
+  (Or omit `-v` entirely for an ephemeral demo.)
 
 (No Docker? `pip install -e ".[gui,claude,openai]"`, install the `claude` CLI, then run the `gui`
 command under `systemd`/`tmux`/`pm2` so it stays up.)
