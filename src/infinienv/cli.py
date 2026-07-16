@@ -34,6 +34,78 @@ def _load_dotenv() -> None:
     # the global env var the CLI reads. See CLAUDE.md section 11's auth note.
 
 
+def cmd_setup(args: argparse.Namespace) -> int:
+    """Interactive first-run setup: collect API keys into a project `.env`, then report what's
+    ready. Run once (`infinienv setup`) and the GUI / CLI pick up the keys automatically."""
+    import getpass
+
+    from infinienv.setup_env import MANAGED_KEYS, check_environment, read_env, write_env_keys
+
+    env_path = args.env_path or os.path.join(os.getcwd(), ".env")
+    existing = read_env(env_path)
+
+    # Keys can come from flags (scriptable / non-interactive) or the interactive prompt below.
+    updates: dict[str, str] = {}
+    if args.openai_key:
+        updates["OPENAI_API_KEY"] = args.openai_key
+    if args.anthropic_key:
+        updates["CL_KEY"] = args.anthropic_key
+
+    print("InfiniEnv setup")
+    print(f"Writing keys to: {env_path}")
+    print()
+
+    interactive = (not args.no_input) and sys.stdin.isatty()
+    if interactive:
+        print("Paste each key and press Enter. Input is hidden. Press Enter alone to keep the")
+        print("current value (or skip an optional one).")
+        print()
+        for key, description in MANAGED_KEYS.items():
+            if key in updates:  # already supplied via a flag
+                continue
+            have = existing.get(key) or (os.environ.get("OP_KEY") if key == "OPENAI_API_KEY" else None)
+            status = "currently set" if have else "not set"
+            print(f"{key} ({status})")
+            print(f"  {description}")
+            try:
+                value = getpass.getpass("  > ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\nSetup cancelled.")
+                return 1
+            if value:
+                updates[key] = value
+            print()
+    elif not updates:
+        # Non-interactive and no flags: don't hang on input(); just show status + how to set keys.
+        print("Non-interactive shell and no --openai-key/--anthropic-key given -- skipping prompts.")
+        print("Run `infinienv setup` in a terminal, or pass keys as flags. Current status below.")
+        print()
+
+    written = write_env_keys(env_path, updates) if updates else []
+    if written:
+        print(f"Saved to .env: {', '.join(written)}")
+        print()
+
+    # Reflect the just-written keys so the checklist is accurate within this process too.
+    merged_env = {**os.environ, **read_env(env_path)}
+    print("Readiness check:")
+    all_ok = True
+    for item in check_environment(merged_env):
+        mark = "OK " if item["ok"] else "-- "
+        print(f"  [{mark}] {item['name']}: {item['detail']}")
+        if not item["ok"]:
+            all_ok = False
+            print(f"          fix: {item['fix']}")
+    print()
+    if all_ok:
+        print("All set. Launch the app:  python -m infinienv gui")
+    else:
+        print("Some items above need attention (see each 'fix'). The GUI still runs with whatever")
+        print("is ready; missing pieces just disable the features that need them.")
+        print("Next:  python -m infinienv gui")
+    return 0
+
+
 def cmd_generate(args: argparse.Namespace) -> int:
     # Sandbox is the only generate mode. The deterministic pipeline stays available for the other
     # commands (validate/solve/mutate/curriculum/benchmark/export-dataset), just not here.
@@ -309,6 +381,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="infinienv", description="InfiniEnv: infinite environment generation via an agent harness.")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    st = sub.add_parser(
+        "setup",
+        help="First-run setup: interactively save your API keys to a project .env and check that "
+        "everything needed to run the GUI (with the Claude sandbox backend) is installed.",
+    )
+    st.add_argument("--env-path", default=None, dest="env_path", help="Path to the .env file (default: ./.env).")
+    st.add_argument("--openai-key", default=None, dest="openai_key", help="Set OPENAI_API_KEY non-interactively.")
+    st.add_argument(
+        "--anthropic-key", default=None, dest="anthropic_key",
+        help="Set CL_KEY (Anthropic key for the optional `anthropic` provider) non-interactively.",
+    )
+    st.add_argument(
+        "--no-input", action="store_true", dest="no_input",
+        help="Don't prompt; just apply any --*-key flags and print the readiness check.",
+    )
+    st.set_defaults(func=cmd_setup)
+
     g = sub.add_parser(
         "generate",
         help="Generate a playable scene from a prompt. Runs the sandbox agent (the one and only "
@@ -338,9 +427,9 @@ def build_parser() -> argparse.ArgumentParser:
         default="none",
         choices=["none", "local", "generated", "auto"],
         help="none: flat colored cells (default). local: checked-in placeholder sprites, no key "
-        "needed. generated: OpenAI image generation only, no silent fallback. auto: draw the "
-        "simple structural types locally, OpenAI-generate the rest. Resolved inside the sandbox "
-        "workspace via a copy of assets/resolver.py.",
+        "needed. generated: OpenAI image generation only, no silent fallback. auto: OpenAI-generate "
+        "every type that needs a sprite, falling back to a local placeholder on failure. Resolved "
+        "inside the sandbox workspace via a copy of assets/resolver.py.",
     )
     g.add_argument(
         "--no-refine-prompt",

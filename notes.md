@@ -4056,3 +4056,21 @@ The removed detail was relocated (not deleted) into two linked pages so nothing 
 Both link back to the README and to CLAUDE.md/notes.md for deeper detail. CLAUDE.md section 16 was
 updated so a future session keeps the README a thin on-ramp and puts new reviewer detail in `docs/`.
 Verified every example path the docs reference still exists.
+
+---
+
+## 2026-07-15 -- `infinienv setup`: guided key entry + readiness check
+
+Added a first-run setup command so a new user runs ONE command instead of hand-crafting a `.env`.
+`src/infinienv/setup_env.py` holds the pure, tested pieces -- `parse_env`/`read_env`,
+`merge_env_text` (replaces a key in place, appends new ones, preserves every comment/blank/unrelated
+line, treats a blank value as "keep current"), `write_env_keys`, and `check_environment` (a
+`{name, ok, detail, fix}` checklist over the OpenAI key + OP_KEY alias, the openai/flask/
+claude-agent-sdk packages, and the `claude` CLI on PATH). `cli.py::cmd_setup` is the interactive
+orchestration: hidden `getpass` prompts per managed key (OPENAI_API_KEY; CL_KEY optional), writes
+the `.env`, then prints the readiness checklist with a `fix:` line for each ✗. Non-interactive/
+scriptable via `--no-input --openai-key ... --anthropic-key ... --env-path ...`, and it never hangs
+on `input()` in a non-tty (detects `sys.stdin.isatty()`). The README quickstart now leads with
+`python -m infinienv setup` as step 2 (install -> setup -> gui); docs/cli.md + docs/overview.md +
+CLAUDE.md updated. Tests in `tests/test_setup_env.py` (8, all hermetic). Live-verified the command
+end to end (writes the key, prints an all-OK checklist on this machine).

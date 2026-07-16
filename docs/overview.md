@@ -108,7 +108,8 @@ And the brief's three "why this matters" unlocks, made runnable:
 
 ```text
 src/infinienv/
-├── cli.py                  # generate / validate / solve / play / navigate / benchmark / mutate / curriculum / export-dataset / gui
+├── cli.py                  # setup / generate / validate / solve / play / navigate / benchmark / mutate / curriculum / export-dataset / gui
+├── setup_env.py            # guided .env writer + readiness checklist (the `setup` command)
 ├── schema/                 # SceneSpec (pydantic) + JSON schema, incl. Mechanics/InteractGoal
 ├── llm/                    # provider protocol + mock / openai_agents / openai_responses / anthropic + prompts
 ├── generation/             # compiler (generate->validate->repair->fallback), templates, mutation, curriculum, mechanics_cache

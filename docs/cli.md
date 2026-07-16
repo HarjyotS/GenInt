@@ -8,6 +8,7 @@ SDK by default). The deterministic tools (`validate`/`solve`/`navigate`/`mutate`
 work offline (except `navigate`, which needs a vision key).
 
 ```bash
+python -m infinienv setup                                                 # guided .env + readiness check
 python -m infinienv generate --prompt "..." --seed 42 --out runs/demo   # sandbox agent (Claude SDK)
 python -m infinienv navigate examples/vision_demo.json --out runs/vis    # pixel policy plays it
 python -m infinienv validate examples/kitchen_can.json
@@ -20,6 +21,13 @@ python -m infinienv curriculum --theme warehouse --levels 5 --run --provider moc
 python -m infinienv export-dataset runs/curriculum --out runs/curriculum/dataset.jsonl
 python -m infinienv gui                                                    # local web GUI
 ```
+
+### First-run setup
+
+`infinienv setup` is a guided flow: it prompts for your API keys (hidden input), merges them into a
+project `.env` (preserving any other lines), and prints a readiness checklist covering the OpenAI
+key, the `openai`/`flask`/`claude-agent-sdk` packages, and the `claude` CLI — each with the exact
+`fix` command if it's missing. Scriptable too: `infinienv setup --no-input --openai-key sk-... [--anthropic-key ...] [--env-path PATH]`.
 
 ### No-key quickstart
 

@@ -2326,6 +2326,12 @@ game's own code-defined win. Live-verification recorded in `notes.md`.
 ## 12. CLI reference
 
 ```bash
+# First-run setup: guided .env writer + readiness checklist (src/infinienv/setup_env.py). Prompts
+# for keys (hidden input), merges into ./.env preserving other lines, and checks the OpenAI key +
+# openai/flask/claude-agent-sdk packages + the `claude` CLI, each with a `fix` hint. Scriptable:
+# `infinienv setup --no-input --openai-key sk-... [--anthropic-key ...] [--env-path PATH]`.
+python -m infinienv setup
+
 # `generate` is sandbox-only (section 11): a model writes and runs its own engine code in an
 # isolated per-run workspace copy. Needs an OpenAI key + `pip install -e ".[openai]"`.
 python -m infinienv generate --prompt "..." --seed 42 --out runs/demo [--max-repair-attempts N] \
@@ -2612,6 +2618,12 @@ test_compiler.py                  - --no-fallback raises with the real root caus
 test_cli.py                        - generate/validate/solve write expected artifacts; navigate
                                      (section 11b) with a faked vision policy writes episode.gif/
                                      episode.json/metrics.json and vision_success is code-judged
+test_setup_env.py                  - the `setup` command (src/infinienv/setup_env.py): parse_env
+                                     ignores comments/blanks; merge_env_text replaces a key in place,
+                                     appends a new one, preserves other lines, and treats a blank
+                                     value as no-change; write_env_keys creates+merges;
+                                     check_environment reflects OPENAI_API_KEY/OP_KEY + lists all
+                                     items; `infinienv setup --no-input --openai-key ...` writes .env
 test_prompt_refiner.py             - sandbox prompt enrichment (section 11): mocked OpenAI client
                                      returns enriched text; graceful fallback to the original on
                                      no-key/API-error/empty-output; INFINIENV_REFINER_MODEL override

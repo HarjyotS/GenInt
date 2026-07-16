@@ -21,25 +21,24 @@ Agent SDK** by default.
 pip install -e ".[gui,claude,openai]"
 ```
 
-The Claude sandbox backend drives the `claude` CLI, so it must be installed and logged in:
+### 2. Add your keys (guided)
+
+```bash
+python -m infinienv setup
+```
+
+This asks for your API keys, saves them to a `.env` in the repo root, and prints a readiness
+checklist — telling you exactly what (if anything) still needs installing or logging in. You only
+need an **`OPENAI_API_KEY`**; it powers prompt refinement, the independent faithfulness audit, sprite
+generation (`--assets`), and the `navigate` vision policy.
+
+The Claude sandbox agent (the default) authenticates through the **`claude` CLI**, not an API key. If
+the readiness check flags it, install and log in once:
 
 ```bash
 npm install -g @anthropic-ai/claude-code   # skip if you already have `claude`
 claude login                                # authenticates via your claude.ai account
 ```
-
-### 2. Set up your environment
-
-Create a `.env` in the repo root:
-
-```bash
-OPENAI_API_KEY=sk-...
-```
-
-The Claude sandbox agent authenticates through the `claude` CLI login above — it does **not** read
-an API key. `OPENAI_API_KEY` powers the OpenAI-side pieces: prompt refinement, the independent
-faithfulness audit, sprite generation (`--assets`), and the `navigate` vision policy. A run still
-works without it, just with those steps skipped.
 
 ### 3. Run it
 
