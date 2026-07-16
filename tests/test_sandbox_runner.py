@@ -274,6 +274,37 @@ def test_repair_loop_gives_up_honestly_after_budget_exhausted(tmp_path, patched_
     assert result["metrics"]["outer_sanity_passed"] is False
 
 
+def test_rate_limit_is_retried_without_consuming_a_repair_attempt(tmp_path, patched_sdk, monkeypatch):
+    # A transient model-API rate limit (e.g. OpenAI TPM, "try again in 951ms") should be waited out
+    # and retried in place, NOT treated as a fatal failure that burns the repair budget.
+    from infinienv.sandbox import runner as runner_mod
+
+    Runner = patched_sdk
+    calls: list[str] = []
+
+    async def _noop_sleep(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(runner_mod.asyncio, "sleep", _noop_sleep)  # don't actually wait in the test
+
+    async def fake_run(agent, message, *, run_config, max_turns):
+        calls.append(message)
+        if len(calls) == 1:
+            raise Exception(
+                "Rate limit reached for gpt-5.6-terra on tokens per min (TPM): Limit 500000, "
+                "Used 479156, Requested 28773. Please try again in 951ms."
+            )
+        _write_good_attempt(run_config.sandbox.session.files)
+        return SimpleNamespace(final_output=f"attempt {len(calls)} summary")
+
+    with patch.object(Runner, "run_streamed", _streamed(fake_run)):
+        result = run_sandbox_generation("make a game", 1, str(tmp_path / "run"), max_repair_attempts=0)
+
+    assert len(calls) == 2  # the rate limit was retried once, then succeeded
+    assert result["success"] is True
+    assert result["repair_attempts"] == 0  # the retry did NOT consume the (zero) repair budget
+
+
 def test_repair_loop_succeeds_immediately_without_using_the_repair_budget(tmp_path, patched_sdk):
     Runner = patched_sdk
     attempts: list[str] = []

@@ -313,6 +313,31 @@ def _repair_message(
     )
 
 
+# A model-API rate limit (esp. OpenAI's tokens-per-minute cap) is usually transient -- the error
+# even carries a "try again in Xms" hint -- so it should be waited out and retried, NOT treated as a
+# fatal run failure that burns a repair attempt (which just re-hits the still-saturated limit). These
+# retries are separate from and do not consume the outer repair budget.
+_MAX_RATE_LIMIT_RETRIES = int(os.environ.get("INFINIENV_SANDBOX_RATE_LIMIT_RETRIES", "6"))
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    s = str(exc).lower()
+    return "rate limit" in s or "rate_limit" in s or "tokens per min" in s or " tpm" in s or "429" in s
+
+
+def _rate_limit_backoff_seconds(message: str, attempt: int) -> float:
+    """How long to wait before retrying a rate-limited model call. Prefer the API's own
+    'try again in Xs/Xms' hint (floored to a couple seconds so a sub-second hint still lets a
+    per-minute window meaningfully drain), else exponential backoff; capped at 30s."""
+    import re
+
+    m = re.search(r"try again in ([\d.]+)\s*(ms|s)\b", message, re.IGNORECASE)
+    if m:
+        secs = float(m.group(1)) / 1000.0 if m.group(2).lower() == "ms" else float(m.group(1))
+        return max(2.0, min(secs + 1.0, 30.0))
+    return min(2.0 * (2**attempt), 30.0)
+
+
 async def _run_async(
     prompt: str,
     seed: int,
@@ -467,22 +492,37 @@ async def _run_async(
                 if attempt == 0
                 else f"Repairing against the outer sanity check (attempt {attempt + 1}/{max_repair_attempts + 1})..."
             )
-            try:
-                streamed = Runner.run_streamed(agent, message, run_config=run_config, max_turns=max_turns)
-                async for event in streamed.stream_events():
-                    narration = _describe_stream_event(event)
-                    if narration:
-                        stage(narration)
-                agent_summary = streamed.final_output
-                run_error = None
-            except Exception as exc:
-                # Deliberately not re-raised: the agent conversation not finishing cleanly (e.g.
-                # hitting max_turns) doesn't mean nothing was produced -- whatever partial
-                # artifacts and workspace state exist are still worth extracting, syncing, and
-                # running through the outer sanity check below, rather than discarding all of
-                # that. The failure becomes a repair-loop attempt like any other, not a crash.
-                agent_summary = None
-                run_error = str(exc)
+            agent_summary = None
+            run_error = None
+            for rl in range(_MAX_RATE_LIMIT_RETRIES + 1):
+                try:
+                    streamed = Runner.run_streamed(agent, message, run_config=run_config, max_turns=max_turns)
+                    async for event in streamed.stream_events():
+                        narration = _describe_stream_event(event)
+                        if narration:
+                            stage(narration)
+                    agent_summary = streamed.final_output
+                    run_error = None
+                    break
+                except Exception as exc:
+                    # A transient model-API rate limit is waited out and retried WITHOUT consuming a
+                    # repair attempt (retrying immediately just re-hits the still-saturated limit).
+                    if _is_rate_limit_error(exc) and rl < _MAX_RATE_LIMIT_RETRIES:
+                        wait = _rate_limit_backoff_seconds(str(exc), rl)
+                        stage(
+                            f"Model API rate limit hit; waiting {wait:.0f}s and retrying "
+                            "(not counted as a repair attempt)..."
+                        )
+                        await asyncio.sleep(wait)
+                        continue
+                    # Any other failure (or an exhausted rate-limit budget) is deliberately not
+                    # re-raised: the agent not finishing cleanly (e.g. hitting max_turns) doesn't mean
+                    # nothing was produced -- whatever partial artifacts/workspace state exist are
+                    # still worth extracting, syncing, and sanity-checking. It becomes a repair-loop
+                    # attempt like any other, not a crash.
+                    agent_summary = None
+                    run_error = str(exc)
+                    break
 
             # Same session across attempts -- the sandbox filesystem persists (unlike the
             # agent's conversation memory, which is fresh each Runner.run call), so a repaired

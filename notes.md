@@ -4143,3 +4143,23 @@ suite (run with OPENAI_API_KEY unset) -> 469 passed.
 > image as a **non-root user** (uid 10001, HOME=/home/appuser, owns /app), which sidesteps the root
 > guard entirely (Anthropic's recommended container pattern). Consequence: persist runs/ with a NAMED
 > volume (`-v infinienv_runs:/app/runs`), not a host bind-mount (which the non-root user can't write).
+
+---
+
+## 2026-07-16 -- Sandbox: retry transient model rate limits instead of failing the run
+
+A deployed OpenAI-backend sandbox run failed with all 4 repair attempts burned on an OpenAI TPM
+rate limit ("Rate limit reached for gpt-5.6-terra ... tokens per min (TPM): Limit 500000, Used
+479156 ... try again in 951ms"). Root cause: `sandbox/runner.py` caught the rate-limit exception
+from `Runner.run_streamed`/`stream_events()` as a fatal `run_error`, which failed the attempt; the
+repair loop then immediately retried and re-hit the still-saturated per-minute window, exhausting the
+budget on a sub-second-transient limit. Fix: wrap the agent run in an inner rate-limit backoff-retry
+loop (`_is_rate_limit_error` + `_rate_limit_backoff_seconds`, which prefers the API's own "try again
+in Xms/Xs" hint, floored to ~2s so a per-minute window drains, capped 30s; `_MAX_RATE_LIMIT_RETRIES`
+default 6, env-overridable). A rate limit is now waited out and retried IN PLACE and does NOT consume
+a repair attempt; only a non-rate-limit failure (or an exhausted rate-limit budget) becomes a repair
+attempt as before. Test `test_rate_limit_is_retried_without_consuming_a_repair_attempt` (hermetic:
+first agent call raises a TPM error, retry succeeds, repair_attempts stays 0; asyncio.sleep stubbed).
+Note: the real ceiling is the OpenAI account's TPM tier (500k) -- the sandbox agent's huge system
+prompt burns ~480k/min, so this smooths transient spikes but a sustained over-limit still needs a
+higher tier (or the Claude backend). Only the OpenAI runner is patched (that's where it fired).
