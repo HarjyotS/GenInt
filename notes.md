@@ -4137,7 +4137,9 @@ INFINIENV_GUI_PASSWORD; fly.toml/render.yaml; CLAUDE.md model-default revert; do
 suite (run with OPENAI_API_KEY unset) -> 469 passed.
 
 > Follow-up: the container ran as root, and the `claude` CLI refuses --dangerously-skip-permissions
-> (the sandbox agent's bypassPermissions mode) as root. First fixed by running non-root, then (user
-> confirmed `IS_SANDBOX=1 claude --dangerously-skip-permissions` works) switched to the simpler
-> `ENV IS_SANDBOX=1` in the Dockerfile -- the CLI treats the throwaway container as the sandbox and
-> accepts the flag as root, so the image stays root and a host bind-mount for runs/ works unchanged.
+> (the sandbox agent's bypassPermissions mode) as root. Tried `ENV IS_SANDBOX=1` (waives the root
+> guard for a `claude` invocation directly) -- but it did NOT hold when the Claude Agent SDK spawns
+> the CLI inside the container (same root error persisted). Reverted to the reliable fix: run the
+> image as a **non-root user** (uid 10001, HOME=/home/appuser, owns /app), which sidesteps the root
+> guard entirely (Anthropic's recommended container pattern). Consequence: persist runs/ with a NAMED
+> volume (`-v infinienv_runs:/app/runs`), not a host bind-mount (which the non-root user can't write).
