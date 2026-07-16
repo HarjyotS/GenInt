@@ -4036,3 +4036,23 @@ Agents SDK `Runner` but called `run_sandbox_generation` with no explicit backend
 > `claude-haiku-4-5-20251001` (Haiku 4.5) per the user -- the cheapest/fastest tier as the default for
 > long iterative sandbox runs; Sonnet/Opus remain available via `INFINIENV_SANDBOX_MODEL` or the GUI
 > picker (Haiku is now the first/default entry in `SANDBOX_MODELS["claude"]`).
+
+---
+
+## 2026-07-15 -- README simplified to a GUI quickstart; detail moved to docs/
+
+Per the user, `README.md` was cut from ~454 lines to ~65: just the pitch, the GUI quickstart
+(`pip install -e ".[gui,claude,openai]"` + the `claude` CLI login + a `.env` with `OPENAI_API_KEY`
++ `python -m infinienv gui`), and a "Learn more" links block. The install pulls in everything needed
+to run the GUI with the **Claude Agent SDK** sandbox default (`gui` + `claude` extras) plus `openai`
+(for prompt refinement, the faithfulness audit, `--assets`, and `navigate`). The `.env` only needs
+`OPENAI_API_KEY` -- the Claude backend authenticates via the `claude` CLI's own login, not a key.
+
+The removed detail was relocated (not deleted) into two linked pages so nothing was lost:
+- `docs/overview.md` -- pipeline, the vision-policy loop, faithful sandbox play, the sandbox design,
+  evaluation-criteria mapping + the brief's three unlocks, project layout, limitations.
+- `docs/cli.md` -- every command, run artifacts, runtime providers, extended mechanics, deterministic
+  physics, the asset pipeline (incl. the anonymisation/backoff note), and mutation/curriculum/export.
+Both link back to the README and to CLAUDE.md/notes.md for deeper detail. CLAUDE.md section 16 was
+updated so a future session keeps the README a thin on-ramp and puts new reviewer detail in `docs/`.
+Verified every example path the docs reference still exists.

@@ -2662,10 +2662,14 @@ current environment, say so honestly rather than claiming untested work passes.
 
 ## 16. Documentation
 
-`README.md` must stay reviewer-first: one-paragraph pitch, pipeline diagram, setup, no-key mock
-mode, CLI examples, artifact examples, evaluation-criteria mapping, an honest limitations section.
-A reviewer should understand how to run the project within 60 seconds of opening it. Don't bury
-the demo instructions.
+`README.md` is a deliberately **short quickstart** (kept ~65 lines at the user's request): the
+one-paragraph pitch, the GUI setup (install `.[gui,claude,openai]` + the `claude` CLI login), the
+`.env` step, `python -m infinienv gui`, and a "Learn more" links block. The detail that used to live
+in the README now lives in **`docs/overview.md`** (pipeline, vision loop, sandbox, evaluation-criteria
+mapping, project layout, limitations) and **`docs/cli.md`** (every command, artifacts, providers,
+mechanics, physics, assets, mutation/curriculum/export). Keep the README a fast on-ramp and put new
+reviewer-facing detail in `docs/` (linked), not back into the README as a monolith. A reviewer should
+still understand how to run the project within 60 seconds of opening the README.
 
 When you ship a feature, update, in this order: the code, its tests, `README.md` (if it changes
 what a reviewer would run or see), this file (if it changes an invariant, adds a new
