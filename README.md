@@ -32,10 +32,9 @@ the game's own code). A failed layer feeds concrete evidence back to the same ag
 | *"A procedurally generated cave with uneven terrain, spike hazards, and glowing gems — collect two to unlock the exit"* | <img src="docs/media/procedural_cave2.gif" width="240"> | ✅ built · **independently audited** — layout generated from the seed |
 | *"Create a game of pong against a cpu"* | <img src="docs/media/pong.gif" width="220"> | ✅ built · **independently audited** |
 | *"A warehouse where shelves nearly block the package — exactly one valid path"* | <img src="docs/media/warehouse_path.gif" width="200"> | ✅ built · **independently audited** |
-| *"Make a 2D version of Minecraft"* | <img src="docs/media/mcraft_audit_fail.gif" width="220"> | ❌ **the honesty exhibit**: the agent self-reported success, but the independent audit found a faked mechanic (a placeable-but-unbreakable block) — final verdict **FAILED** |
 
-That last row is the point of the whole design: the harness reports what actually happened, not
-what the model claims.
+The harness reports what actually happened, not what the model claims — a run only earns a ✅ once
+independent checks (and, for the dungeon, an external player) agree.
 
 ## Results (live API, committed summaries)
 
