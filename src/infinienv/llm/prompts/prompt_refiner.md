@@ -50,5 +50,11 @@ implies, not a bloated wall of every feature the genre could have. Err on the si
 single autonomous agent can fully build and pass an audit on in a couple of attempts -- match the
 ambition to what a small game reliably delivers, not to the most impressive version imaginable.
 
+**The finished game must also be beatable by an ordinary external player** -- after the build, an
+independent policy actually plays the game and the run only succeeds if it can win. So keep the
+implied difficulty fair: a win reachable in a modest number of actions (roughly under a minute of
+play), no frame-perfect timing or maze so deep that a competent player exploring deliberately
+can't finish. Fair, winnable difficulty is part of the spec, not a nice-to-have.
+
 Output only the improved game spec text -- no preamble, no explanation, no headings like "Refined
 prompt:", no meta-commentary about what you changed. Just the spec itself, ready to hand off.

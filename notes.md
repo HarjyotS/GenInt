@@ -4252,3 +4252,137 @@ auto; reuse similar cached images; show new generations live.
 
 Tests: smart-auto routing restored, similarity-reuse test, input_json_delta streaming test. Full
 suite -> 474 passed.
+
+---
+
+## 2026-07-17 -- the played-through proof: sandbox is the baseline, and an external player must beat every world
+
+The user graded the project against the GI rubric and made the structural call: **sandbox is the
+baseline mode -- it makes the best environments -- and the verification requirements must genuinely
+apply to it**, not be framed as something it "trades away." The old framing (default path = the
+guarantee, sandbox = the disclosed exception) is retired; the new stance is a layered verification
+stack that every `generate` run must clear, now including the brief's "the agent should be able to
+maneuver through the generated environments" as a hard, harness-enforced gate:
+
+- **`sandbox/vision_runner.py::verify_playthrough`** -- after the outer sanity check AND the audit
+  pass on an attempt, the harness runs the existing faithful vision-play (`_play_async`) against the
+  just-synced workspace: an external vision policy plays the game through `run_scene.make_env()`,
+  seeing only rendered frames, and the run's `success` now REQUIRES it to win (judged by the game's
+  own `info["won"]` -- code truth). Stochasticity handled with `INFINIENV_PLAYTHROUGH_TRIES`
+  (default 2). Wired identically in `runner.py` and `claude_runner.py`, inside the attempt loop, so
+  a loss consumes a repair attempt like any other failed check.
+- **Failure classification matters and is tested**: a loss or a mid-play crash or a missing
+  `make_env` is a DEFECT (repair, with concrete episode evidence -- env actions, blocked count,
+  minimap hint -- via `_repair_message`'s new `playthrough_evidence` branch, which also forbids
+  weakening the win condition); an infra failure (no OPENAI_API_KEY, missing SDK, session error) is
+  a SKIP (`playthrough_attempted: false`, never blocks -- same posture as the auditor).
+  `INFINIENV_SANDBOX_PLAYTHROUGH=0` opts out. Metrics: `playthrough_attempted/won/tries/note` at
+  top level and per `repair_history` entry; the winning `episode.gif` + `vision_metrics.json` stay
+  in the run dir as proof artifacts.
+- **Prompt-side: fair difficulty is part of the spec.** `sandbox_agent.md` gained a "played-through
+  proof" requirement bullet (winnable in ~60 env actions by a competent-but-ordinary player, no
+  frame-perfect timing, expose routing state, `env.step` never crashes -- and do NOT respond by
+  weakening the win condition); `prompt_refiner.md` keeps implied difficulty modest;
+  `checklist_generator.md` always emits an external-playability requirement item. Live-verified
+  immediately: the first fresh run's derived requirements included exactly these items (r14/r17/r18
+  -- safe slime timing, under-a-minute win, full make_env contract) with no per-case prompting.
+- **Docs of record rewritten to the new stance**: CLAUDE.md SS2 ("verification wins" + the
+  four-layer stack: geometry validation, sanity floors, audit, played-through proof), SS11 (new
+  subsection), SS17, SS19, SS20 (tagline: "An agent builds. The harness verifies. A player other
+  than the author must win."); docs/overview.md pipeline + sandbox section likewise. The honest
+  bound is stated plainly: the prover is a stand-in VLM, so this is a sufficiency proof (a won run
+  is definitely playable), not completeness -- a fair-but-hard world can lose twice and go to
+  repair; that's the accepted cost of the strict gate.
+- **CLI/GUI surfacing**: CLI prints the note + a `Playthrough: WON/LOST/not verified` line; GUI got
+  a `play` narration kind, a Playthrough phase in the phase bar, a fourth verdict card, and a third
+  media figure showing the winning episode.gif.
+- **Tests**: 14 new hermetic tests (runner gate: win/loss-repair-with-evidence/persistent-loss/
+  skip/disabled + repair message; `verify_playthrough` unit: disabled/no-key/win/retry-then-win/
+  evidence/make_env-defect/infra-skip/crash-defect; GUI classifier). Suite 474 -> 488 passed.
+
+Also this round, closing the rubric's clarity/working-output gaps (graded ~82/100 before; every
+deficit addressed with real artifacts, not framing):
+
+- **`infinienv demo`** (cli.py) -- the one-command, zero-key demo: solves kitchen_can +
+  push_slide_demo + throw_vase_demo end to end (scene/replay/metrics/render/replay.gif each, so
+  they browse like any run in the GUI gallery), prints a summary, opens the GUI (`--no-gui` to
+  skip). Missing example files skip gracefully. Live-verified with all keys unset: 3/3 solved.
+- **README rebuilt as the reviewer's one-pager**: hero GIFs (committed, optimized), the new thesis
+  paragraph, a showcase table (incl. the mcraft honesty exhibit -- self-reported success, audit
+  found the placeable-but-unbreakable plank, final verdict FAILED, quoted from the run's real
+  audit_findings), live-API results, the zero-key demo first in the quickstart, a 10-minute
+  reviewer tour, and the criteria mapping. `docs/media/` holds five PIL-optimized GIFs (5.2MB
+  total: 420-460px wide, <=90 frames, 128-color): mario_rescue, procedural_cave, pong,
+  warehouse_path, mcraft_audit_fail.
+- **Live results, committed as summaries** (`docs/results/`): real-LLM benchmark
+  (`--provider openai_agents`, 8 prompts: 7/8 valid+solved first try zero repairs, 1 maze fell back
+  after 3 repairs -- recorded, not hidden; 8/8 solved; avg gen 10.0s) in
+  `benchmark_openai_agents.json`; 10 live `navigate` episodes (8/10 code-judged successes; both
+  push-physics episodes honestly failed -- the stand-in policy never discovers shove-by-walking;
+  naive VLM judge agreed 10/10 on these small worlds) in `navigate_episodes.json`; a 28-row
+  `dataset_sample.jsonl` (two 5-level curricula + 10 validated mutations each actually solved + the
+  8 live-LLM benchmark worlds), every row with a per-goal `programmatic_reward`.
+- **Cleanup**: `resolve_out_dir`'s rejection now suggests `runs/<name>` (the /tmp footgun found
+  while grading); docs/cli.md documents `demo` and the previously-orphaned
+  `obstacle_course.json`/`warehouse_key.json`.
+
+[Fresh showcase generations with the playthrough gate live are running as this is written; their
+verdicts get appended below when they land.]
+
+**Live verification of the playthrough gate (runs/showcase_dungeon, 2026-07-17) -- every path fired
+in one run, ending in an HONEST FAILURE.** A fresh knight/two-keys/slime/treasure prompt (Claude
+backend, --assets auto): attempt 1 burned the 60-turn budget on thorough self-testing (the new
+playability requirements visibly drove the agent to step its own make_env() env repeatedly) ->
+recovered by the repair loop with the workspace intact; attempt 2 passed the outer checks but the
+AUDITOR caught a real derived-requirement gap (no arrow-key/WASD mapping on the drivable interface)
+-> repair; attempt 3 passed the audit but LOST the playthrough twice (the policy oscillated,
+total_reward 0.0 despite had_minimap) -> repair with the episode evidence; attempt 4 passed the
+audit and lost the playthrough again -> budget exhausted -> metrics.json records the exact designed
+verdict: sandbox_self_reported_success=true OVERRIDDEN to success=false, playthrough_won=false,
+repair_attempts=3. The model built a valid, audited game no external player could beat, and the
+harness said so.
+
+Three real calibration/root-cause fixes came out of watching it (all live before the re-run):
+1. max_turns 60 -> 80 (the added self-testing needs budget; a forced re-attempt from a turn
+   ceiling wastes ~15 min).
+2. verify_playthrough episode budget 60 -> 100 (INFINIENV_PLAYTHROUGH_MAX_STEPS): the proof
+   demands a WIN, not a speedrun -- a two-key dungeon's direct path is ~40-60 actions, so an
+   exploring player needs headroom. Timed test note: a claude_agent_sdk 2-turn task with the full
+   64KB sandbox prompt appended costs the same as bare (5.5s vs 6.5s) -- prompt caching makes the
+   big system prompt free; the slowness is turns x the agent's own shell/tool work, never
+   per-turn API overhead, and no rate-limit errors appeared in the whole run.
+3. The real routing root cause -- identical loss signature (31 looks / 60 steps / reward 0) across
+   two DIFFERENT world versions meant the constant was the guidance, not the world: in a
+   multi-stage game a STATIC final-goal marker walks the external player into a locked gate it
+   can't pass yet. Fix is generic, in the make_env contract ("the exposed goal cell must be the
+   CURRENT objective -- next key/gem/switch until complete, then the gate/exit; remove an opened
+   gate from the walls set") + a matching hint in _playthrough_evidence when a lost episode had a
+   minimap yet total_reward 0 (covered by a new hermetic test).
+
+**The gate closed green (runs/showcase_dungeon4, 2026-07-17): the first run to clear all four
+layers, including an external policy actually beating the game.** After the Claude-backend runs
+twice exceeded the ~55-min background-execution window mid-run (both reaped; noted, not a code
+bug), the same knight/two-keys/slime prompt on the OpenAI backend (gpt-5.6-terra) went green in ~35
+min: the auditor caught a genuinely subtle SWAP-THROUGH TUNNELING exploit on attempt 1 (knight and
+slime exchange cells in one tick; the final-cell-only collision check missed the pass-through, and
+the recorded winning trace exploited it) -> fixed on repair; attempt 3's playthrough was won on try
+2 -- 58 env actions over 11 looks, "YOU WIN! TREASURE SECURED" on the policy's own final frame,
+metrics.json carrying all four verdicts (outer_sanity/audit/playthrough/deterministic_validation)
+with success gated on the lot. The winning episode.gif is committed (docs/media/dungeon_policy_win
+.gif) as the README flagship: the proof artifact IS the demo.
+
+Two more live-caught fixes landed during the chase, both with hermetic tests:
+- **Grid games must not be action-repeated** (`vision_play._is_grid_game` + hold->1 in main): the
+  driver's frame-skip (`hold=6`, right for continuous platformers) applied to a TURN-BASED grid
+  dungeon lurched the knight 6 cells per decision, slammed a wall every plan (forcing a re-observe
+  after every single action: ~100 vision calls/episode instead of ~17) and made the game
+  unwinnable-by-construction. Auto-detected off the same exposed-cell-state signal the minimap
+  uses; the very next episode dropped to 11 looks and WON.
+- **Retries need variance** (`variation` threaded verify_playthrough -> _play_async -> config ->
+  driver): a deterministic policy on a deterministic game replays the identical losing trajectory
+  (observed: bit-identical -5.9999999999999165 rewards across tries), so retry N now appends a
+  prefer-a-different-route note to the goal text.
+- Also: claude_runner gained transient-failure retries (connection drops don't consume a repair
+  attempt -- observed "API Error: Connection closed mid-response" burning one), and
+  _playthrough_evidence gained the instant-death/safe-spawn hint (observed a slime killing the
+  player in 5 actions from spawn, twice, deterministically).

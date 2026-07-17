@@ -57,31 +57,45 @@ which parts and why), not as a second source of truth.
 These hold at every stage of the project, past, present, and future, regardless of how much the
 system grows:
 
-- **The validator wins.** The LLM may propose a scene, repair a scene, mutate a scene, or define
-  new mechanics for a scene. But schema validation, object placement, collision checks, bounds
-  checks, reachability, pathfinding, inventory transitions, goal completion, and scoring are
-  always deterministic and testable. If model output and deterministic validation conflict, the
-  validator wins, full stop.
-- **Sandbox is the only `generate` mode, and the deterministic engine is its substrate — including
-  running the real validator on every sandbox scene.** As of the user's explicit decision, `generate`
-  *only* runs section 11's sandbox agent (a plain `generate --prompt ...`; `--sandbox` is an accepted
-  no-op, and there is no non-sandbox `generate` path). The deterministic engine is *not* deleted — it
-  can't be: `build_workspace_dir` copies `schema/engine/navigation/validation/render/assets` into
-  every workspace (the agent imports them), and the outer check runs the **real deterministic
-  validator** (`validation/validator.py::validate_scene`) on the sandbox's `scene.json`, enforcing the
-  vocabulary-agnostic geometry checks (`OUT_OF_BOUNDS`, `DUPLICATE_ID` — a real bug for any mechanics)
-  and recording the rest in `metrics.json`'s `deterministic_validation`. So sandbox runs *do* have the
-  validator's checks, not "traded away." The one thing that genuinely can't transfer is fixed-
-  vocabulary **solvability** — the A*/symbolic planner can't play a game the agent wrote in its own
-  code — so that's covered by the outer image check + the independent faithfulness audit + the agent's
-  own trace invariants instead of a planner guarantee, every affected run labeled `"source":
-  "sandbox"` so nothing is pretended. The deterministic path's guarantees still live on in the
-  *tooling*: `validate`/`solve`/`mutate`/`curriculum`/`benchmark`/`export-dataset` still run the fixed-
-  vocabulary validator + solver over any scene (e.g. `examples/*.json`), which is the code-defined-
-  truth / programmatic-reward machinery — kept deliberately, since it's what best matches the brief's
-  "code-level objectives beat a VLM" claim. See section 11 and `notes.md` for the full history (two
-  earlier rounds where model-authored code was proposed and declined, then chosen, then made the
-  default, then made the only mode).
+- **Verification wins.** The model may propose a scene, repair a scene, mutate a scene, define new
+  mechanics, or (in the baseline sandbox mode) write the whole game's code — but whether a run
+  *succeeded* is always decided by code and independent checks, never by the generating model's
+  say-so and never by a VLM eyeballing pixels. On the fixed-vocabulary paths that means the
+  deterministic validator: schema validation, object placement, collision checks, bounds checks,
+  reachability, pathfinding, inventory transitions, goal completion, and scoring are deterministic
+  and testable, and if model output and deterministic validation conflict, the validator wins, full
+  stop. On the sandbox baseline it means the layered verification stack in the next bullet.
+- **Sandbox is the baseline `generate` mode — it makes the best environments — and the verification
+  requirements genuinely apply to it.** As of the user's explicit decision, `generate` *only* runs
+  section 11's sandbox agent (a plain `generate --prompt ...`; `--sandbox` is an accepted no-op, and
+  there is no non-sandbox `generate` path). A sandbox run may only claim `success` after clearing
+  **four independent verification layers**, each owned by the harness, none skippable by the agent:
+  1. **Deterministic geometry validation** — the outer check runs the **real deterministic
+     validator** (`validation/validator.py::validate_scene`) on the sandbox's `scene.json`,
+     enforcing the vocabulary-agnostic geometry codes (`OUT_OF_BOUNDS`, `DUPLICATE_ID` — a real bug
+     for any mechanics) and recording the full verdict in `metrics.json`'s
+     `deterministic_validation`. The engine is the sandbox's substrate — `build_workspace_dir`
+     copies `schema/engine/navigation/validation/render/assets` into every workspace.
+  2. **Artifact/motion sanity floors** — real, decodable, multi-frame images; the no-teleport
+     motion floor over the replay trace (`outer_sanity_check`).
+  3. **The independent faithfulness audit** — a separate LLM instance, no shared context with the
+     author, verifies every derived requirement is genuinely implemented, reading the code as text
+     (never executing it).
+  4. **The played-through proof** — an EXTERNAL vision policy plays the game through
+     `run_scene.make_env()` (seeing only rendered frames) and must actually *beat* it, win judged
+     by the game's own code (`info["won"]`). Fixed-vocabulary solvability can't transfer to
+     agent-authored gameplay (the A* planner can't play a game the agent wrote), so the sandbox
+     replaces that *analytic* guarantee with this *empirical* one: every successful world was
+     provably playable and beaten by a player other than its author. See section 11's
+     played-through-proof subsection.
+  A failed layer feeds the same repair loop; every run is labeled `"source": "sandbox"` and carries
+  all four verdicts side by side in `metrics.json`, so nothing is pretended. The fixed-vocabulary
+  machinery also lives on as first-class *tooling*: `validate`/`solve`/`mutate`/`curriculum`/
+  `benchmark`/`export-dataset` still run the deterministic validator + solver over any scene (e.g.
+  `examples/*.json`) — the code-defined-truth / programmatic-reward machinery that matches the
+  brief's "code-level objectives beat a VLM" claim. See section 11 and `notes.md` for the full
+  history (model-authored code proposed and declined twice, then chosen, then made the default,
+  then made the only mode, then brought under the full verification stack).
 - **Movement and physics stay deterministic code, not per-step LLM calls — outside sandbox mode.**
   The model plans task *semantics* (which goals exist, what a custom interaction's effects are);
   A* pathfinding and the primitive action executor (`engine/actions.py`) are always plain Python,
@@ -1160,9 +1174,8 @@ after the fact from the finished artifacts.
 
 ### What a run's `metrics.json` looks like
 
-Sandbox runs are labeled `"source": "sandbox"` and carry both verdicts side by side, so a
-reviewer can immediately tell which guarantee (if any) applies and where the two checks agreed or
-disagreed:
+Sandbox runs are labeled `"source": "sandbox"` and carry every layer's verdict side by side, so a
+reviewer can immediately tell which checks ran and where they agreed or disagreed:
 
 ```json
 {
@@ -1170,17 +1183,72 @@ disagreed:
   "success": true, "sandbox_self_reported_success": true,
   "outer_sanity_passed": true, "outer_sanity_error": null,
   "audited": true, "audit_passed": true, "audit_findings": null,
+  "playthrough_attempted": true, "playthrough_won": true, "playthrough_tries": 1,
+  "playthrough_note": "an external vision policy beat the game on try 1/2 (38 env actions, 7 looks)",
   "deterministic_validation": {"ran": true, "valid": false, "errors": ["UNSOLVABLE"], "enforced_codes": ["DUPLICATE_ID", "OUT_OF_BOUNDS"]},
   "missing_artifacts": [], "repair_attempts": 0,
-  "repair_history": [{"attempt": 0, "run_error": null, "outer_sanity_passed": true, "outer_sanity_error": null, "audited": true, "audit_passed": true, "audit_findings": null, "missing_artifacts": []}]
+  "repair_history": [{"attempt": 0, "run_error": null, "outer_sanity_passed": true, "outer_sanity_error": null, "audited": true, "audit_passed": true, "audit_findings": null, "playthrough_attempted": true, "playthrough_won": true, "playthrough_note": "...", "missing_artifacts": []}]
 }
 ```
 
-`success` is `true` only if both the artifact set is complete and the outer sanity check passes
-(and, if the agent conversation itself failed, `success` is always `false` regardless of what
-partial artifacts exist). CLI output for `--sandbox` prints the sandbox agent's own summary and
-the kept workspace path, distinctly from the normal `generate` progress output, so a reviewer
-never confuses a sandbox run's report for a validator-guaranteed one.
+`success` is `true` only if the artifact set is complete, the outer sanity check passes, the audit
+passes, and — when it could run — the played-through proof is won (and, if the agent conversation
+itself failed, `success` is always `false` regardless of what partial artifacts exist). CLI output
+for `--sandbox` prints the sandbox agent's own summary, the playthrough verdict, and the kept
+workspace path, distinctly from the normal `generate` progress output, so a reviewer never
+confuses a sandbox run's report for a validator-guaranteed one.
+
+### The played-through proof: an external policy must beat the game (2026-07-17)
+
+The user's directive that finished this stack: sandbox is the *baseline* mode — it makes the best
+environments — so the verification requirements must genuinely apply to it, including the brief's
+"the agent should be able to maneuver through the generated environments." Self-play alone can't
+prove that (the author animating its own hero is exactly the failure §11's history documents), so
+after the outer sanity check **and** the audit pass, the harness runs the faithful vision-play
+(`sandbox/vision_runner.py::verify_playthrough` → the existing `_play_async` driver) against the
+just-synced workspace: an **external vision policy** — no shared context with the author — plays
+the game through `run_scene.make_env()`, seeing only rendered frames, and the run's `success` now
+**requires it to actually win**, judged by the game's own `info["won"]` (code truth, the same
+§2/§11b invariant as everywhere else).
+
+- **Variance handling**: the stand-in policy is stochastic, so it gets `INFINIENV_PLAYTHROUGH_TRIES`
+  (default 2) episodes before a loss is declared, each with a `INFINIENV_PLAYTHROUGH_MAX_STEPS`
+  (default 100) env-action budget — deliberately above the ~40-60-action direct path the prompt
+  asks worlds to have, because the proof demands a *win*, not a speedrun, and an ordinary player
+  explores. A won episode's `episode.gif` + `vision_metrics.json` are kept in the run dir — the
+  proof is itself a demo artifact.
+- **Multi-stage games need a dynamic goal marker** (live-caught): a static final-goal cell walks
+  the external player into a locked gate it can't pass yet — identical loss signatures across two
+  different world versions of a two-key dungeon traced to exactly this. The `make_env` contract
+  (`sandbox_agent.md`) now requires the exposed `env.goal` to be the *current* objective (next
+  key/gem/switch until complete, then the gate/exit, removing an opened gate from the walls set),
+  and `_playthrough_evidence` teaches this fix whenever a lost episode had a minimap yet zero
+  total reward.
+- **A loss is a repairable defect, with evidence.** The repair message (`_repair_message`'s
+  `playthrough_evidence` branch) hands the author the concrete episode facts — env actions used,
+  blocked-move count, whether the game crashed mid-play, whether it exposed routing state — plus
+  the instruction to fix *playability* (a correct/complete `make_env`, fair difficulty, routing
+  info exposed) and explicitly **not** to weaken the win condition. A missing/broken `make_env` is
+  classified as a defect (repair), not an infra skip.
+- **Infra-skip posture mirrors the auditor**: a playthrough that *couldn't run* (no
+  `OPENAI_API_KEY`, missing SDK, session failure) records `playthrough_attempted: false` + note
+  and never fails the run — a run is never failed because the checker couldn't run. Opt-out:
+  `INFINIENV_SANDBOX_PLAYTHROUGH=0`.
+- **Both backends share it** (wired identically in `runner.py` and `claude_runner.py`, inside the
+  attempt loop so a loss consumes a repair attempt like any other failed check); the isolation
+  invariant is untouched — the play happens *inside* a fresh sandbox session and the trusted
+  process reads back only `episode.gif`/`vision_metrics.json`.
+- **The prompts make fair difficulty part of the spec**: `sandbox_agent.md` requires the game be
+  winnable by a competent-but-ordinary player within ~60 env actions (no frame-perfect timing) and
+  names the playthrough as a hard gate; `prompt_refiner.md` keeps implied difficulty modest;
+  `checklist_generator.md` always emits an external-playability requirement item, so the auditor
+  covers it too.
+- **Honest bounds**: the prover is a stand-in VLM policy, so this is a *sufficiency* proof (a won
+  run is definitely playable), not a completeness one — a fair-but-hard world can lose twice and
+  be sent to repair. That's an accepted, disclosed cost of the strict gate; the tries knob and the
+  difficulty guidance are the mitigations. Hermetic coverage in `test_sandbox_runner.py`
+  (win/loss/persistent-loss/skip/disabled + the repair message) and `test_vision_play.py`
+  (`verify_playthrough`'s classification of win, retry-then-win, defect-vs-infra failures).
 
 ### Live verification (see `notes.md` for the full account)
 
@@ -1286,7 +1354,10 @@ agent's summary: extracted frames show the submarine's health dropping from 5 to
 contact) and the same anemone in genuinely different bloom states between frames.
 
 Separately, `sandbox/runner.py`'s `max_turns` default was bumped from 40 to 60 (the original
-bug-report run had already hit the 40-turn ceiling once on its first attempt).
+bug-report run had already hit the 40-turn ceiling once on its first attempt), then 60 to 80 on
+2026-07-17 after the played-through-proof requirements measurably increased per-run self-testing
+(a live run's agent burned the 60-turn budget largely on stepping its own `make_env()` interface
+to verify external playability — the right behavior, needing a bigger budget).
 
 ### Grounded-character physics: `engine/platformer_physics.py` (2026-07-09)
 
@@ -2350,13 +2421,15 @@ python -m infinienv solve examples/kitchen_can.json --out runs/demo
 python -m infinienv navigate examples/kitchen_can.json --out runs/vision_demo \
   [--vision-backend {openai,claude}] [--model M] [--max-steps N] [--assets ...] [--no-judge]
 
-  # --- generate (sandbox only): model-authored engine code in an isolated per-run copy.
+  # --- generate (sandbox baseline): model-authored engine code in an isolated per-run copy.
   # ignores --provider/--no-fallback (no LLM-repair-agent path or fallback-template path to
   # apply them to); --assets applies the same as any other run, resolved inside the sandbox
   # workspace via a copy of assets/resolver.py; --max-repair-attempts here means repair
-  # attempts against the outer sanity check (default 2), not the LLM repair agent; trades
-  # away the validator-guaranteed solvability check every other run has -- see metrics.json's
-  # outer_sanity_* fields. By default a best-effort LLM step first expands the raw prompt into a
+  # attempts against the whole verification stack (default 3): the outer sanity check +
+  # deterministic geometry validation, the independent faithfulness audit, AND the
+  # played-through proof (an external vision policy must beat the game; see metrics.json's
+  # outer_sanity_* / audit_* / playthrough_* fields and section 11).
+  # By default a best-effort LLM step first expands the raw prompt into a
   # fuller build spec handed to the agent (--no-refine-prompt disables it; both the original and
   # refined prompt are recorded in metrics.json). See section 11's prompt-enrichment subsection.
   # INFINIENV_SANDBOX_BACKEND selects the agent runtime: claude (DEFAULT, Anthropic's Claude Agent
@@ -2372,6 +2445,12 @@ python -m infinienv navigate examples/kitchen_can.json --out runs/vision_demo \
   # INFINIENV_SANDBOX_AUDITOR_MODEL overrides its model. Best-effort (no OpenAI key -> skipped,
   # audited=false); records audited/audit_passed/audit_findings in metrics.json. See section 11's
   # faithfulness-auditor subsection.
+  # After the audit passes, the PLAYED-THROUGH PROOF runs: an external vision policy plays the
+  # game through run_scene.make_env() and success requires it to WIN (judged by the game's own
+  # info["won"]). A loss feeds the repair loop with concrete episode evidence; a checker that
+  # can't run (no key) records playthrough_attempted=false and never blocks.
+  # INFINIENV_SANDBOX_PLAYTHROUGH=0 disables; INFINIENV_PLAYTHROUGH_TRIES (default 2) sets the
+  # episodes the stochastic policy gets. The winning episode.gif is kept in the run dir.
 
 python -m infinienv validate runs/demo/scene.json
 python -m infinienv solve runs/demo/scene.json [--out runs/demo]
@@ -2598,7 +2677,14 @@ test_vision_play.py         - faithful vision-play (section 11b), hermetic (fake
                               plan via info + is fed back to the next look (a HUD-changing fake game
                               proving info beats a frame diff); history frames reach the controller;
                               the reference run_scene make_env is import-safe (no generation re-run)
-                              and drivable; play_sandbox_world rejects a non-sandbox dir
+                              and drivable; play_sandbox_world rejects a non-sandbox dir;
+                              verify_playthrough (the played-through proof's checker, section 11):
+                              disabled-env / no-key skips, win, stochastic retry-then-win,
+                              persistent loss carries repair evidence (blocked count + minimap
+                              hint), missing make_env and a mid-play crash are DEFECTS (fail+repair)
+                              while infra failures are skips. The runner-side gate (win required,
+                              loss repairs with evidence, persistent loss fails, skip never blocks)
+                              is in test_sandbox_runner.py
 test_mechanics_cache.py    - persist/reload, no duplication or overwrite on repeated calls
 test_mock_generation.py     - mock provider is deterministic and always valid
 test_assets.py               - scene_asset_types includes wall+agent; none/local/generated
@@ -2695,26 +2781,27 @@ always, for anything non-obvious).
 
 ## 17. Safety and sandboxing
 
-Sandbox mode — where the runtime LLM writes and runs its own code — is now the **default** `generate`
-path (the MVP; see section 11 and the §2 rewrite). The deterministic, no-model-authored-code path is
-opt-in via **`--no-sandbox`**, and on *that* path (section 2's guarantee) the following holds:
+Sandbox mode — where the runtime LLM writes and runs its own code — is the **baseline** `generate`
+path (see section 11 and §2). It's the mode that makes the best environments, and the verification
+requirements genuinely apply to it: an isolated per-run workspace copy (never this repo's real
+source, never another run's workspace), the outer process never importing or executing the
+sandboxed code itself, and the §2 four-layer verification stack — deterministic geometry
+validation, artifact/motion sanity floors, the independent faithfulness audit, and the
+played-through proof (an external vision policy must beat the game, win judged by the game's own
+code) — before any run may claim `success`. Every run is labeled `"source": "sandbox"` with all
+four verdicts recorded in `metrics.json`, so what was and wasn't verified is always visible.
 
-Allowed: emitting `SceneSpec`/mechanics JSON, calling the deterministic read-only/validate-only
-tools (`get_scene_schema`, `get_supported_mechanics`, `get_known_mechanics`, `validate_scene_tool`),
-requesting validation, requesting repair.
-
-Not allowed (on `--no-sandbox`): shell execution from model output, arbitrary file writes from model
-output (`artifacts/writer.py::resolve_out_dir` rejects path traversal outside the working directory),
-importing packages chosen by the model at runtime, unrestricted `eval`/`exec`.
-
-**The default sandbox path is the disclosed trade** (built after two earlier rounds where the idea
-was proposed and declined, then explicitly chosen, then made the default). It lets the model write
-and run real code — scoped to an isolated per-run workspace copy (never this repo's real source,
-never another run's workspace), with the outer process never importing or executing the sandboxed
-code itself, an independent faithfulness auditor reviewing each run, and every affected run labeled
-`"source": "sandbox"` so the lost solvability guarantee is visible, not hidden. Use `--no-sandbox`
-whenever the hard code-defined-truth guarantee matters. See section 11 for the full design and what
-it does and doesn't verify.
+The fixed-vocabulary tools (`validate`/`solve`/`play`/`mutate`/`curriculum`/`benchmark`/
+`export-dataset`) run no model-authored code at all. On those paths the model's role is limited
+to: emitting `SceneSpec`/mechanics JSON, calling the deterministic read-only/validate-only tools
+(`get_scene_schema`, `get_supported_mechanics`, `get_known_mechanics`, `validate_scene_tool`),
+requesting validation, requesting repair. Not allowed there: shell execution from model output,
+arbitrary file writes from model output (`artifacts/writer.py::resolve_out_dir` rejects path
+traversal outside the working directory), importing packages chosen by the model at runtime,
+unrestricted `eval`/`exec`. These paths carry the hard analytic guarantee (validator +
+solvability); the sandbox baseline carries the empirical one (validated geometry + audited
+faithfulness + a beaten playthrough). See section 11 for the full design and what each layer does
+and doesn't verify.
 
 ---
 
@@ -2743,8 +2830,8 @@ vision-based policy eventually replacing the deterministic 2D planner for that p
 ```text
 [ ] README explains the project in under 60 seconds.
 [ ] `pip install -e .` works.
-[ ] `python -m infinienv generate --provider mock ...` works without API keys.
-[ ] `python -m infinienv generate --provider openai_agents ...` works with a real key.
+[ ] The no-key path works: `solve examples/*.json` + the committed example world in the GUI gallery.
+[ ] `python -m infinienv generate --prompt ...` (the sandbox baseline) works with a real key.
 [ ] Invalid scenes produce clear, structured validation errors; repair attempts are recorded.
 [ ] render.png / replay.gif / metrics.json / replay.json are generated and metrics.json is truthful.
 [ ] `--assets local` and `--assets generated` both produce a correctly-scaled, seamless-where-
@@ -2753,9 +2840,10 @@ vision-based policy eventually replacing the deterministic 2D planner for that p
 [ ] benchmark mode runs over multiple prompts; mutate/curriculum --run/export-dataset all work.
 [ ] At least one scene exercises section 5's extended mechanics end-to-end (validated, solved,
     replayed), ideally live-verified against a prompt with no exact hand-authored precedent.
-[ ] `--sandbox` mode (section 11) live-verified end-to-end at least once: agent-edited workspace
-    actually synced back (not just the pre-run copy), outer sanity check runs and its verdict is
-    recorded alongside the agent's own self-report in metrics.json.
+[ ] `generate` (section 11) live-verified end-to-end at least once: agent-edited workspace
+    actually synced back (not just the pre-run copy), and ALL FOUR verification layers ran with
+    their verdicts recorded in metrics.json — outer sanity + deterministic geometry, the
+    faithfulness audit, and the played-through proof (playthrough_won true, episode.gif kept).
 [ ] `navigate` (section 11b) live-verified once against the real vision API: a pixel-only policy
     plays a scene, `metrics.json` records `vision_success` from `is_goal_complete` (never from
     pixels), `episode.gif` shows real frames, and `vlm_judge_success` is recorded beside it.
@@ -2768,15 +2856,14 @@ vision-based policy eventually replacing the deterministic 2D planner for that p
 
 ## 20. Framing
 
-> InfiniEnv is a verified environment factory. It compiles natural language into structured,
-> playable worlds — including worlds with mechanics the model defined itself, expressed as safe,
-> validated data rather than code; repairs invalid generations using deterministic validator
-> feedback; mutates successful worlds into infinite variants; and emits replayable proof that an
-> agent can complete code-defined objectives.
+> InfiniEnv is a verified environment factory. An agent builds each world in real code. A layered
+> harness verifies it — deterministic geometry validation, motion/artifact floors, an independent
+> requirements audit. Then a separate pixel-policy must actually **beat the game** before the run
+> may claim success. Success is always decided by code — never by the generating model's say-so,
+> never by a VLM eyeballing pixels.
 
 Avoid framing it as "an LLM makes a game." Use instead:
 
-> A model proposes. The harness verifies. The agent proves.
+> An agent builds. The harness verifies. A player other than the author must win.
 
-That is the core research contribution, and it still holds at every layer this project has grown
-into.
+That is the core research contribution, and it holds at every layer this project has grown into.

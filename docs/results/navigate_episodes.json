@@ -1,0 +1,107 @@
+{
+  "episodes": 10,
+  "code_judged_successes": 8,
+  "note": "success judged by is_goal_complete over game state, never by pixels; vlm_judge_success is a naive final-frame VLM verdict recorded for contrast",
+  "runs": [
+    {
+      "world": "kitchen_can",
+      "episode": 1,
+      "vision_success_code_judged": true,
+      "vlm_judge_success": true,
+      "judge_agrees_with_code": true,
+      "steps": 15,
+      "max_steps": 84,
+      "total_reward": 1.0
+    },
+    {
+      "world": "kitchen_can",
+      "episode": 2,
+      "vision_success_code_judged": true,
+      "vlm_judge_success": true,
+      "judge_agrees_with_code": true,
+      "steps": 15,
+      "max_steps": 84,
+      "total_reward": 1.0
+    },
+    {
+      "world": "obstacle_course",
+      "episode": 1,
+      "vision_success_code_judged": true,
+      "vlm_judge_success": true,
+      "judge_agrees_with_code": true,
+      "steps": 18,
+      "max_steps": 84,
+      "total_reward": 1.0
+    },
+    {
+      "world": "obstacle_course",
+      "episode": 2,
+      "vision_success_code_judged": true,
+      "vlm_judge_success": true,
+      "judge_agrees_with_code": true,
+      "steps": 18,
+      "max_steps": 84,
+      "total_reward": 1.0
+    },
+    {
+      "world": "push_slide_demo",
+      "episode": 1,
+      "vision_success_code_judged": false,
+      "vlm_judge_success": false,
+      "judge_agrees_with_code": true,
+      "steps": 120,
+      "max_steps": 120,
+      "total_reward": 0.0
+    },
+    {
+      "world": "push_slide_demo",
+      "episode": 2,
+      "vision_success_code_judged": false,
+      "vlm_judge_success": false,
+      "judge_agrees_with_code": true,
+      "steps": 120,
+      "max_steps": 120,
+      "total_reward": 0.0
+    },
+    {
+      "world": "vision_demo",
+      "episode": 1,
+      "vision_success_code_judged": true,
+      "vlm_judge_success": true,
+      "judge_agrees_with_code": true,
+      "steps": 7,
+      "max_steps": 40,
+      "total_reward": 1.0
+    },
+    {
+      "world": "vision_demo",
+      "episode": 2,
+      "vision_success_code_judged": true,
+      "vlm_judge_success": true,
+      "judge_agrees_with_code": true,
+      "steps": 7,
+      "max_steps": 40,
+      "total_reward": 1.0
+    },
+    {
+      "world": "warehouse_key",
+      "episode": 1,
+      "vision_success_code_judged": true,
+      "vlm_judge_success": true,
+      "judge_agrees_with_code": true,
+      "steps": 58,
+      "max_steps": 168,
+      "total_reward": 2.0
+    },
+    {
+      "world": "warehouse_key",
+      "episode": 2,
+      "vision_success_code_judged": true,
+      "vlm_judge_success": true,
+      "judge_agrees_with_code": true,
+      "steps": 43,
+      "max_steps": 168,
+      "total_reward": 2.0
+    }
+  ]
+}

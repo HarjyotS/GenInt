@@ -29,6 +29,7 @@ does that mapping defensively so it works regardless of entry point.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -61,6 +62,27 @@ from infinienv.sandbox.workspace import (
 )
 
 DEFAULT_SANDBOX_CLAUDE_MODEL = "claude-sonnet-5"
+
+# Transient infrastructure failures (a dropped connection, an overloaded upstream) should be
+# retried in place WITHOUT consuming a repair attempt -- the workspace persists, so a fresh
+# conversation resumes from the same files, exactly like the OpenAI runner's rate-limit retries
+# (`runner._MAX_RATE_LIMIT_RETRIES`). Observed live: "API Error: Connection closed mid-response"
+# ended a conversation whose result the SDK then surfaced as an error, burning an attempt on
+# network noise.
+_MAX_TRANSIENT_RETRIES = int(os.environ.get("INFINIENV_SANDBOX_TRANSIENT_RETRIES", "2"))
+
+
+def _is_transient_error(text: str | None) -> bool:
+    if not text:
+        return False
+    s = text.lower()
+    return any(
+        marker in s
+        for marker in (
+            "connection closed", "connection reset", "connection error", "timed out",
+            "overloaded", "rate limit", "rate_limit", "529", "503",
+        )
+    )
 
 # Claude Code tool names -> how to narrate them, mirroring runner.py's `_describe_*` for the
 # OpenAI backend (announce the intent -- a command, or the files touched -- never a diff).
@@ -303,6 +325,9 @@ async def _run_async(
     audit_note: str | None = None
     missing: list[str] = list(ARTIFACT_FILES)
     repair_history: list[dict] = []
+    playthrough: dict = {
+        "attempted": False, "won": None, "tries": 0, "note": "not reached", "evidence": None,
+    }
     message = f"Seed: {seed}\nTask: {prompt}\nAssets mode: {assets_mode}\n{_interpreter_briefing()}{_todo_brief()}"
 
     for attempt in range(max_repair_attempts + 1):
@@ -313,21 +338,46 @@ async def _run_async(
         )
         agent_summary = None
         run_error = None
-        tool_names: dict[str, str] = {}  # tool_use_id -> tool name, so a result knows its source
-        try:
-            async for msg in query(prompt=message, options=options):
-                _describe_claude_message(msg, stage=stage, tool_names=tool_names)
-                if isinstance(msg, ResultMessage):
-                    result = getattr(msg, "result", None)
-                    if isinstance(result, str) and result.strip():
-                        agent_summary = result
-                    if getattr(msg, "is_error", False) and run_error is None:
-                        run_error = f"agent result reported an error (subtype={getattr(msg, 'subtype', None)})"
-        except Exception as exc:
-            # Same posture as the OpenAI backend: a conversation that doesn't finish cleanly (turn
-            # budget, transport error) still leaves whatever files it produced on disk -- extract
-            # and sanity-check them, record the failure as a repair attempt, never crash.
-            run_error = str(exc)
+        for rl in range(_MAX_TRANSIENT_RETRIES + 1):
+            agent_summary = None
+            run_error = None
+            transient = {"seen": False}
+
+            def _stage_watching_for_transients(m: str) -> None:
+                # The CLI surfaces a mid-conversation transport drop as an assistant text line
+                # ("API Error: Connection closed mid-response...") rather than in the exception it
+                # then raises -- so watch the narration for the transient evidence too.
+                if _is_transient_error(m):
+                    transient["seen"] = True
+                stage(m)
+
+            tool_names: dict[str, str] = {}  # tool_use_id -> tool name, so a result knows its source
+            try:
+                async for msg in query(prompt=message, options=options):
+                    _describe_claude_message(msg, stage=_stage_watching_for_transients, tool_names=tool_names)
+                    if isinstance(msg, ResultMessage):
+                        result = getattr(msg, "result", None)
+                        if isinstance(result, str) and result.strip():
+                            agent_summary = result
+                        if getattr(msg, "is_error", False) and run_error is None:
+                            run_error = f"agent result reported an error (subtype={getattr(msg, 'subtype', None)})"
+            except Exception as exc:
+                # Same posture as the OpenAI backend: a conversation that doesn't finish cleanly (turn
+                # budget, transport error) still leaves whatever files it produced on disk -- extract
+                # and sanity-check them, record the failure as a repair attempt, never crash.
+                run_error = str(exc)
+            if (
+                run_error is not None
+                and (transient["seen"] or _is_transient_error(run_error))
+                and rl < _MAX_TRANSIENT_RETRIES
+            ):
+                stage(
+                    f"Transient connection/API failure ({run_error}); retrying in place with the "
+                    "same workspace (not counted as a repair attempt)..."
+                )
+                await asyncio.sleep(5 * (rl + 1))
+                continue
+            break
 
         # The agent wrote directly into workspace_dir (cwd); copy the five artifacts to out_dir.
         # Persistent across attempts (built once before the loop) so a repair attempt genuinely
@@ -368,6 +418,26 @@ async def _run_async(
             else:
                 stage(f"Auditor: skipped, run NOT independently audited ({audit_note}).")
 
+        # The played-through proof -- identical to the OpenAI backend (see sandbox/runner.py): an
+        # EXTERNAL vision policy must beat the game before the run may claim success. The play
+        # happens inside a fresh OpenAI-SDK sandbox session hydrated from workspace_dir on disk
+        # (the Claude agent edited it in place), so the isolation posture is unchanged.
+        playthrough = {
+            "attempted": False, "won": None, "tries": 0,
+            "note": "not reached (an earlier check failed)", "evidence": None,
+        }
+        if run_error is None and sane and not missing and audit_passed:
+            from infinienv.sandbox.vision_runner import verify_playthrough
+
+            playthrough = await verify_playthrough(out_dir, on_stage=stage)
+            if playthrough["attempted"] and playthrough["won"]:
+                stage(f"Playthrough proof PASSED: {playthrough['note']}.")
+            elif playthrough["attempted"]:
+                stage(f"Playthrough proof FAILED: {playthrough['note']}.")
+            else:
+                stage(f"Playthrough proof skipped, not verified ({playthrough['note']}).")
+        playthrough_ok = (not playthrough["attempted"]) or bool(playthrough["won"])
+
         repair_history.append(
             {
                 "attempt": attempt,
@@ -378,17 +448,25 @@ async def _run_async(
                 "audit_passed": audit_passed,
                 "audit_findings": audit_findings,
                 "audit_note": audit_note,
+                "playthrough_attempted": playthrough["attempted"],
+                "playthrough_won": playthrough["won"],
+                "playthrough_note": playthrough["note"],
                 "missing_artifacts": missing,
             }
         )
 
-        if run_error is None and sane and not missing and audit_passed:
+        if run_error is None and sane and not missing and audit_passed and playthrough_ok:
             if audited:
                 stage(f"Attempt {attempt + 1} passed the outer sanity check and the faithfulness audit.")
             else:
                 stage(f"Attempt {attempt + 1} passed the outer sanity check (audit skipped, not verified).")
             break
-        fail_reason = audit_findings if (audited and not audit_passed) else sanity_error
+        if audited and not audit_passed:
+            fail_reason = audit_findings
+        elif playthrough["attempted"] and not playthrough["won"]:
+            fail_reason = playthrough["evidence"]
+        else:
+            fail_reason = sanity_error
         if attempt >= max_repair_attempts:
             stage(f"Attempt {attempt + 1} failed and the repair budget is exhausted: {fail_reason}")
             break
@@ -397,12 +475,18 @@ async def _run_async(
             message = _repair_message(
                 run_error=None, sanity_error=None, audit_findings=audit_findings, open_todo=open_todo
             )
+        elif playthrough["attempted"] and not playthrough["won"]:
+            message = _repair_message(
+                run_error=None, sanity_error=None,
+                playthrough_evidence=playthrough["evidence"], open_todo=open_todo,
+            )
         else:
             message = _repair_message(
                 run_error=run_error, sanity_error=sanity_error, open_todo=open_todo
             )
 
-    success = not missing and sane and run_error is None and audit_passed
+    playthrough_ok = (not playthrough["attempted"]) or bool(playthrough["won"])
+    success = not missing and sane and run_error is None and audit_passed and playthrough_ok
 
     metrics_path = os.path.join(out_dir, "metrics.json")
     metrics: dict = {}
@@ -426,6 +510,10 @@ async def _run_async(
             "audit_passed": audit_passed,
             "audit_findings": audit_findings,
             "audit_note": audit_note,
+            "playthrough_attempted": playthrough["attempted"],
+            "playthrough_won": playthrough["won"],
+            "playthrough_tries": playthrough["tries"],
+            "playthrough_note": playthrough["note"],
             "requirements": read_requirements(workspace_dir),
             "requirements_note": checklist_result.note,
             "build_plan": read_plan(workspace_dir),

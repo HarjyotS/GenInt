@@ -107,6 +107,7 @@ async def _play_async(
     history: int,
     judge: bool,
     on_stage: Callable[[str], None] | None,
+    variation: int = 0,
 ) -> dict:
     def stage(msg: str) -> None:
         if on_stage is not None:
@@ -133,7 +134,7 @@ async def _play_async(
         driver_bytes = f.read()
     config_bytes = json.dumps(
         {"goal": goal, "model": model, "max_steps": max_steps, "judge": judge,
-         "hold": hold, "plan_len": plan_len, "history": history}
+         "hold": hold, "plan_len": plan_len, "history": history, "variation": variation}
     ).encode("utf-8")
     workspace_tar = _tar_workspace_with(
         workspace_src, {"vision_play.py": driver_bytes, "vision_config.json": config_bytes}
@@ -206,6 +207,170 @@ async def _play_async(
     verdict = "SUCCESS" if metrics.get("vision_success") else "did not reach the goal"
     stage(f"Result: {verdict} in {metrics.get('steps')} steps (code-judged by the game's own win).")
     return metrics
+
+
+# --- The played-through proof (§11): after a sandbox attempt passes the sanity check and the
+# audit, an EXTERNAL vision policy must actually beat the game before the run may claim success.
+# Win is judged by the game's own code (info["won"]) -- code truth, never the generating agent's
+# say-so. Opt-out via INFINIENV_SANDBOX_PLAYTHROUGH=0; tries via INFINIENV_PLAYTHROUGH_TRIES.
+
+PLAYTHROUGH_ENV = "INFINIENV_SANDBOX_PLAYTHROUGH"
+
+# Substrings in a failure that mean the CHECKER couldn't run (auth/install/infrastructure), as
+# opposed to the game being genuinely unbeatable/broken under external play. Mirrors the auditor's
+# posture: a run is never failed because the checker couldn't run.
+_INFRA_MARKERS = ("api_key", "openai_api_key", "authentication", "not installed", "no auth")
+
+
+def playthrough_enabled() -> bool:
+    return os.environ.get(PLAYTHROUGH_ENV, "1").strip().lower() not in ("0", "off", "false", "no")
+
+
+def playthrough_tries() -> int:
+    try:
+        return max(1, int(os.environ.get("INFINIENV_PLAYTHROUGH_TRIES", "2")))
+    except ValueError:
+        return 2
+
+
+def _playthrough_evidence(metrics: dict) -> str:
+    """A concrete, repair-actionable summary of a lost episode, built from the driver's own
+    vision_metrics.json -- what the repair prompt hands back to the generating agent."""
+    parts = [
+        f"the policy played {metrics.get('env_steps')} env actions over "
+        f"{metrics.get('decisions')} looks and did not reach the game's win condition",
+        f"{metrics.get('blocked_steps')} of those actions were blocked (didn't move the player)",
+        f"total reward {metrics.get('total_reward')}",
+    ]
+    if metrics.get("episode_error"):
+        parts.append(f"the game errored during play: {metrics['episode_error']}")
+    env_steps, reward = metrics.get("env_steps"), metrics.get("total_reward")
+    if isinstance(env_steps, int) and env_steps <= 10 and isinstance(reward, (int, float)) and reward < 0:
+        # The episode ended almost immediately with a penalty: the player died within moments of
+        # spawning -- a hazard is lethal right at the start, which no ordinary player survives.
+        parts.append(
+            "the game ended after only a few actions with a NEGATIVE reward -- the player died "
+            "almost immediately after spawning; make sure no hazard can reach or kill an ordinary "
+            "player within the first several actions from spawn (safe spawn area, hazard "
+            "routes/timing that give a new player room to react)"
+        )
+    if metrics.get("had_minimap") is False:
+        parts.append(
+            "the game exposed NO grid state (walls/walkable/position/goal), so the policy had no "
+            "minimap to route on -- expose those via env attributes / step info per the make_env "
+            "contract"
+        )
+    elif not metrics.get("total_reward"):
+        # It had a minimap yet never advanced a single objective: the classic cause is a STATIC
+        # final-goal marker in a multi-stage game (the map routes the player into a locked
+        # gate/exit it can't pass yet). The fix is a dynamic env.goal = the current objective.
+        parts.append(
+            "despite a minimap, no objective ever advanced -- if the game is multi-stage "
+            "(keys/gems/switches before an exit), make the exposed env.goal point at the CURRENT "
+            "objective (the next key/gem/switch) and only at the gate/exit once it's unlocked, "
+            "and remove an opened gate from the walls set"
+        )
+    return "; ".join(str(p) for p in parts)
+
+
+async def verify_playthrough(
+    out_dir: str,
+    *,
+    on_stage: Callable[[str], None] | None = None,
+    tries: int | None = None,
+    max_steps: int | None = None,
+) -> dict:
+    """Run the played-through proof against the sandbox run in `out_dir` (its synced
+    `sandbox_workspace/`), giving the stochastic stand-in policy up to `tries` episodes to win.
+
+    Returns `{attempted, won, tries, note, evidence}`:
+    - `attempted=True, won=True`   -> proof passed (episode.gif + vision_metrics.json kept).
+    - `attempted=True, won=False`  -> the game ran but couldn't be beaten / broke under external
+      play / has no make_env -- a genuine defect; `evidence` feeds the repair loop.
+    - `attempted=False`            -> the checker itself couldn't run (disabled, no key, missing
+      SDK); never fails the run, `note` records why.
+    """
+    def stage(msg: str) -> None:
+        if on_stage is not None:
+            on_stage(msg)
+
+    if not playthrough_enabled():
+        return {
+            "attempted": False, "won": None, "tries": 0,
+            "note": f"disabled via {PLAYTHROUGH_ENV}", "evidence": None,
+        }
+    if not os.environ.get("OPENAI_API_KEY"):
+        return {
+            "attempted": False, "won": None, "tries": 0,
+            "note": "playthrough checker could not run: no OPENAI_API_KEY for the vision policy",
+            "evidence": None,
+        }
+    tries = playthrough_tries() if tries is None else max(1, tries)
+    if max_steps is None:
+        # 100, not the driver's usual 60: the proof demands a WIN, not a speedrun -- an ordinary
+        # player explores, so the episode budget needs headroom over the ~40-60-action direct path
+        # the prompt asks worlds to have (a live two-key dungeon's direct path alone was ~50).
+        try:
+            max_steps = max(20, int(os.environ.get("INFINIENV_PLAYTHROUGH_MAX_STEPS", "100")))
+        except ValueError:
+            max_steps = 100
+    last_evidence: str | None = None
+    for t in range(tries):
+        stage(f"Playthrough proof: a vision policy is playing this world (try {t + 1}/{tries})...")
+        try:
+            metrics = await _play_async(
+                out_dir, out_dir, model=os.environ.get("INFINIENV_VISION_MODEL", "gpt-5.6-terra"),
+                max_steps=max_steps, hold=6, plan_len=6, history=2, judge=False, on_stage=on_stage,
+                variation=t,  # retries nudge the policy off the previous try's losing route
+            )
+        except ProviderError as exc:
+            msg = str(exc)
+            low = msg.lower()
+            if "make_env" in low:
+                # Not infra: the world lacks the playable interface -- the generating agent's
+                # defect, and concretely repairable.
+                return {
+                    "attempted": True, "won": False, "tries": t + 1, "note": msg,
+                    "evidence": (
+                        "run_scene.py does not expose a working module-level make_env() -- an "
+                        "external policy cannot play this world at all. Implement the make_env "
+                        f"contract (env.actions / reset / step with info['won']): {msg}"
+                    ),
+                }
+            if any(m in low for m in _INFRA_MARKERS):
+                return {
+                    "attempted": False, "won": None, "tries": t + 1,
+                    "note": f"playthrough checker could not run: {msg}", "evidence": None,
+                }
+            # The driver started but the game broke under external play -- a real defect.
+            return {
+                "attempted": True, "won": False, "tries": t + 1, "note": msg,
+                "evidence": (
+                    "the game crashed or failed while an external policy was driving it through "
+                    f"make_env(): {msg}. env.step must survive any action from env.actions."
+                ),
+            }
+        except Exception as exc:  # session/SDK infrastructure failure -- checker couldn't run
+            return {
+                "attempted": False, "won": None, "tries": t + 1,
+                "note": f"playthrough checker could not run: {exc}", "evidence": None,
+            }
+        if metrics.get("vision_success"):
+            return {
+                "attempted": True, "won": True, "tries": t + 1,
+                "note": (
+                    f"an external vision policy beat the game on try {t + 1}/{tries} "
+                    f"({metrics.get('env_steps')} env actions, {metrics.get('decisions')} looks)"
+                ),
+                "evidence": None,
+            }
+        last_evidence = _playthrough_evidence(metrics)
+        stage(f"Playthrough try {t + 1}/{tries} did not win: {last_evidence}")
+    return {
+        "attempted": True, "won": False, "tries": tries,
+        "note": f"an external vision policy could not beat the game in {tries} tries",
+        "evidence": last_evidence or "the policy never reached the game's win condition",
+    }
 
 
 def play_sandbox_world(

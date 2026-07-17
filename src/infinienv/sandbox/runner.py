@@ -331,6 +331,7 @@ def _repair_message(
     run_error: str | None,
     sanity_error: str | None,
     audit_findings: str | None = None,
+    playthrough_evidence: str | None = None,
     open_todo: list[dict] | None = None,
 ) -> str:
     prefix = _todo_reminder(open_todo)
@@ -359,15 +360,32 @@ def _repair_message(
             "attempt are still on disk -- inspect them, fix the specific problem described, and "
             "re-run to produce all five artifact files again."
         )
+    if audit_findings is not None:
+        return prefix + (
+            "Your previous attempt in this same workspace produced valid artifacts but an independent "
+            "reviewer found that it does not faithfully implement the spec -- it fakes a requirement "
+            "rather than really doing it:\n"
+            f"{audit_findings}\n"
+            "Your existing files are still on disk -- inspect them and fix the simulation logic so the "
+            "flagged requirement is genuinely implemented (not just made to look right in the render), "
+            "then re-run to produce all five artifacts again. Do not paper over it by editing the "
+            "reported success value or a threshold."
+        )
     return prefix + (
-        "Your previous attempt in this same workspace produced valid artifacts but an independent "
-        "reviewer found that it does not faithfully implement the spec -- it fakes a requirement "
-        "rather than really doing it:\n"
-        f"{audit_findings}\n"
-        "Your existing files are still on disk -- inspect them and fix the simulation logic so the "
-        "flagged requirement is genuinely implemented (not just made to look right in the render), "
-        "then re-run to produce all five artifacts again. Do not paper over it by editing the "
-        "reported success value or a threshold."
+        "Your previous attempt in this same workspace produced valid artifacts and passed the "
+        "audit, but it failed the PLAYED-THROUGH PROOF: an external vision policy (playing your "
+        "game only through run_scene.make_env(), seeing only rendered frames) could not actually "
+        "beat it:\n"
+        f"{playthrough_evidence}\n"
+        "A world only counts as generated once a player other than you can win it. Your existing "
+        "files are still on disk -- fix what blocks external play: make sure make_env() exposes a "
+        "correct, complete playable interface (env.actions, reset/step returning real frames, "
+        "info['won'] from the game's real win condition, info['moved'] per step, and grid state -- "
+        "walls/walkable/position/goal cell -- so the policy gets a routable minimap), that the "
+        "game is genuinely winnable within the step budget by a competent player without "
+        "pixel-perfect execution, and that env.step never crashes on any action in env.actions. "
+        "Do NOT weaken the win condition or auto-win -- make the game fairly playable, then "
+        "re-run to produce all five artifacts again."
     )
 
 
@@ -541,6 +559,9 @@ async def _run_async(
     missing: list[str] = list(ARTIFACT_FILES)
     repair_history: list[dict] = []
     playable_env: bool | None = None
+    playthrough: dict = {
+        "attempted": False, "won": None, "tries": 0, "note": "not reached", "evidence": None,
+    }
     message = f"Seed: {seed}\nTask: {prompt}\nAssets mode: {assets_mode}\n{_interpreter_briefing()}{_todo_brief()}"
 
     try:
@@ -632,6 +653,26 @@ async def _run_async(
                 else:
                     stage(f"Auditor: skipped, run NOT independently audited ({audit_note}).")
 
+            # The played-through proof (the final verification layer): once the artifacts are sound
+            # and the audit passes, an EXTERNAL vision policy must actually beat the game (win
+            # judged by the game's own code) before the run may claim success. A loss is a genuine,
+            # repairable defect; a checker that couldn't run never fails the run (attempted=False).
+            playthrough = {
+                "attempted": False, "won": None, "tries": 0,
+                "note": "not reached (an earlier check failed)", "evidence": None,
+            }
+            if run_error is None and sane and not missing and audit_passed:
+                from infinienv.sandbox.vision_runner import verify_playthrough
+
+                playthrough = await verify_playthrough(out_dir, on_stage=stage)
+                if playthrough["attempted"] and playthrough["won"]:
+                    stage(f"Playthrough proof PASSED: {playthrough['note']}.")
+                elif playthrough["attempted"]:
+                    stage(f"Playthrough proof FAILED: {playthrough['note']}.")
+                else:
+                    stage(f"Playthrough proof skipped, not verified ({playthrough['note']}).")
+            playthrough_ok = (not playthrough["attempted"]) or bool(playthrough["won"])
+
             repair_history.append(
                 {
                     "attempt": attempt,
@@ -642,17 +683,25 @@ async def _run_async(
                     "audit_passed": audit_passed,
                     "audit_findings": audit_findings,
                     "audit_note": audit_note,
+                    "playthrough_attempted": playthrough["attempted"],
+                    "playthrough_won": playthrough["won"],
+                    "playthrough_note": playthrough["note"],
                     "missing_artifacts": missing,
                 }
             )
 
-            if run_error is None and sane and not missing and audit_passed:
+            if run_error is None and sane and not missing and audit_passed and playthrough_ok:
                 if audited:
                     stage(f"Attempt {attempt + 1} passed the outer sanity check and the faithfulness audit.")
                 else:
                     stage(f"Attempt {attempt + 1} passed the outer sanity check (audit skipped, not verified).")
                 break
-            fail_reason = audit_findings if (audited and not audit_passed) else sanity_error
+            if audited and not audit_passed:
+                fail_reason = audit_findings
+            elif playthrough["attempted"] and not playthrough["won"]:
+                fail_reason = playthrough["evidence"]
+            else:
+                fail_reason = sanity_error
             if attempt >= max_repair_attempts:
                 stage(f"Attempt {attempt + 1} failed and the repair budget is exhausted: {fail_reason}")
                 break
@@ -660,6 +709,11 @@ async def _run_async(
             if audited and not audit_passed:
                 message = _repair_message(
                     run_error=None, sanity_error=None, audit_findings=audit_findings, open_todo=open_todo
+                )
+            elif playthrough["attempted"] and not playthrough["won"]:
+                message = _repair_message(
+                    run_error=None, sanity_error=None,
+                    playthrough_evidence=playthrough["evidence"], open_todo=open_todo,
                 )
             else:
                 message = _repair_message(
@@ -684,7 +738,8 @@ async def _run_async(
     finally:
         await session.aclose()
 
-    success = not missing and sane and run_error is None and audit_passed
+    playthrough_ok = (not playthrough["attempted"]) or bool(playthrough["won"])
+    success = not missing and sane and run_error is None and audit_passed and playthrough_ok
 
     # Merge the outer verdict into the sandbox's own metrics.json (rather than overwriting
     # it) so both the sandbox's self-report and the outer, real-schema-based check are
@@ -711,6 +766,13 @@ async def _run_async(
             "audit_passed": audit_passed,
             "audit_findings": audit_findings,
             "audit_note": audit_note,
+            # The played-through proof (the final verification layer): did an EXTERNAL vision
+            # policy actually beat this world, win judged by the game's own code? attempted=False
+            # means the checker couldn't run (disabled/no key) -- recorded, never blocks.
+            "playthrough_attempted": playthrough["attempted"],
+            "playthrough_won": playthrough["won"],
+            "playthrough_tries": playthrough["tries"],
+            "playthrough_note": playthrough["note"],
             # The acceptance criteria (auditor's contract) and the agent's build plan (its progress
             # points). Separate: requirements = "true to the prompt"; build_plan = the parts the agent
             # built to meet them (shown live in the GUI's goals popup).
@@ -754,7 +816,10 @@ def run_sandbox_generation(
     out_dir: str,
     *,
     model: str | None = None,
-    max_turns: int = 60,
+    # 40 -> 60 after a real run hit the original ceiling (see CLAUDE.md §11); 60 -> 80 after the
+    # played-through-proof requirements measurably increased per-run self-testing (an agent
+    # stepping its own make_env() interface burned the 60-turn budget on a live run, 2026-07-17).
+    max_turns: int = 80,
     max_repair_attempts: int | None = None,
     assets_mode: str = "none",
     require_runs_dir: bool = False,

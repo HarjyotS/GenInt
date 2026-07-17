@@ -86,6 +86,10 @@ def test_classify_stage_maps_narration_prefixes():
         "Agent: building the cave": "agent",
         "Auditor: the run faithfully implements the spec.": "audit",
         "Independent reviewer auditing the run for faithfulness to the spec...": "audit",
+        # The played-through proof's narration (sandbox/vision_runner.verify_playthrough).
+        "Playthrough proof: a vision policy is playing this world (try 1/2)...": "play",
+        "Playthrough proof PASSED: beat the game on try 1/2.": "play",
+        "Playthrough try 1/2 did not win: the policy played 60 env actions...": "play",
         "Running sandbox agent (attempt 1/3)...": "attempt",
         "Repairing against the outer sanity check (attempt 2/3)...": "attempt",
         "Refined prompt handed to the agent:\n...": "refine",

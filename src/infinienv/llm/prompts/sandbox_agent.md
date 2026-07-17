@@ -94,6 +94,11 @@ Requirements, non-negotiable regardless of how you implement the mechanic:
     goal cell (any of `env.goal` / `env.package` / `env.target` / `env.exit`). The faithful player
     builds a text minimap from these and plans a real path. Optional/best-effort -- a continuous
     (non-grid) game just omits them and the player stays on pixels + feedback.
+    **For a multi-stage game, the exposed goal cell must be the CURRENT objective, not the final
+    one**: if the exit is locked until keys/gems/switches are done, `env.goal` should point at the
+    nearest outstanding key/gem/switch until those are complete, and only then at the gate/exit --
+    a static final-goal marker walks the external player into a locked gate it cannot pass yet and
+    it never wins. (Also update any closed-gate cell in the walls set once it opens.)
   - Also expose `env.dt` = the seconds of game time one `step()` advances (your physics timestep,
     e.g. `DT = 0.05`), or `env.fps`. This lets the vision-play replay play back in REAL time and
     finish exactly when the game ends -- without it the replay falls back to a ~20fps guess.
@@ -107,6 +112,18 @@ Requirements, non-negotiable regardless of how you implement the mechanic:
   must print a `(frame, reward, done, info)` tuple without error. This is what lets a vision policy
   play the exact game you built, on your real frames -- so build the closed action set and win
   condition to be genuinely playable by someone who only sees the frames.
+- **Your run only counts once a player other than you can beat it -- the played-through proof.**
+  After your artifacts pass the outer checks, the harness runs an EXTERNAL vision policy against
+  your `make_env()` and your run's success requires that policy to actually win (judged by your own
+  `info["won"]`). Design for a competent-but-ordinary player, not a pixel-perfect one: the game's
+  direct win path should take roughly 40-60 env actions (the external player's episode budget is
+  ~100, leaving room for ordinary exploration), with no frame-perfect timing or
+  blind leaps of faith; expose the routing info above (`moved`, `position`, walls/walkable, the
+  goal cell) so the player can navigate deliberately; and make sure `env.step` never crashes on ANY
+  action in `env.actions` from any state. Fair difficulty is part of the spec -- a maze so deep or
+  a timing window so tight that an ordinary player can't win is a defect, exactly like an
+  unreachable gem. Do NOT respond by weakening the win condition or auto-winning; make the game
+  genuinely, fairly playable.
 
 ## Reusable building blocks already in your workspace
 

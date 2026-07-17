@@ -7,35 +7,39 @@ natural-language commands into playable, *verified* environments, then lets a **
 policy** (one that sees only rendered frames) play them while a **code-defined** reward decides
 whether it succeeded.
 
-> A model proposes. The harness verifies. A pixel-policy proves.
+> An agent builds. The harness verifies. A player other than the author must win.
 
 The core bet, straight from the challenge brief: **code-defined objectives beat a VLM checking
-pixels.** So generation is semantic (an LLM writes the world) but *truth* is deterministic Python
-— schema validation, reachability, solvability, goal completion, and reward are all code, never
-the model's say-so.
-
-The headline demo (`navigate`) closes the exact loop the brief is about: a policy that observes
-*rendered frames* and emits *controller actions* plays a generated world, and whether it *reached
-the goal* is judged by `is_goal_complete` over game state — **not** by looking at the pixels.
+pixels.** An agent builds each world in real game code — that's what makes the environments rich —
+but whether a run *succeeded* is never the building model's say-so and never a VLM eyeballing
+pixels. Every generated world must clear a **layered verification stack**: deterministic geometry
+validation, artifact/motion sanity floors, an independent requirements audit, and finally the
+**played-through proof** — a separate pixel-policy actually plays the game and must *beat* it,
+win judged by the game's own code, before the run may claim success.
 
 ## Pipeline
 
 ```text
 Text Prompt
-  -> LLM writes the world            (a model proposes)
-  -> SceneSpec JSON DSL  /  agent-authored game code (--sandbox)
-  -> deterministic validator + independent audit    (the harness verifies)
-  -> playable 2D gridworld
-  -> A*/symbolic planner solves it, AND/OR
-     a VISION policy plays it from rendered frames   (a pixel-policy proves)
-  -> reward from is_goal_complete (code truth, not pixels)
-  -> render.png + replay.gif / episode.gif + metrics.json
+  -> prompt refined into a build spec + derived requirements checklist
+  -> an AGENT writes and runs the game's real code       (an agent builds)
+     in an isolated per-run workspace copy of the engine
+  -> layer 1: deterministic geometry validation           (the harness verifies)
+  -> layer 2: artifact + motion sanity floors
+  -> layer 3: independent faithfulness audit (a separate LLM, code read as text)
+  -> layer 4: PLAYED-THROUGH PROOF -- an external vision  (a player other than
+     policy plays the real game from rendered frames       the author must win)
+     and must WIN, judged by the game's own code
+  -> any failed layer -> concrete feedback -> the same agent repairs
+  -> render.png + replay.gif + episode.gif (the winning playthrough) + metrics.json
 ```
 
-The most important design rule: **the validator wins**. The LLM may propose, repair, or mutate
-a scene, but schema validation, object placement, collisions, reachability, pathfinding,
-inventory transitions, goal completion, and reward are all deterministic code paths, covered by
-`tests/`.
+The most important design rule: **verification wins**. The building model never grades its own
+work: geometry is checked by the real deterministic validator, faithfulness by an auditor with no
+shared context, and playability by an external policy that only sees frames — with every verdict
+recorded in `metrics.json`. The fixed-vocabulary tools (`validate`/`solve`/`mutate`/`curriculum`/
+`benchmark`/`export-dataset`) go further still: pure deterministic code with an analytic
+solvability guarantee, covered by `tests/`.
 
 ## The vision-policy loop (`navigate`)
 
@@ -65,36 +69,85 @@ frames + a code-defined reward). In the GUI, picking a sandbox world in Navigate
 automatically; on the CLI, `navigate <run_dir>` faithfully plays it while `navigate <scene.json>`
 plays deterministically.
 
-## Sandbox agents: model-authored engine code, per-run isolated
+## The sandbox baseline: an agent authors the engine code, the harness verifies it four ways
 
-`generate` is **sandbox-only**: the model gets a real, isolated per-run copy of `schema/`/`engine/`/
+`generate` runs the **sandbox agent** — the baseline and only generation mode, because it makes
+the best environments: the model gets a real, isolated per-run copy of `schema/`/`engine/`/
 `navigation/`/`validation/`/`render/`/`assets/` and may read, edit, or run anything in it —
 including rewriting the engine itself — to build a mechanic a fixed vocabulary genuinely can't
-express (an adversarial NPC that chases the agent, a custom win/lose condition). This gives up the
-validator-guaranteed solvability check every other run has, and says so plainly: sandbox runs are
-labeled `"source": "sandbox"` in `metrics.json`, carrying the agent's own self-reported success, an
-independent **outer sanity check** (re-parses `scene.json` against the real schema; confirms
-`render.png`/`replay.gif` are genuine, non-trivial, *animated* images; runs the deterministic
-validator's vocabulary-agnostic geometry checks), and an independent **faithfulness audit** (a
-separate LLM reads the agent's code as text — never executes it — and flags a faked mechanic) side
-by side. If a check fails, the same agent gets the concrete failure fed back and repairs its own
-work in the same persistent workspace, up to `--max-repair-attempts` times. The outer process never
-imports or executes the sandboxed code; it only ever reads back the five standard artifact files.
+express (an adversarial NPC that chases the agent, gravity and jump arcs, a custom win/lose
+condition). The verification requirements apply to it in full. A run may only claim `success`
+after clearing four independent layers, none of which the agent can skip or weaken:
+
+1. **Deterministic geometry validation** — the real validator runs on the generated `scene.json`,
+   enforcing the vocabulary-agnostic geometry codes and recording the full verdict.
+2. **Artifact + motion sanity floors** — `render.png`/`replay.gif` must be genuine, decodable,
+   *animated* images, and the replay trace must contain no teleports.
+3. **Independent faithfulness audit** — a separate LLM (no shared context with the author) reads
+   the agent's code *as text* — never executes it — against the derived requirements checklist and
+   flags any mechanic that's faked rather than implemented.
+4. **The played-through proof** — an **external vision policy** plays the actual game through its
+   drivable `make_env()` interface, seeing only rendered frames, and must genuinely **win** —
+   judged by the game's own code (`info["won"]`). The winning `episode.gif` is kept as evidence.
+   Fixed-vocabulary solvability can't transfer to agent-authored gameplay, so the sandbox replaces
+   that analytic guarantee with this empirical one: every successful world was provably playable
+   and beaten by a player other than its author.
+
+If any layer fails, the same agent gets the concrete failure fed back (the validator error, the
+audit finding, the losing episode's evidence) and repairs its own work in the same persistent
+workspace, up to `--max-repair-attempts` times. The outer process never imports or executes the
+sandboxed code; it only ever reads back the named artifact files. Runs are labeled
+`"source": "sandbox"` with all four verdicts side by side in `metrics.json`.
 
 The sandbox agent runs on the **Claude Agent SDK by default** (`INFINIENV_SANDBOX_BACKEND=claude`,
-model `claude-haiku-4-5`), or the OpenAI Agents SDK (`=openai`). Both are interchangeable — same
-workspace, artifacts, checks, and `metrics.json` shape.
+model `claude-sonnet-5`), or the OpenAI Agents SDK (`=openai`). Both are interchangeable — same
+workspace, artifacts, verification stack, and `metrics.json` shape.
 
 See [CLAUDE.md](../CLAUDE.md) section 11 for the full design, the isolation boundary, and exactly
-what the outer sanity check and the auditor do and don't guarantee.
+what each verification layer does and doesn't guarantee.
+
+## Results (live API, summaries committed)
+
+**Real-LLM benchmark** — `benchmark examples/prompts.txt --provider openai_agents` (8 prompts,
+seed 42, full validate→repair→solve pipeline):
+
+| Metric | Result |
+|---|---|
+| Valid + solved on the first try (zero repairs) | **7 / 8** |
+| Solved overall | **8 / 8** (the one maze failure exhausted 3 repairs and fell back to the deterministic template — recorded as `used_fallback: true`, never hidden) |
+| Avg generation time | 10.0 s |
+| Avg solution path | 20.4 actions |
+
+(The mock-provider control run — the deterministic template pipeline — is 8/8 first-try by
+construction; the LLM numbers above are the real result.)
+
+**Vision-policy episodes** — `navigate`, 10 live episodes across 5 example worlds, success judged
+by `is_goal_complete` over game state (never pixels):
+
+| World | Episodes | Code-judged success | Naive VLM judge agreed |
+|---|---|---|---|
+| kitchen deliver | 2 | 2/2 | 2/2 |
+| obstacle course | 2 | 2/2 | 2/2 |
+| key + locked door | 2 | 2/2 | 2/2 |
+| vision demo | 2 | 2/2 | 2/2 |
+| push-physics puzzle | 2 | **0/2** | 2/2 |
+
+8/10 solved by a pixel-only stand-in policy. The push-physics failures are honest: the stand-in
+VLM never discovers shove-by-walking — the exact capability gap a trained vision policy closes,
+and the code signal reports it truthfully either way.
+
+**Dataset export** — `export-dataset` over 28 executed runs (two 5-level curricula, 10 validated
+mutations each actually solved, and the 8 live-LLM benchmark worlds) → one JSONL row per run with
+a per-goal `programmatic_reward` (e.g. `{"unlock_door": 1, "deliver_package": 1, "total": 2}`) —
+the code-truth signal the brief wants reward models trained on.
 
 ## Evaluation-criteria mapping
 
 | Challenge criterion | How this repo addresses it |
 |---|---|
-| Creativity | Text → verified worlds, plus model-authored game code (`--sandbox`), plus a mutation/curriculum/asset pipeline for infinite validated variants — and a Gymnasium-style **pixel-observation env** so a vision policy can actually play them. |
-| Clarity | One schema (`SceneSpec`) as the shared contract; the GUI runs the whole loop in the browser; truthful `metrics.json` per run. |
-| Working output | `pytest` (450+ tests) covers the env, vision loop, validator, solver, assets, mutation, dataset export, sandbox; `metrics.json` never overclaims (`vision_success` comes from `is_goal_complete`, never from pixels). |
+| Creativity | An agent authors each world's real game code (physics, NPCs, win conditions — no fixed vocabulary ceiling), with generated pixel-art sprites, a mutation/curriculum/asset pipeline for infinite validated variants, and a Gymnasium-style **pixel-observation env** so a vision policy can actually play every world. |
+| Clarity | One README-to-GUI on-ramp; the GUI streams the whole loop live in the browser (the agent's decisions, code, audit, and playthrough); truthful `metrics.json` per run with every verification verdict recorded. |
+| Working output | `pytest` (480+ tests) covers the env, vision loop, validator, solver, assets, mutation, dataset export, sandbox, audit, and playthrough gate; `metrics.json` never overclaims — a world only counts as generated once an external policy has actually beaten it. |
 
 And the brief's three "why this matters" unlocks, made runnable:
 

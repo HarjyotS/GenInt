@@ -8,6 +8,7 @@ SDK by default). The deterministic tools (`validate`/`solve`/`navigate`/`mutate`
 work offline (except `navigate`, which needs a vision key).
 
 ```bash
+python -m infinienv demo                                                  # zero-key demo: solve + render + GUI
 python -m infinienv setup                                                 # guided .env + readiness check
 python -m infinienv generate --prompt "..." --seed 42 --out runs/demo   # sandbox agent (Claude SDK)
 python -m infinienv navigate examples/vision_demo.json --out runs/vis    # pixel policy plays it
@@ -31,15 +32,24 @@ key, the `openai`/`flask`/`claude-agent-sdk` packages, and the `claude` CLI — 
 
 ### No-key quickstart
 
-The deterministic tools run offline over any scene. `solve` renders a playable environment and a
-replay of the agent completing a code-defined objective:
+One command, no key, no network:
 
 ```bash
-python -m infinienv solve examples/kitchen_can.json --out runs/kitchen_can
+python -m infinienv demo
 ```
 
-A committed example world lives in `examples/example_world/` (open `render.png` / `replay.gif`, or
-launch the GUI and it shows up in the gallery).
+It solves three committed example worlds end to end — a pickup/deliver task, a grid-physics
+push+slide puzzle, and a model-definable custom interaction ("throw the vase out the window") —
+writing `scene.json` + `render.png` + an animated `replay.gif` for each, then opens the GUI so you
+can browse them (plus the committed sandbox world in `examples/example_world/`) and drive any of
+them yourself with the keyboard in Play mode. `--no-gui` just writes the artifacts.
+
+The deterministic tools also run offline over any scene individually, e.g.
+`python -m infinienv solve examples/kitchen_can.json --out runs/kitchen_can`. The committed
+examples cover the vocabulary: `kitchen_can.json` (pickup/deliver), `warehouse_key.json`
+(key + locked door), `obstacle_course.json` (navigation around obstacles), `push_slide_demo.json`
+(grid physics), `throw_vase_demo.json` (custom mechanics), `vision_demo.json` (a small world sized
+for the vision policy).
 
 ## Run artifacts
 
@@ -57,12 +67,20 @@ A `generate` (sandbox) run writes:
 ```text
 runs/<run_id>/
 ├── scene.json           # the static SceneSpec layout (run through the real validator)
-├── metrics.json         # source, success, outer_sanity_*, audit_*, deterministic_validation, ...
+├── metrics.json         # source, success, outer_sanity_*, audit_*, playthrough_*, ...
 ├── replay.json          # the agent's own trace + declared rules
 ├── render.png           # a rendered frame of the world
 ├── replay.gif           # animated replay of the agent playing its game
+├── episode.gif          # the EXTERNAL vision policy's playthrough (the played-through proof)
+├── vision_metrics.json  # that playthrough's episode record (win judged by the game's own code)
 └── sandbox_workspace/   # the exact code the agent wrote and ran (the audit trail)
 ```
+
+`success` requires all four verification layers: deterministic geometry validation +
+artifact/motion sanity floors (`outer_sanity_*`), the independent faithfulness audit (`audit_*`),
+and the played-through proof (`playthrough_*` — an external vision policy must actually beat the
+game; `INFINIENV_SANDBOX_PLAYTHROUGH=0` opts out, `INFINIENV_PLAYTHROUGH_TRIES`/
+`INFINIENV_PLAYTHROUGH_MAX_STEPS` tune the episodes).
 
 ## Runtime providers
 

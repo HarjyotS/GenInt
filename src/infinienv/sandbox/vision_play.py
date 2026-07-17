@@ -126,6 +126,17 @@ _POS_ATTRS = ("position", "pos", "player", "agent_pos", "player_cell", "player_p
 _MINIMAP_MAX = 60  # if the grid is bigger than this per side it's probably pixel coords -> skip
 
 
+def _is_grid_game(env) -> bool:
+    """A game that exposes integer grid state (walls/walkable cells) is TURN-BASED: one `step()`
+    is one discrete move, so frame-skip/action-repeat (`hold` > 1) must not apply. Observed live:
+    holding an action 6 frames in a grid dungeon lurched the knight 6 cells per decision, slammed
+    it into a wall every plan (forcing a re-observe after every single action -- ~100 vision calls
+    per episode instead of ~17), and made the game unwinnable. `hold` stays for continuous games
+    (a platformer holding a run key), where it's the whole point."""
+    cells = _first_attr(env, _WALL_ATTRS, _cell_set) or _first_attr(env, _WALK_ATTRS, _cell_set)
+    return bool(cells)
+
+
 def _cell(v):
     """Coerce a value (possibly a callable/property) to an integer (x, y) grid cell, else None."""
     if callable(v):
@@ -587,6 +598,21 @@ def main() -> int:
     model, goal = cfg["model"], cfg["goal"]
     max_steps, hold, plan_len = int(cfg["max_steps"]), int(cfg["hold"]), int(cfg["plan_len"])
     history = int(cfg.get("history", 2))
+    if hold > 1 and _is_grid_game(env):
+        # Turn-based grid game: one step() = one discrete move; action-repeat would lurch the
+        # player `hold` cells per decision (see _is_grid_game). Play it one move at a time.
+        print(f"grid game detected: applying actions one step each (hold {hold} -> 1)", flush=True)
+        hold = 1
+    # A retry of a deterministic game with a deterministic policy replays the exact same losing
+    # trajectory (observed live: bit-identical episode rewards across tries). On retries the
+    # orchestrator passes variation=N; nudge the policy toward genuinely different choices.
+    variation = int(cfg.get("variation", 0) or 0)
+    if variation:
+        goal = (
+            f"{goal}\n(Retry attempt {variation + 1}: a previous player following the obvious "
+            "route did NOT win -- at forks and around hazards, deliberately prefer a DIFFERENT "
+            "route or timing than the most obvious one.)"
+        )
 
     def act(frames, step, actions, feedback):
         return _vision_act(client, model, frames, goal, actions, step, feedback, plan_len=plan_len)

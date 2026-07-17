@@ -50,6 +50,29 @@ def test_solve_command_on_a_push_physics_scene(tmp_path, monkeypatch):
     assert rc == 0  # the deterministic solver still handles push/slide physics on a scene
 
 
+def test_demo_command_writes_full_artifacts_offline(tmp_path, monkeypatch, capsys):
+    # The zero-key demo: solves committed example worlds end to end with no key/network. Hermetic:
+    # run from a tmp cwd with a copied examples/ dir; missing scenes are skipped, not fatal.
+    import shutil
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "examples").mkdir()
+    shutil.copy(_EXAMPLE, tmp_path / "examples" / "kitchen_can.json")
+    shutil.copy(_PUSH_EXAMPLE, tmp_path / "examples" / "push_slide_demo.json")
+
+    rc = main(["demo", "--no-gui"])
+    assert rc == 0
+    for run in ("demo_kitchen_can", "demo_push_slide_demo"):
+        for artifact in ("scene.json", "replay.json", "metrics.json", "render.png", "replay.gif"):
+            assert os.path.exists(os.path.join("runs", run, artifact)), f"{run}/{artifact}"
+        with open(os.path.join("runs", run, "metrics.json")) as f:
+            metrics = json.load(f)
+        assert metrics["success"] is True and metrics["source"] == "demo"
+    out = capsys.readouterr().out
+    assert "SOLVED" in out
+    assert "throw_vase_demo.json: SKIPPED" in out  # missing example degrades gracefully
+
+
 def test_generate_is_sandbox_only(tmp_path, monkeypatch):
     # Sandbox is the ONE generate mode: a plain `generate` routes to the sandbox runner.
     monkeypatch.chdir(tmp_path)

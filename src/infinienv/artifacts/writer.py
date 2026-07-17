@@ -20,7 +20,10 @@ def resolve_out_dir(out_dir: str, *, require_runs_dir: bool = False) -> str:
     abs_out = os.path.abspath(out_dir)
     abs_cwd = os.path.abspath(os.getcwd())
     if os.path.commonpath([abs_out, abs_cwd]) != abs_cwd:
-        raise ValueError(f"refusing to write outside the working directory: {out_dir!r}")
+        raise ValueError(
+            f"refusing to write outside the working directory: {out_dir!r} -- all run output is "
+            f"confined to the project tree; pass a relative path like runs/{os.path.basename(out_dir) or 'my_run'!s}"
+        )
     if require_runs_dir:
         abs_runs = os.path.join(abs_cwd, "runs")
         if os.path.commonpath([abs_out, abs_runs]) != abs_runs:

@@ -527,6 +527,7 @@
       <div class="media" id="media" style="display:none">
         <figure id="fig-render"><img id="render-img" alt="render.png"><figcaption id="cap-render">render.png</figcaption></figure>
         <figure id="fig-replay"><img id="replay-img" alt="replay.gif"><figcaption id="cap-replay">replay.gif</figcaption></figure>
+        <figure id="fig-episode" style="display:none"><img id="episode-img" alt="episode.gif"><figcaption>episode.gif · the vision policy beating this world</figcaption></figure>
       </div>
       <details id="refine-details" style="display:none"><summary>Refined prompt (what the agent was actually given)</summary><pre class="scene" id="refine-text"></pre></details>
       <details id="summary-details" style="display:none"><summary>Agent summary</summary><pre class="scene" id="agent-summary"></pre></details>
@@ -632,6 +633,7 @@ const KINDS = {
   image:     {ic:'▤', label:'Reviewed frame'},
   agent:     {ic:'▸', label:'Agent'},
   audit:     {ic:'◈', label:'Audit'},
+  play:      {ic:'▶', label:'Playthrough'},
   goal:      {ic:'◎', label:'Goal'},
   step:      {ic:'▸', label:'Step'},
   judge:     {ic:'◈', label:'VLM judge'},
@@ -639,7 +641,7 @@ const KINDS = {
   error:     {ic:'✕', label:'Failed'},
   status:    {ic:'·', label:'Status'},
 };
-let PHASES = ['Refine', 'Build', 'Audit', 'Done'];
+let PHASES = ['Refine', 'Build', 'Audit', 'Playthrough', 'Done'];
 let runTimer = null, runStart = 0, curPhase = -1;
 
 function setPhase(name) {
@@ -700,6 +702,7 @@ function pushEvent(kind, message) {
     if (/^Running|^Repairing/.test(message)) { setPhase('Build'); attemptDivider(m ? `Attempt ${m[1]}` : 'Attempt'); return; }
   }
   if (kind === 'audit') setPhase('Audit');
+  if (kind === 'play') setPhase('Playthrough');
   if (kind === 'step' || kind === 'goal') setPhase('Play');
   if (kind === 'judge') setPhase('Judge');
   const meta = KINDS[kind] || KINDS.status;
@@ -719,7 +722,8 @@ function pushEvent(kind, message) {
   updateNow(meta, txt || (kind === 'output' ? 'command output' : ''));
 
   const row = document.createElement('div');
-  const fail = kind === 'audit' && /fake|does not|not independently/i.test(message);
+  const fail = (kind === 'audit' && /fake|does not|not independently/i.test(message))
+    || (kind === 'play' && /FAILED|did not win/i.test(message));
   row.className = 'evt ' + kind + (fail ? ' fail' : '');
   const b = document.createElement('div'); b.className = 'body';
   const k = document.createElement('div'); k.className = 'k'; k.textContent = meta.label;
@@ -932,8 +936,10 @@ function resetLog() {
   summaryDetails.style.display = 'none';
   metricsDetails.style.display = 'none';
   rawlogDetails.style.display = 'none';
-  // Restore the default two-figure media layout (a navigate run hides the second figure).
+  // Restore the default media layout (a navigate run hides the second figure; the playthrough
+  // episode figure only shows when a sandbox run's playthrough actually ran).
   $('fig-replay').style.display = '';
+  $('fig-episode').style.display = 'none';
   $('cap-render').textContent = 'render.png';
   const stale = document.getElementById('nav-extra'); if (stale) stale.remove();
   const n = $('now'); if (n) { n.classList.remove('show'); n.innerHTML = ''; }
@@ -943,7 +949,7 @@ function resetLog() {
 
 function startRun() {
   resetLog();
-  PHASES = mode === 'navigate' ? ['Play', 'Judge', 'Done'] : ['Refine', 'Build', 'Audit', 'Done'];
+  PHASES = mode === 'navigate' ? ['Play', 'Judge', 'Done'] : ['Refine', 'Build', 'Audit', 'Playthrough', 'Done'];
   renderPhaseSteps();
   phasebar.style.display = 'flex';
   document.body.classList.add('building');
@@ -1005,6 +1011,10 @@ function buildResult(data) {
     if (m.audited) cards.push(verdictCard('Faithfulness audit', m.audit_passed ? 'Passed' : 'Cheat found',
       m.audit_passed ? 'ok' : 'bad', m.audit_passed ? 'independently reviewed' : ''));
     else cards.push(verdictCard('Faithfulness audit', 'Not verified', 'warn', m.audit_note || 'auditor did not run'));
+    if (m.playthrough_attempted) cards.push(verdictCard('Playthrough', m.playthrough_won ? 'Beaten' : 'Not beaten',
+      m.playthrough_won ? 'ok' : 'bad',
+      m.playthrough_won ? 'a pixel policy beat this world' : (m.playthrough_note || '')));
+    else cards.push(verdictCard('Playthrough', 'Not verified', 'warn', m.playthrough_note || 'playthrough did not run'));
     cards.push(verdictCard('Repair attempts', (data.repair_attempts || 0), (data.repair_attempts ? 'warn' : ''),
       (data.repair_attempts ? 'fixed after review' : 'first try')));
   } else if (data.validation_errors && data.validation_errors.length) {
@@ -1176,6 +1186,11 @@ $('generate').addEventListener('click', async () => {
     mediaEl.style.display = 'grid';
     $('render-img').src = '/artifact/' + data.out_dir + '/render.png?t=' + Date.now();
     $('replay-img').src = '/artifact/' + data.out_dir + '/replay.gif?t=' + Date.now();
+    // The played-through proof's episode: the external vision policy's own view of beating (or
+    // failing) this world. Only present when the playthrough actually ran.
+    const pt = (data.metrics || {}).playthrough_attempted;
+    $('fig-episode').style.display = pt ? '' : 'none';
+    if (pt) $('episode-img').src = '/artifact/' + data.out_dir + '/episode.gif?t=' + Date.now();
 
     metricsDetails.style.display = 'block';
     metricsEl.innerHTML = Object.entries(data.metrics).map(

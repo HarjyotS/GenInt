@@ -97,6 +97,11 @@ def _classify_stage(msg: str) -> str:
         return "agent"
     if s.startswith("Auditor:") or "auditing the run" in low:
         return "audit"
+    # The played-through proof (sandbox/vision_runner.verify_playthrough): a vision policy must
+    # actually beat the world before success. Its lines get their own kind so the feed emphasizes
+    # the verdict like it does the audit's.
+    if s.startswith(("Playthrough proof", "Playthrough try")):
+        return "play"
     if s.startswith(("Refining prompt", "Refined prompt")):
         return "refine"
     if "isolated sandbox workspace" in low:

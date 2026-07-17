@@ -118,11 +118,14 @@ def _cmd_generate_sandbox(args: argparse.Namespace) -> int:
     print(f"InfiniEnv SANDBOX run: {args.out}")
     print(f"Prompt: {args.prompt}")
     print(
-        "Note: sandbox mode lets the agent write and run its own code in an isolated per-run\n"
-        "workspace copy. Unlike every other run, this trades away the validator-guaranteed\n"
-        "solvability check -- see metrics.json's outer_sanity_* fields and CLAUDE.md. If the\n"
-        "first attempt fails an independent outer check, the same agent gets the concrete\n"
-        "failure and a chance to repair its own work, up to a bounded number of attempts."
+        "Note: the agent writes and runs its own game code in an isolated per-run workspace copy.\n"
+        "Every run must clear a layered verification stack before it may claim success:\n"
+        "  1. deterministic geometry validation + artifact/motion sanity floors (outer_sanity_*)\n"
+        "  2. an independent faithfulness audit against the derived requirements (audit_*)\n"
+        "  3. the played-through proof: an external vision policy must actually beat the game,\n"
+        "     win judged by the game's own code (playthrough_*)\n"
+        "A failed check feeds the concrete failure back to the same agent for repair, up to a\n"
+        "bounded number of attempts. See metrics.json and CLAUDE.md section 11."
     )
     print()
 
@@ -165,6 +168,15 @@ def _cmd_generate_sandbox(args: argparse.Namespace) -> int:
     for path in result["artifact_paths"].values():
         print(f"      - {path}")
     print()
+    metrics = result.get("metrics") or {}
+    if metrics.get("playthrough_attempted"):
+        won = metrics.get("playthrough_won")
+        print(
+            f"Playthrough: {'WON' if won else 'LOST'} "
+            f"({metrics.get('playthrough_tries')} tries) -- {metrics.get('playthrough_note')}"
+        )
+    else:
+        print(f"Playthrough: not verified ({metrics.get('playthrough_note')})")
     ok = result["success"]
     print("Result: SUCCESS" if ok else "Result: FAILED (see metrics.json outer_sanity_error)")
     return 0 if ok else 1
@@ -382,6 +394,79 @@ def cmd_gui(args: argparse.Namespace) -> int:
     return 0
 
 
+# The scenes the zero-key demo solves: committed examples chosen to show three different
+# capabilities of the deterministic engine (pickup/deliver, grid-physics push+slide, a
+# model-definable custom interaction), all always-solvable by construction.
+_DEMO_SCENES = ("kitchen_can.json", "push_slide_demo.json", "throw_vase_demo.json")
+
+
+def cmd_demo(args: argparse.Namespace) -> int:
+    """The one-command, zero-key demo: solve a few committed example worlds end to end (plan ->
+    execute -> render -> animated replay), then open the GUI so the results (plus the committed
+    sandbox example world) are browsable and human-playable. No API key, no network -- this is the
+    deterministic engine, the same substrate every sandbox run is built on."""
+    from infinienv.artifacts.writer import resolve_out_dir, write_json
+    from infinienv.navigation.policy import solve_scene
+    from infinienv.render.image_export import save_render_png
+    from infinienv.render.replay_export import save_replay_gif
+    from infinienv.schema.scene_schema import scene_spec_from_dict
+
+    print("InfiniEnv demo: solving committed example worlds (no API key needed)...")
+    print()
+    rows: list[tuple[str, bool, int]] = []
+    for name in _DEMO_SCENES:
+        scene_path = os.path.join("examples", name)
+        if not os.path.exists(scene_path):
+            print(f"  - {name}: SKIPPED (examples/{name} not found)")
+            continue
+        with open(scene_path) as f:
+            scene_dict = json.load(f)
+        scene = scene_spec_from_dict(scene_dict)
+        result = solve_scene(scene)
+        out_dir = resolve_out_dir(os.path.join("runs", f"demo_{name.removesuffix('.json')}"))
+        # The full artifact set, so the run browses like any other in the GUI gallery.
+        write_json(out_dir, "scene.json", scene_dict)
+        write_json(
+            out_dir,
+            "replay.json",
+            {
+                "actions": result.actions,
+                "trace": result.trace,
+                "success": result.success,
+                "goal_results": result.goal_results,
+            },
+        )
+        write_json(
+            out_dir,
+            "metrics.json",
+            {
+                "source": "demo",
+                "success": result.success,
+                "solver_success": result.success,
+                "path_length": len(result.actions),
+                "goal_results": result.goal_results,
+            },
+        )
+        save_render_png(scene, os.path.join(out_dir, "render.png"))
+        save_replay_gif(scene, result.actions, os.path.join(out_dir, "replay.gif"))
+        rows.append((name, result.success, len(result.actions)))
+        verdict = "SOLVED" if result.success else "FAILED"
+        print(f"  - {name}: {verdict} in {len(result.actions)} actions -> {os.path.relpath(out_dir)}")
+
+    print()
+    solved = sum(1 for _, ok, _ in rows if ok)
+    print(f"{solved}/{len(rows)} demo worlds solved, each with scene.json + render.png + replay.gif.")
+    if args.no_gui:
+        print("Open the render.png/replay.gif files above, or run `python -m infinienv gui` to browse them.")
+        return 0 if solved == len(rows) else 1
+    print("Opening the GUI -- browse these runs (plus the committed example world) in the gallery,")
+    print("or drive any of them yourself with the keyboard in Play mode.")
+    from infinienv.gui.app import launch
+
+    launch(host="127.0.0.1", port=args.port, open_browser=True)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="infinienv", description="InfiniEnv: infinite environment generation via an agent harness.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -535,6 +620,16 @@ def build_parser() -> argparse.ArgumentParser:
     gu.add_argument("--port", type=int, default=int(os.environ.get("PORT", 5050)))
     gu.add_argument("--no-browser", action="store_true", help="Don't auto-open a browser tab.")
     gu.set_defaults(func=cmd_gui)
+
+    dm = sub.add_parser(
+        "demo",
+        help="The one-command, zero-key demo: solve a few committed example worlds end to end "
+        "(plan -> execute -> render -> animated replay), then open the GUI to browse and play them. "
+        "No API key or network needed.",
+    )
+    dm.add_argument("--no-gui", action="store_true", help="Just write the artifacts; don't open the GUI.")
+    dm.add_argument("--port", type=int, default=int(os.environ.get("PORT", 5050)))
+    dm.set_defaults(func=cmd_demo)
 
     return parser
 

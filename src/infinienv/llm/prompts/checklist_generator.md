@@ -17,6 +17,12 @@ Decompose the spec into discrete items. Cover, exhaustively:
   diamond" is several items, one per step, each checkable).
 - **The key on-screen / HUD / visual requirements** the spec calls out (counters, selected item,
   distinct textures, a win/lose banner).
+- **External playability.** Always include one item that the game is playable AND fairly winnable
+  by an external player through its drivable interface: `run_scene.make_env()` exists at module
+  level, exposes the closed action set, real frames, `info["won"]`/`info["moved"]`, and grid
+  routing state (position, walls/walkable, goal cell) where the game is grid-shaped -- and the game
+  is winnable within a modest step budget without frame-perfect timing. (The harness actually runs
+  an external policy against it; an unbeatable or crash-on-action game fails the run.)
 
 Rules for good items:
 - Each item is ONE thing, stated so it's obvious how code could verify it (a test that fails if it's

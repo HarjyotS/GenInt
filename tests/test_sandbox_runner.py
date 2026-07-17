@@ -215,6 +215,10 @@ def patched_sdk(tmp_path, monkeypatch):
     # OpenAI call) regardless of whether OPENAI_API_KEY happens to be set. The dedicated
     # audit-loop test below re-enables it by monkeypatching runner.audit_run directly.
     monkeypatch.setenv("INFINIENV_SANDBOX_AUDIT", "0")
+    # Same for the played-through proof: the plain repair-loop tests aren't about it, and the real
+    # checker would spin up a sandbox session + vision calls. The dedicated playthrough tests below
+    # monkeypatch vision_runner.verify_playthrough directly instead.
+    monkeypatch.setenv("INFINIENV_SANDBOX_PLAYTHROUGH", "0")
 
     with (
         patch("agents.sandbox.SandboxAgent", lambda **kwargs: SimpleNamespace(**kwargs)),
@@ -401,6 +405,150 @@ def test_audit_skip_does_not_block_a_valid_run(tmp_path, patched_sdk, monkeypatc
 
     assert result["success"] is True
     assert result["metrics"]["audited"] is False and result["metrics"]["audit_passed"] is True
+
+
+# --- The played-through proof: an external vision policy must beat the game before success.
+# These fake vision_runner.verify_playthrough (the runner imports it lazily from that module),
+# so they're hermetic -- no sandbox session, no vision calls.
+
+
+def _fake_playthrough(results: list[dict]):
+    """A verify_playthrough stand-in yielding each dict in `results` in order (last one repeats)."""
+    calls = {"n": 0}
+
+    async def fake(out_dir, *, on_stage=None, tries=None, max_steps=60):
+        idx = min(calls["n"], len(results) - 1)
+        calls["n"] += 1
+        return dict(results[idx])
+
+    fake.calls = calls
+    return fake
+
+
+_PT_WON = {"attempted": True, "won": True, "tries": 1, "note": "beat the game on try 1/2", "evidence": None}
+_PT_LOST = {
+    "attempted": True, "won": False, "tries": 2,
+    "note": "an external vision policy could not beat the game in 2 tries",
+    "evidence": "the policy played 60 env actions and never reached the win; 41 were blocked",
+}
+_PT_SKIP = {"attempted": False, "won": None, "tries": 0, "note": "no OPENAI_API_KEY", "evidence": None}
+
+
+def test_playthrough_win_is_required_and_recorded(tmp_path, patched_sdk, monkeypatch):
+    import infinienv.sandbox.vision_runner as vr
+
+    Runner = patched_sdk
+
+    async def fake_run(agent, message, *, run_config, max_turns):
+        _write_good_attempt(run_config.sandbox.session.files)
+        return SimpleNamespace(final_output="summary")
+
+    monkeypatch.setattr(vr, "verify_playthrough", _fake_playthrough([_PT_WON]))
+
+    with patch.object(Runner, "run_streamed", _streamed(fake_run)):
+        result = run_sandbox_generation("make a game", 1, str(tmp_path / "run"), max_repair_attempts=2)
+
+    assert result["success"] is True
+    m = result["metrics"]
+    assert m["playthrough_attempted"] is True and m["playthrough_won"] is True
+    assert m["playthrough_tries"] == 1
+    assert m["repair_history"][0]["playthrough_won"] is True
+
+
+def test_playthrough_loss_triggers_a_repair_with_episode_evidence(tmp_path, patched_sdk, monkeypatch):
+    import infinienv.sandbox.vision_runner as vr
+
+    Runner = patched_sdk
+    attempts: list[str] = []
+
+    async def fake_run(agent, message, *, run_config, max_turns):
+        attempts.append(message)
+        _write_good_attempt(run_config.sandbox.session.files)
+        return SimpleNamespace(final_output="summary")
+
+    monkeypatch.setattr(vr, "verify_playthrough", _fake_playthrough([_PT_LOST, _PT_WON]))
+
+    with patch.object(Runner, "run_streamed", _streamed(fake_run)):
+        result = run_sandbox_generation("make a game", 1, str(tmp_path / "run"), max_repair_attempts=2)
+
+    assert len(attempts) == 2  # artifacts + audit were fine both times; only the playthrough forced repair
+    assert "PLAYED-THROUGH PROOF" in attempts[1]
+    assert "never reached the win" in attempts[1]  # the concrete episode evidence is fed back
+    assert "Do NOT weaken the win condition" in attempts[1]
+    assert result["success"] is True
+    history = result["metrics"]["repair_history"]
+    assert history[0]["playthrough_won"] is False and history[1]["playthrough_won"] is True
+
+
+def test_persistent_playthrough_loss_fails_the_run(tmp_path, patched_sdk, monkeypatch):
+    import infinienv.sandbox.vision_runner as vr
+
+    Runner = patched_sdk
+
+    async def fake_run(agent, message, *, run_config, max_turns):
+        _write_good_attempt(run_config.sandbox.session.files)
+        return SimpleNamespace(final_output="summary")
+
+    monkeypatch.setattr(vr, "verify_playthrough", _fake_playthrough([_PT_LOST]))
+
+    with patch.object(Runner, "run_streamed", _streamed(fake_run)):
+        result = run_sandbox_generation("make a game", 1, str(tmp_path / "run"), max_repair_attempts=1)
+
+    # artifacts valid, audit fine -- but no external player ever beat it -> not a success
+    assert result["success"] is False
+    m = result["metrics"]
+    assert m["outer_sanity_passed"] is True
+    assert m["playthrough_attempted"] is True and m["playthrough_won"] is False
+
+
+def test_playthrough_skip_does_not_block_a_valid_run(tmp_path, patched_sdk, monkeypatch):
+    import infinienv.sandbox.vision_runner as vr
+
+    Runner = patched_sdk
+
+    async def fake_run(agent, message, *, run_config, max_turns):
+        _write_good_attempt(run_config.sandbox.session.files)
+        return SimpleNamespace(final_output="summary")
+
+    # the checker couldn't run (no key/infra): attempted=False -> recorded, never blocks
+    monkeypatch.setattr(vr, "verify_playthrough", _fake_playthrough([_PT_SKIP]))
+
+    with patch.object(Runner, "run_streamed", _streamed(fake_run)):
+        result = run_sandbox_generation("make a game", 1, str(tmp_path / "run"), max_repair_attempts=2)
+
+    assert result["success"] is True
+    m = result["metrics"]
+    assert m["playthrough_attempted"] is False and m["playthrough_won"] is None
+    assert "OPENAI_API_KEY" in m["playthrough_note"]
+
+
+def test_playthrough_disabled_via_env_is_recorded_and_non_blocking(tmp_path, patched_sdk):
+    # No monkeypatch of verify_playthrough here: the REAL checker runs, sees the fixture's
+    # INFINIENV_SANDBOX_PLAYTHROUGH=0, and records itself as disabled -- covering the runner ->
+    # vision_runner integration without a sandbox session.
+    Runner = patched_sdk
+
+    async def fake_run(agent, message, *, run_config, max_turns):
+        _write_good_attempt(run_config.sandbox.session.files)
+        return SimpleNamespace(final_output="summary")
+
+    with patch.object(Runner, "run_streamed", _streamed(fake_run)):
+        result = run_sandbox_generation("make a game", 1, str(tmp_path / "run"), max_repair_attempts=2)
+
+    assert result["success"] is True
+    m = result["metrics"]
+    assert m["playthrough_attempted"] is False
+    assert "disabled" in m["playthrough_note"]
+
+
+def test_repair_message_describes_a_playthrough_loss_distinctly():
+    msg = _repair_message(
+        run_error=None, sanity_error=None,
+        playthrough_evidence="the policy played 60 env actions and never won",
+    )
+    assert "PLAYED-THROUGH PROOF" in msg
+    assert "never won" in msg
+    assert "Do NOT weaken the win condition" in msg
 
 
 def test_repair_message_hints_the_fix_for_the_view_image_absolute_path_crash():

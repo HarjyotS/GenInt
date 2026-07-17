@@ -474,6 +474,182 @@ def test_play_sandbox_world_rejects_a_non_sandbox_dir(tmp_path, monkeypatch):
         play_sandbox_world("runs/plain", "runs/out")
 
 
+# --- verify_playthrough (the played-through proof's checker): hermetic, faking _play_async so no
+# sandbox session or vision call ever happens.
+
+
+def _patch_play(monkeypatch, results):
+    """Patch vision_runner._play_async to return/raise each entry of `results` in order."""
+    import infinienv.sandbox.vision_runner as vr
+
+    calls = {"n": 0}
+
+    async def fake_play(run_dir, out_dir, **kw):
+        idx = min(calls["n"], len(results) - 1)
+        calls["n"] += 1
+        item = results[idx]
+        if isinstance(item, Exception):
+            raise item
+        return dict(item)
+
+    monkeypatch.setattr(vr, "_play_async", fake_play)
+    return calls
+
+
+def _run_verify(**kw):
+    import asyncio
+
+    from infinienv.sandbox.vision_runner import verify_playthrough
+
+    return asyncio.run(verify_playthrough("runs/x", **kw))
+
+
+def test_verify_playthrough_disabled_via_env(monkeypatch):
+    monkeypatch.setenv("INFINIENV_SANDBOX_PLAYTHROUGH", "0")
+    res = _run_verify()
+    assert res["attempted"] is False and res["won"] is None
+    assert "disabled" in res["note"]
+
+
+def test_verify_playthrough_skips_without_a_vision_key(monkeypatch):
+    monkeypatch.setenv("INFINIENV_SANDBOX_PLAYTHROUGH", "1")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    res = _run_verify()
+    assert res["attempted"] is False
+    assert "OPENAI_API_KEY" in res["note"]
+
+
+def test_verify_playthrough_win_on_first_try(monkeypatch):
+    monkeypatch.setenv("INFINIENV_SANDBOX_PLAYTHROUGH", "1")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    _patch_play(monkeypatch, [{"vision_success": True, "env_steps": 30, "decisions": 5}])
+    res = _run_verify(tries=2)
+    assert res["attempted"] is True and res["won"] is True and res["tries"] == 1
+    assert "30 env actions" in res["note"]
+
+
+def test_verify_playthrough_stochastic_retry_then_win(monkeypatch):
+    # The stand-in policy is stochastic: one loss must not fail the proof if a later try wins.
+    monkeypatch.setenv("INFINIENV_SANDBOX_PLAYTHROUGH", "1")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    calls = _patch_play(
+        monkeypatch,
+        [
+            {"vision_success": False, "env_steps": 60, "decisions": 10, "blocked_steps": 40,
+             "total_reward": 0.0, "had_minimap": False},
+            {"vision_success": True, "env_steps": 25, "decisions": 4},
+        ],
+    )
+    res = _run_verify(tries=2)
+    assert calls["n"] == 2
+    assert res["won"] is True and res["tries"] == 2
+
+
+def test_verify_playthrough_persistent_loss_carries_evidence(monkeypatch):
+    monkeypatch.setenv("INFINIENV_SANDBOX_PLAYTHROUGH", "1")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    _patch_play(
+        monkeypatch,
+        [{"vision_success": False, "env_steps": 60, "decisions": 10, "blocked_steps": 41,
+          "total_reward": 0.0, "episode_error": None, "had_minimap": False}],
+    )
+    res = _run_verify(tries=2)
+    assert res["attempted"] is True and res["won"] is False and res["tries"] == 2
+    assert "41" in res["evidence"]  # blocked count fed back as repair evidence
+    assert "minimap" in res["evidence"]  # the no-grid-state hint is included
+
+
+def test_is_grid_game_detects_exposed_cell_state():
+    # A game exposing integer wall/walkable cells is turn-based: hold/action-repeat must not apply
+    # (holding an action 6 frames lurched a knight 6 cells per decision in a live run).
+    from infinienv.sandbox.vision_play import _is_grid_game
+
+    class GridEnv:
+        walls = {(0, 0), (1, 0)}
+
+    class WalkableEnv:
+        walkable = {(2, 2), (2, 3)}
+
+    class ContinuousEnv:
+        dt = 0.05  # a platformer exposing no cell sets
+
+    assert _is_grid_game(GridEnv()) is True
+    assert _is_grid_game(WalkableEnv()) is True
+    assert _is_grid_game(ContinuousEnv()) is False
+
+
+def test_verify_playthrough_instant_death_hints_safe_spawn(monkeypatch):
+    # An episode that ends within a few actions with negative reward = the player died right at
+    # spawn (observed live: a slime kill in 5 actions, twice, deterministically). The evidence must
+    # name the safe-spawn fix.
+    monkeypatch.setenv("INFINIENV_SANDBOX_PLAYTHROUGH", "1")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    _patch_play(
+        monkeypatch,
+        [{"vision_success": False, "env_steps": 5, "decisions": 3, "blocked_steps": 1,
+          "total_reward": -5.0, "episode_error": None, "had_minimap": True}],
+    )
+    res = _run_verify(tries=1)
+    assert res["won"] is False
+    assert "died" in res["evidence"] and "spawn" in res["evidence"]
+
+
+def test_verify_playthrough_zero_reward_with_minimap_hints_dynamic_goal(monkeypatch):
+    # A minimap was present yet no objective ever advanced: the evidence must teach the classic
+    # cause -- a static final-goal marker in a multi-stage game routing the player into a locked
+    # gate -- and the fix (env.goal = the CURRENT objective).
+    monkeypatch.setenv("INFINIENV_SANDBOX_PLAYTHROUGH", "1")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    _patch_play(
+        monkeypatch,
+        [{"vision_success": False, "env_steps": 60, "decisions": 31, "blocked_steps": 0,
+          "total_reward": 0.0, "episode_error": None, "had_minimap": True}],
+    )
+    res = _run_verify(tries=1)
+    assert res["won"] is False
+    assert "CURRENT" in res["evidence"] and "env.goal" in res["evidence"]
+
+
+def test_verify_playthrough_missing_make_env_is_a_defect_not_a_skip(monkeypatch):
+    from infinienv.llm.base import ProviderError
+
+    monkeypatch.setenv("INFINIENV_SANDBOX_PLAYTHROUGH", "1")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    _patch_play(monkeypatch, [ProviderError("run_scene.make_env is missing -- regenerate")])
+    res = _run_verify(tries=2)
+    # a world with no playable interface is the generating agent's defect: it must FAIL and repair
+    assert res["attempted"] is True and res["won"] is False
+    assert "make_env" in res["evidence"]
+
+
+def test_verify_playthrough_infra_failure_is_a_skip_not_a_loss(monkeypatch):
+    from infinienv.llm.base import ProviderError
+
+    monkeypatch.setenv("INFINIENV_SANDBOX_PLAYTHROUGH", "1")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    _patch_play(
+        monkeypatch,
+        [ProviderError("The 'openai-agents' package (with sandbox support) is not installed.")],
+    )
+    res = _run_verify(tries=2)
+    assert res["attempted"] is False and res["won"] is None
+    assert "could not run" in res["note"]
+
+
+def test_verify_playthrough_game_crash_under_play_is_a_defect(monkeypatch):
+    from infinienv.llm.base import ProviderError
+
+    monkeypatch.setenv("INFINIENV_SANDBOX_PLAYTHROUGH", "1")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    _patch_play(
+        monkeypatch,
+        [ProviderError("the vision-play driver did not finish (exit 1): KeyError: 'plank'")],
+    )
+    res = _run_verify(tries=2)
+    assert res["attempted"] is True and res["won"] is False
+    assert "env.step must survive" in res["evidence"]
+
+
 def test_tar_workspace_uses_the_real_folder_and_injects_driver(tmp_path):
     # The hydration tar is built from the run's real sandbox_workspace/ (no host-side copy), with
     # the driver + config injected in-memory, __pycache__/.pyc excluded, and the folder left clean.

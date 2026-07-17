@@ -217,6 +217,52 @@ def test_backend_dispatch_openai_is_still_reachable_explicitly(monkeypatch, tmp_
     assert captured["model"] == runner_mod.DEFAULT_SANDBOX_MODEL  # the gpt default
 
 
+def test_transient_connection_failure_is_retried_without_consuming_a_repair_attempt(monkeypatch, tmp_path):
+    # A dropped connection mid-conversation (observed live: "API Error: Connection closed
+    # mid-response", surfaced by the SDK as an exception) must be retried in place -- fresh
+    # conversation, same workspace -- rather than burning a repair attempt on network noise.
+    pytest.importorskip("claude_agent_sdk")
+    import asyncio
+
+    import claude_agent_sdk
+
+    calls = {"n": 0}
+
+    async def fake_query(*, prompt, options, **_):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("Claude Code CLI: Connection closed mid-response")
+        return
+        yield  # pragma: no cover
+
+    async def _noop_sleep(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
+    monkeypatch.setattr(claude_runner.asyncio, "sleep", _noop_sleep)
+    monkeypatch.chdir(tmp_path)
+    stages: list[str] = []
+
+    result = asyncio.run(
+        claude_runner._run_async(
+            "make a maze", 1, "run", model="claude-sonnet-5", max_turns=1,
+            max_repair_attempts=0, refine_prompt=False, on_stage=stages.append,
+        )
+    )
+
+    assert calls["n"] == 2  # retried once, in place
+    assert any("not counted as a repair attempt" in s for s in stages)
+    assert result["repair_attempts"] == 0  # the (zero) repair budget was never touched
+    assert result["run_error"] is None  # the retry cleared the transient failure
+
+
+def test_is_transient_error_classification():
+    assert claude_runner._is_transient_error("API Error: Connection closed mid-response")
+    assert claude_runner._is_transient_error("upstream overloaded (529)")
+    assert not claude_runner._is_transient_error("Reached maximum number of turns (60)")
+    assert not claude_runner._is_transient_error(None)
+
+
 def test_claude_backend_does_not_require_a_key_and_never_sets_anthropic_api_key(monkeypatch, tmp_path):
     # The backend must NOT hard-require ANTHROPIC_API_KEY/CL_KEY -- it relies on the `claude` CLI's
     # own auth (the user's claude.ai login). With no key set it should proceed to run (we stub the
