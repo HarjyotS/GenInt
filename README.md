@@ -7,8 +7,8 @@ actually beat the game** before the run may claim success.
 > An agent builds. The harness verifies. A player other than the author must win.
 
 <p align="center">
-  <img src="docs/media/mario_rescue.gif" width="320" alt="An agent-built platformer: rescue the princess from the tower, past the chomping plants">
-  <img src="docs/media/procedural_cave.gif" width="440" alt="A procedurally generated cave with hazards, gems, and a locked exit">
+  <img src="docs/media/mario_rescue.gif" width="300" alt="An agent-built platformer: rescue the princess from the tower, past the chomping plants">
+  <img src="docs/media/crystal_cavern.gif" width="440" alt="An agent-built cave platformer: jump the gaps, dodge spikes, collect crystals, reach the door">
 </p>
 <p align="center"><em>Both worlds above were built, coded, illustrated, played, and verified end-to-end by the harness from one sentence each.</em></p>
 
@@ -27,8 +27,9 @@ the game's own code). A failed layer feeds concrete evidence back to the same ag
 | World (one-sentence prompt) | Replay | Verdict |
 |---|---|---|
 | *"A knight explores a small dungeon: collect two keys to unlock the treasure gate, avoid the patrolling slime, and reach the treasure"* | <img src="docs/media/dungeon_policy_win.gif" width="240"> | ✅ **the full stack, live**: geometry-validated · audit caught (then fixed) a real collision exploit · **beaten by the external vision policy** — this GIF *is* the policy's winning playthrough (58 actions, win judged by the game's own code) |
-| *"An Italian man in green rescues a princess from a tower, avoiding the plants that try to eat him"* | <img src="docs/media/mario_rescue.gif" width="200"> | ✅ built · **independently audited** |
-| *"A procedurally generated cave with uneven terrain, hazards, and gems — collect two before exiting"* | <img src="docs/media/procedural_cave.gif" width="240"> | ✅ built · verified — layout provably varies by seed |
+| *"An Italian man in green rescues a princess from a tower, avoiding the plants that try to eat him"* | <img src="docs/media/mario_rescue.gif" width="200"> | ✅ built · **independently audited** — real generated sprites |
+| *"A 2D side-view cave platformer: jump uneven ledges and gaps, dodge spikes, collect two crystals, reach the door"* | <img src="docs/media/crystal_cavern.gif" width="240"> | ✅ built · **independently audited** — real generated sprites + HUD |
+| *"A procedurally generated cave with uneven terrain, spike hazards, and glowing gems — collect two to unlock the exit"* | <img src="docs/media/procedural_cave2.gif" width="240"> | ✅ built · **independently audited** — layout generated from the seed |
 | *"Create a game of pong against a cpu"* | <img src="docs/media/pong.gif" width="220"> | ✅ built · **independently audited** |
 | *"A warehouse where shelves nearly block the package — exactly one valid path"* | <img src="docs/media/warehouse_path.gif" width="200"> | ✅ built · **independently audited** |
 | *"Make a 2D version of Minecraft"* | <img src="docs/media/mcraft_audit_fail.gif" width="220"> | ❌ **the honesty exhibit**: the agent self-reported success, but the independent audit found a faked mechanic (a placeable-but-unbreakable block) — final verdict **FAILED** |
